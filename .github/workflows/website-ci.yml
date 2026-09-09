@@ -1,0 +1,45 @@
+name: Website CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/website-ci.yml'
+  pull_request:
+    paths:
+      - 'website/**'
+      - '.github/workflows/website-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      VITE_DOWNLOAD_BASE_URL: ${{ vars.VITE_DOWNLOAD_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/package.json
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build website
+        run: npm run build
+      - name: Upload website dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtime-translator-website
+          path: website/dist
+          if-no-files-found: error
+          retention-days: 7
