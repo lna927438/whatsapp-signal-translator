@@ -6,8 +6,8 @@ export const whatsappInjectionScript = String.raw`
   const RT_ATTR = 'data-rt-translated';
   const CHINESE_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
   let sending = false;
-  let allowNativeEnterOnce = false;
-  let allowNativeClickOnce = false;
+  let nativeBypassUntil = 0;
+  let statusTimer;
 
   const selectors = {
     composer: [
@@ -46,8 +46,45 @@ export const whatsappInjectionScript = String.raw`
     return null;
   };
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const composerText = (composer) => (composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
   const containsChinese = (text) => CHINESE_RE.test(String(text || ''));
+  const bypassNative = () => Date.now() < nativeBypassUntil;
+
+  const showSendStatus = (message, type = 'working', autoHide = true) => {
+    let box = document.getElementById('rt-send-status');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'rt-send-status';
+      box.setAttribute('data-rt-ui', 'send-status');
+      Object.assign(box.style, {
+        position: 'fixed',
+        top: '76px',
+        right: '18px',
+        zIndex: '2147483647',
+        maxWidth: '420px',
+        padding: '10px 14px',
+        borderRadius: '10px',
+        fontSize: '13px',
+        lineHeight: '1.45',
+        color: '#ffffff',
+        boxShadow: '0 8px 28px rgba(0,0,0,.28)',
+        pointerEvents: 'none',
+        transition: 'opacity .18s ease',
+        opacity: '1'
+      });
+      document.body.appendChild(box);
+    }
+    clearTimeout(statusTimer);
+    box.textContent = message;
+    box.style.background = type === 'error' ? '#a72b3a' : type === 'success' ? '#176b4d' : '#2456a6';
+    box.style.opacity = '1';
+    if (autoHide) {
+      statusTimer = setTimeout(() => {
+        if (box) box.style.opacity = '0';
+      }, type === 'error' ? 6000 : 2200);
+    }
+  };
 
   const getComposer = (target) => {
     const targetElement = target instanceof Element ? target : target?.parentElement;
@@ -204,21 +241,39 @@ export const whatsappInjectionScript = String.raw`
 
   const waitForComposer = async (composer, expected) => {
     const wanted = String(expected || '').trim();
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < 16; i += 1) {
       if (composerText(composer) === wanted) return true;
-      await new Promise((resolve) => setTimeout(resolve, 35));
+      await sleep(35);
     }
     return composerText(composer) === wanted;
   };
 
-  const nativeSend = (composer) => {
+  const waitForSendCompletion = async (composer, sentText) => {
+    const expected = String(sentText || '').trim();
+    for (let i = 0; i < 24; i += 1) {
+      const current = composerText(composer);
+      if (!current || current !== expected) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+
+  const nativeSend = async (composer, api) => {
+    composer.focus();
+    nativeBypassUntil = Date.now() + 1600;
+
+    if (typeof api.sendNativeEnter === 'function') {
+      const accepted = await api.sendNativeEnter();
+      if (accepted) return true;
+    }
+
+    // Fallback for older runtimes. The main path above uses Electron's native
+    // input pipeline because WhatsApp can ignore JavaScript-synthetic events.
     const button = findSendButton();
     if (button) {
-      allowNativeClickOnce = true;
       button.click();
       return true;
     }
-    allowNativeEnterOnce = true;
     composer.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter',
       code: 'Enter',
@@ -233,20 +288,24 @@ export const whatsappInjectionScript = String.raw`
 
   const processSend = async (composer) => {
     const api = window.realtimeTranslator;
-    if (!api) return;
+    if (!api) {
+      showSendStatus('翻译桥接未加载，已阻止发送。请重新打开该 WhatsApp 窗口。', 'error');
+      return;
+    }
     const original = composerText(composer);
     if (!original) return;
 
     try {
+      showSendStatus('正在翻译并准备发送…', 'working', false);
       const settings = await api.getRuntimeSettings();
       const blockChinese = settings.blockChineseSend !== false;
 
       if (!settings.sendAutoTranslate) {
         if (blockChinese && containsChinese(original)) {
-          api.notifyError?.('已开启“禁止发送中文”。请开启发送翻译，或直接输入目标语言。');
-          return;
+          throw new Error('已开启“禁止发送中文”。请开启发送翻译，或直接输入目标语言。');
         }
-        nativeSend(composer);
+        showSendStatus('发送翻译已关闭，正在按原文发送…', 'working', false);
+        await nativeSend(composer, api);
         return;
       }
 
@@ -257,6 +316,7 @@ export const whatsappInjectionScript = String.raw`
         throw new Error('翻译结果仍包含中文，已阻止发送。请检查目标语言或 API 设置。');
       }
 
+      showSendStatus('翻译完成，正在写入译文…', 'working', false);
       replaceComposerText(composer, finalText);
       const updated = await waitForComposer(composer, finalText);
       if (!updated) throw new Error('无法把译文写入 WhatsApp 输入框，已阻止发送。');
@@ -266,18 +326,30 @@ export const whatsappInjectionScript = String.raw`
         throw new Error('输入框仍包含中文，已阻止发送，避免原文误发。');
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      nativeSend(composer);
+      showSendStatus('译文已生成，正在发送…', 'working', false);
+      const triggered = await nativeSend(composer, api);
+      if (!triggered) throw new Error('WhatsApp 原生发送动作未触发。');
+
+      const completed = await waitForSendCompletion(composer, finalText);
+      if (!completed) {
+        throw new Error('译文已经生成，但 WhatsApp 未确认发送。请再试一次；中文原文没有被发送。');
+      }
+      showSendStatus('已发送目标语言译文。', 'success');
     } catch (error) {
+      const message = String(error?.message || error);
+      if (composerText(composer) !== original && !composerText(composer)) {
+        // If WhatsApp already cleared the composer, the send succeeded. Do not
+        // restore or duplicate the original message.
+        showSendStatus('消息已发送。', 'success');
+        return;
+      }
       if (composerText(composer) !== original) replaceComposerText(composer, original);
-      api.notifyError?.(String(error?.message || error));
+      showSendStatus(message, 'error');
+      api.notifyError?.(message);
     }
   };
 
   const interceptSendNow = (event, composer) => {
-    // Critical: prevent WhatsApp's native handler synchronously. Waiting for
-    // an IPC/settings promise before preventDefault lets the original Chinese
-    // message escape before translation finishes.
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
@@ -292,33 +364,23 @@ export const whatsappInjectionScript = String.raw`
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+    if (bypassNative()) return;
     const composer = getComposer(event.target);
     if (!composer || !composer.contains(event.target)) return;
-
-    if (allowNativeEnterOnce) {
-      allowNativeEnterOnce = false;
-      return;
-    }
-
     interceptSendNow(event, composer);
   }, true);
 
   document.addEventListener('beforeinput', (event) => {
     if (event.inputType !== 'insertParagraph' || event.isComposing) return;
+    if (bypassNative()) return;
     const composer = getComposer(event.target);
     if (!composer || !composer.contains(event.target)) return;
-    if (allowNativeEnterOnce) return;
     interceptSendNow(event, composer);
   }, true);
 
   document.addEventListener('click', (event) => {
+    if (bypassNative()) return;
     if (!isSendTarget(event.target)) return;
-
-    if (allowNativeClickOnce) {
-      allowNativeClickOnce = false;
-      return;
-    }
-
     const composer = getComposer(event.target);
     if (!composer) return;
     interceptSendNow(event, composer);
