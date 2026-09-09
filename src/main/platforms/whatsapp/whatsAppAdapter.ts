@@ -11,6 +11,7 @@ export class WhatsAppAdapter {
   private readonly views = new Map<string, WebContentsView>()
   private activeId?: string
   private mainWindow?: BrowserWindow
+  private overlayOpen = false
 
   attachMainWindow(window: BrowserWindow): void {
     this.mainWindow = window
@@ -26,9 +27,6 @@ export class WhatsAppAdapter {
       this.views.set(accountId, view)
       this.mainWindow.contentView.addChildView(view)
 
-      // WhatsApp Web rejects Electron's default UA even when the embedded
-      // Chromium version is new enough. Present the embedded Chromium as a
-      // normal desktop Chrome browser before the first navigation.
       const userAgent = chromeUserAgent()
       view.webContents.setUserAgent(userAgent)
       view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
@@ -36,13 +34,24 @@ export class WhatsAppAdapter {
       await view.webContents.loadURL('https://web.whatsapp.com/', { userAgent })
     }
     this.activeId = accountId
-    view.setVisible(true)
+    view.setVisible(!this.overlayOpen)
     this.layout()
   }
 
   hideAll(): void {
-    for (const v of this.views.values()) if (!v.webContents.isDestroyed()) v.setVisible(false)
+    for (const view of this.views.values()) {
+      if (!view.webContents.isDestroyed()) view.setVisible(false)
+    }
     this.activeId = undefined
+  }
+
+  setOverlayOpen(open: boolean): void {
+    this.overlayOpen = open
+    if (!this.activeId) return
+    const view = this.views.get(this.activeId)
+    if (!view || view.webContents.isDestroyed()) return
+    view.setVisible(!open)
+    if (!open) this.layout()
   }
 
   remove(accountId: string): void {
@@ -71,9 +80,6 @@ export class WhatsAppAdapter {
     view.webContents.setUserAgent(userAgent)
     view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
 
-    // Keep request headers consistent with a mainstream desktop Chrome client.
-    // Each WhatsApp account uses its own persistent session/partition, so this
-    // listener is isolated per account.
     view.webContents.session.webRequest.onBeforeSendHeaders(
       { urls: ['https://web.whatsapp.com/*'] },
       (details, callback) => {
@@ -92,7 +98,11 @@ export class WhatsAppAdapter {
       return { action: 'deny' }
     })
     view.webContents.on('did-finish-load', async () => {
-      try { await view.webContents.executeJavaScript(whatsappInjectionScript, true) } catch (e) { console.error('WhatsApp injection failed', e) }
+      try {
+        await view.webContents.executeJavaScript(whatsappInjectionScript, true)
+      } catch (error) {
+        console.error('WhatsApp injection failed', error)
+      }
     })
     return view
   }
