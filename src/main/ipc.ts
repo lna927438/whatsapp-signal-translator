@@ -3,6 +3,7 @@ import type { BrowserWindow } from 'electron'
 import type { AppSettings, RuntimeSettings, TranslationRequest } from './types'
 import { AccountManager } from './accounts/accountManager'
 import { SettingsStore } from './storage/settingsStore'
+import { ProfileStore } from './storage/profileStore'
 import { TranslationEngine } from './translation/translationEngine'
 import { detectContactLanguage } from './translation/languageDetection'
 import { languages } from './translation/languages'
@@ -20,6 +21,7 @@ interface TranslatePayload {
 export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
   const accounts = new AccountManager()
   const settings = new SettingsStore()
+  const profile = new ProfileStore()
 
   const accountRuntime = async (accountId?: string, conversationId?: string): Promise<RuntimeSettings> => {
     const base = await settings.runtime()
@@ -67,6 +69,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     await accounts.remove(id)
     return true
   })
+
+  ipcMain.handle('profile:get', () => profile.get())
+  ipcMain.handle('profile:update', async (_e, patch: { username?: string; email?: string; planName?: string }) => profile.updateIdentity(patch))
+  ipcMain.handle('profile:topup', async (_e, characters: number, note?: string) => profile.addCharacters(characters, note || '字符充值'))
 
   ipcMain.handle('platform:focus', async (_e, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => {
     if (args.platform === 'whatsapp' && args.accountId) await whatsapp.focus(args.accountId)
