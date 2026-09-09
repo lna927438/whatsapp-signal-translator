@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('desktopAPI', {
+  authStatus: () => ipcRenderer.invoke('auth:status'),
+  authRegister: (input: any) => ipcRenderer.invoke('auth:register', input),
+  authLogin: (input: any) => ipcRenderer.invoke('auth:login', input),
+  authLogout: () => ipcRenderer.invoke('auth:logout'),
+  authResetPassword: (input: any) => ipcRenderer.invoke('auth:reset-password', input),
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   addAccount: (args: any) => ipcRenderer.invoke('accounts:add', args),
   updateAccount: (id: string, patch: any) => ipcRenderer.invoke('accounts:update', id, patch),
