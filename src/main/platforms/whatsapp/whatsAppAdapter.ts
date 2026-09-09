@@ -57,6 +57,21 @@ export class WhatsAppAdapter {
     if (!open) this.layout()
   }
 
+  sendNativeEnter(accountId?: string): boolean {
+    const id = accountId || this.activeId
+    if (!id) return false
+    const view = this.views.get(id)
+    if (!view || view.webContents.isDestroyed()) return false
+
+    // JavaScript-created KeyboardEvents are synthetic and WhatsApp may ignore
+    // them after an async translation. Electron sendInputEvent travels through
+    // Chromium's input pipeline and behaves like a real keyboard action.
+    view.webContents.focus()
+    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' })
+    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' })
+    return true
+  }
+
   remove(accountId: string): void {
     const view = this.views.get(accountId)
     if (view && !view.webContents.isDestroyed()) {
