@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
+import type { AppSettings } from './types'
 import { AccountManager } from './accounts/accountManager'
 import { SettingsStore } from './storage/settingsStore'
 import { TranslationEngine } from './translation/translationEngine'
@@ -44,6 +45,18 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return translator.translate({ text, sourceLanguage: current.localLanguage, targetLanguage: current.targetLanguage })
   })
   ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => translator.translate({ text, sourceLanguage: 'auto', targetLanguage }))
+  ipcMain.handle('translator:test-config', async (_e, value: AppSettings, text: string, targetLanguage: string) => {
+    try {
+      const translated = await translator.testWithSettings(value, {
+        text,
+        sourceLanguage: 'auto',
+        targetLanguage
+      })
+      return { ok: true, translated, message: 'API connection and translation test succeeded.' }
+    } catch (error: any) {
+      return { ok: false, message: String(error?.message || error) }
+    }
+  })
 
   ipcMain.handle('signal:runtime-status', () => signal.runtimeStatus())
   ipcMain.handle('signal:prepare-runtime', () => signal.prepareRuntime())
