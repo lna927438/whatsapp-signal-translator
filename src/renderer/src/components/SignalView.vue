@@ -22,6 +22,10 @@ let offDiagnostic: undefined | (() => void)
 
 const runtimeReady = computed(() => runtime.value?.state === 'ready')
 const runtimeBusy = computed(() => ['checking', 'downloading-signal', 'downloading-java', 'installing'].includes(runtime.value?.state))
+const translatedStyle = computed(() => ({
+  fontSize: `${Number(props.accountRecord.fontSize || 13)}px`,
+  color: props.accountRecord.translationColor || '#c8d4e4'
+}))
 const prepareLabel = computed(() => {
   if (runtimeBusy.value) return '准备中…'
   if (runtime.value?.state === 'error') return '修复 Signal 核心'
@@ -90,11 +94,9 @@ async function startLink() {
     if (!uri.startsWith('sgnl://linkdevice?')) throw new Error('Signal 返回了无效的设备关联链接。')
 
     linkUri.value = uri
-
     const finishPromise = window.desktopAPI.signalFinishLink(uri, '实时翻译器')
     qr.value = await QRCode.toDataURL(uri, { width: 260, margin: 2, errorCorrectionLevel: 'M' })
     status.value = '请立即在手机 Signal 中打开“设置 → 已关联设备”扫描二维码。电脑端已在等待确认。'
-
     void completeLink(finishPromise, attempt)
   } catch (error: any) {
     if (attempt !== linkAttempt) return
@@ -141,7 +143,7 @@ async function send() {
   if (!text || !activeAccount.value || !recipient.value.trim()) return
   input.value = ''
   try {
-    const message = await window.desktopAPI.signalSend(activeAccount.value, recipient.value.trim(), text)
+    const message = await window.desktopAPI.signalSend(props.accountRecord.id, activeAccount.value, recipient.value.trim(), text)
     messages.value.push(message)
   } catch (error: any) {
     input.value = text
@@ -218,7 +220,7 @@ onUnmounted(() => {
         <div v-for="message in messages" :key="message.timestamp + ':' + message.peer" class="msg" :class="{ mine: message.fromMe }">
           <div class="bubble">
             <div>{{ message.original }}</div>
-            <div v-if="message.translated && message.translated !== message.original" class="translated">{{ message.translated }}</div>
+            <div v-if="message.translated && message.translated !== message.original" class="translated" :style="translatedStyle">{{ message.translated }}</div>
           </div>
         </div>
       </div>
