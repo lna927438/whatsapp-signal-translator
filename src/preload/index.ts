@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   saveSettings: (value: any) => ipcRenderer.invoke('settings:save', value),
   getLanguages: () => ipcRenderer.invoke('translator:languages'),
   testTranslation: (text: string, target: string) => ipcRenderer.invoke('translator:test', text, target),
+  testTranslationConfig: (settings: any, text: string, target: string) => ipcRenderer.invoke('translator:test-config', settings, text, target),
   signalRuntimeStatus: () => ipcRenderer.invoke('signal:runtime-status'),
   signalPrepareRuntime: () => ipcRenderer.invoke('signal:prepare-runtime'),
   signalListAccounts: () => ipcRenderer.invoke('signal:list-accounts'),
