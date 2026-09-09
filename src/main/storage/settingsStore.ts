@@ -10,6 +10,9 @@ const defaults: AppSettings = {
   receiveAutoTranslate: true,
   sendAutoTranslate: true,
   blockChineseSend: true,
+  groupTranslate: false,
+  fontSize: 13,
+  translationColor: '#c8d4e4',
   openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6-luna'
 }
 
@@ -59,7 +62,10 @@ export class SettingsStore {
       provider: s.provider,
       receiveAutoTranslate: s.receiveAutoTranslate,
       sendAutoTranslate: s.sendAutoTranslate,
-      blockChineseSend: s.blockChineseSend !== false
+      blockChineseSend: s.blockChineseSend !== false,
+      groupTranslate: s.groupTranslate === true,
+      fontSize: Number(s.fontSize || 13),
+      translationColor: s.translationColor || '#c8d4e4'
     }
   }
 }
