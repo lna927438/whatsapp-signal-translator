@@ -10,6 +10,8 @@ function chromeUserAgent(): string {
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 export class WhatsAppAdapter {
   private readonly views = new Map<string, WebContentsView>()
   private activeId?: string
@@ -62,11 +64,30 @@ export class WhatsAppAdapter {
     if (!id) return false
     const view = this.views.get(id)
     if (!view || view.webContents.isDestroyed()) return false
-
-    // JavaScript-created KeyboardEvents are synthetic and WhatsApp may ignore
-    // them after an async translation. Electron sendInputEvent travels through
-    // Chromium's input pipeline and behaves like a real keyboard action.
     view.webContents.focus()
+    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' })
+    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' })
+    return true
+  }
+
+  async commitTranslatedSend(accountId: string | undefined, translatedText: string): Promise<boolean> {
+    const id = accountId || this.activeId
+    const text = String(translatedText || '').trim()
+    if (!id || !text) return false
+    const view = this.views.get(id)
+    if (!view || view.webContents.isDestroyed()) return false
+
+    // The composer is focused by the injected page before this IPC call.
+    // Select the original text, insert the translated text through Chromium's
+    // native editing path, and press Enter through Chromium's input pipeline.
+    // This keeps WhatsApp's internal editor state in sync and avoids synthetic
+    // DOM events that current WhatsApp Web may ignore.
+    view.webContents.focus()
+    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['control'] })
+    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['control'] })
+    await sleep(25)
+    await view.webContents.insertText(text)
+    await sleep(45)
     view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' })
     view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' })
     return true
