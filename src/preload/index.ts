@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   signalStartLink: () => ipcRenderer.invoke('signal:start-link'),
   signalFinishLink: (uri: string, name?: string) => ipcRenderer.invoke('signal:finish-link', uri, name),
   signalListContacts: (account: string) => ipcRenderer.invoke('signal:list-contacts', account),
-  signalSend: (account: string, recipient: string, text: string) => ipcRenderer.invoke('signal:send', account, recipient, text),
+  signalSend: (recordId: string, account: string, recipient: string, text: string) => ipcRenderer.invoke('signal:send', recordId, account, recipient, text),
   onSignalRuntime: (callback: (status: any) => void) => {
     const fn = (_e: any, status: any) => callback(status)
     ipcRenderer.on('signal:runtime', fn)
