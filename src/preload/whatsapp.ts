@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('realtimeTranslator', {
   translateOutgoing: (text: string) => ipcRenderer.invoke('translator:translate-outgoing', accountId, text),
   sendNativeEnter: () => ipcRenderer.invoke('whatsapp:send-native-enter', accountId),
   commitTranslatedSend: (text: string) => ipcRenderer.invoke('whatsapp:commit-translated-send', accountId, text),
+  reportStatus: (status: any) => ipcRenderer.send('translator:status', accountId, status),
   notifyError: (message: string) => ipcRenderer.send('translator:error', message)
 })
