@@ -52,6 +52,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return true
   })
   ipcMain.handle('whatsapp:send-native-enter', (_e, accountId?: string) => whatsapp.sendNativeEnter(accountId))
+  ipcMain.handle('whatsapp:commit-translated-send', (_e, accountId: string | undefined, text: string) => whatsapp.commitTranslatedSend(accountId, text))
 
   ipcMain.handle('settings:get', () => settings.get())
   ipcMain.handle('settings:save', async (_e, value) => {
