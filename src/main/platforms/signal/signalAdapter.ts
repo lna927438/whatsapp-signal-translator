@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron'
 import { SignalCli } from './signalCli'
+import type { SignalRuntimeStatus } from './signalRuntime'
 import { TranslationEngine } from '../../translation/translationEngine'
 import { SettingsStore } from '../../storage/settingsStore'
 
@@ -21,17 +22,31 @@ export class SignalAdapter {
   constructor(translator: TranslationEngine) {
     this.translator = translator
     this.cli.on('receive', (params) => void this.onReceive(params))
+    this.cli.on('runtime', (status: SignalRuntimeStatus) => {
+      this.mainWindow?.webContents.send('signal:runtime', status)
+    })
+    this.cli.on('stderr', (message: string) => {
+      this.mainWindow?.webContents.send('signal:diagnostic', message)
+    })
   }
 
   attachMainWindow(window: BrowserWindow): void { this.mainWindow = window }
   async start(): Promise<void> { await this.cli.start() }
   stop(): void { this.cli.stop() }
 
+  async runtimeStatus(): Promise<SignalRuntimeStatus> {
+    return this.cli.runtimeStatus()
+  }
+
+  async prepareRuntime(): Promise<SignalRuntimeStatus> {
+    return this.cli.prepareRuntime()
+  }
+
   async listAccounts(): Promise<string[]> {
     await this.start()
     const result = await this.cli.call('listAccounts', {})
     if (!Array.isArray(result)) return []
-    return result.map((v) => typeof v === 'string' ? v : (v.number || v.account || '')).filter(Boolean)
+    return result.map((value) => typeof value === 'string' ? value : (value.number || value.account || '')).filter(Boolean)
   }
 
   async startLink(): Promise<{ deviceLinkUri: string }> {
@@ -46,7 +61,13 @@ export class SignalAdapter {
 
   async listContacts(account: string): Promise<any[]> {
     await this.start()
-    const result = await this.cli.call('listContacts', { account, recipient: [], allRecipients: true, detailed: true, internal: false })
+    const result = await this.cli.call('listContacts', {
+      account,
+      recipient: [],
+      allRecipients: true,
+      detailed: true,
+      internal: false
+    })
     return Array.isArray(result) ? result : []
   }
 
@@ -58,7 +79,11 @@ export class SignalAdapter {
       : original
     const result = await this.cli.call('send', { account, recipient: [recipient], message: translated })
     const msg: SignalMessage = {
-      account, peer: recipient, fromMe: true, original, translated,
+      account,
+      peer: recipient,
+      fromMe: true,
+      original,
+      translated,
       timestamp: Number(result?.timestamp || Date.now())
     }
     this.mainWindow?.webContents.send('signal:message', msg)
