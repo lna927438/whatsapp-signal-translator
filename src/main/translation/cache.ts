@@ -12,17 +12,17 @@ interface CacheShape { [key: string]: CacheEntry }
 /**
  * Persistent translation cache.
  *
- * v2 keys intentionally do NOT include the translation provider/model. A message
- * that was already translated once should be restored locally after an app
- * restart, even if the provider/model or nearby context changes later. This is
- * especially important for WhatsApp's virtualized history, which recreates DOM
- * nodes every time a chat is opened or scrolled.
+ * A translated historical message must be restorable after restart without an
+ * API call. Keys therefore deliberately ignore provider/model and progressively
+ * relax volatile WhatsApp identifiers.
  *
  * Lookup order:
- *   1. stable message id (best)
+ *   1. stable message id
  *   2. same text + same recent context
- *   3. same text inside the same conversation (restart/UI-change fallback)
- *   4. legacy v0.3.0 provider-sensitive key (then migrate automatically)
+ *   3. same text inside the same conversation
+ *   4. same text inside the same account (conversation title may change)
+ *   5. same source/target text globally (last restart-safe fallback)
+ *   6. legacy v0.3.0 provider-sensitive key, then migrate automatically
  */
 export class TranslationCache {
   private readonly store = new JsonStore<CacheShape>('translation-cache.json', {})
@@ -32,12 +32,12 @@ export class TranslationCache {
     return createHash('sha256').update(value).digest('hex').slice(0, length)
   }
 
-  private textHash(text: string): string {
-    return this.hash(this.normalizeText(text), 24)
-  }
-
   private normalizeText(text: string): string {
     return String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim()
+  }
+
+  private textHash(text: string): string {
+    return this.hash(this.normalizeText(text), 24)
   }
 
   private contextHash(request: TranslationRequest): string {
@@ -48,20 +48,23 @@ export class TranslationCache {
     return this.hash(context, 20)
   }
 
-  private scope(request: TranslationRequest): string {
-    return [
-      request.sourceLanguage || 'auto',
-      request.targetLanguage,
-      request.accountId || '',
-      request.conversationId || ''
-    ].join('\u241f')
+  private languageScope(request: TranslationRequest): string {
+    return [request.sourceLanguage || 'auto', request.targetLanguage].join('\u241f')
+  }
+
+  private accountScope(request: TranslationRequest): string {
+    return [this.languageScope(request), request.accountId || ''].join('\u241f')
+  }
+
+  private conversationScope(request: TranslationRequest): string {
+    return [this.accountScope(request), request.conversationId || ''].join('\u241f')
   }
 
   private messageKey(request: TranslationRequest): string | undefined {
     if (!request.messageId) return undefined
     return this.hash([
-      'v2-message',
-      this.scope(request),
+      'v3-message',
+      this.conversationScope(request),
       request.messageId,
       this.textHash(request.text)
     ].join('\u241f'), 64)
@@ -69,22 +72,53 @@ export class TranslationCache {
 
   private contextualKey(request: TranslationRequest): string {
     return this.hash([
-      'v2-context',
-      this.scope(request),
+      'v3-context',
+      this.conversationScope(request),
       this.textHash(request.text),
       this.contextHash(request)
     ].join('\u241f'), 64)
   }
 
-  private looseConversationKey(request: TranslationRequest): string {
-    // This deliberately ignores provider/model and context. It is the safety net
-    // that prevents a WhatsApp UI change or a slightly different DOM context from
-    // charging the user again for the same historical line after a restart.
+  private conversationTextKey(request: TranslationRequest): string {
     return this.hash([
-      'v2-conversation-text',
-      this.scope(request),
+      'v3-conversation-text',
+      this.conversationScope(request),
       this.textHash(request.text)
     ].join('\u241f'), 64)
+  }
+
+  private accountTextKey(request: TranslationRequest): string {
+    return this.hash([
+      'v3-account-text',
+      this.accountScope(request),
+      this.textHash(request.text)
+    ].join('\u241f'), 64)
+  }
+
+  private globalTextKey(request: TranslationRequest): string {
+    return this.hash([
+      'v3-global-text',
+      this.languageScope(request),
+      this.textHash(request.text)
+    ].join('\u241f'), 64)
+  }
+
+  // v0.3.1 aliases, retained so existing local caches upgrade without cost.
+  private v2Keys(request: TranslationRequest): string[] {
+    const scope = [
+      request.sourceLanguage || 'auto',
+      request.targetLanguage,
+      request.accountId || '',
+      request.conversationId || ''
+    ].join('\u241f')
+    const textHash = this.textHash(request.text)
+    const keys: string[] = []
+    if (request.messageId) {
+      keys.push(this.hash(['v2-message', scope, request.messageId, textHash].join('\u241f'), 64))
+    }
+    keys.push(this.hash(['v2-context', scope, textHash, this.contextHash(request)].join('\u241f'), 64))
+    keys.push(this.hash(['v2-conversation-text', scope, textHash].join('\u241f'), 64))
+    return keys
   }
 
   private legacyKey(provider: string, request: TranslationRequest): string {
@@ -102,25 +136,35 @@ export class TranslationCache {
       .digest('hex')
   }
 
+  private entryMatchesText(entry: CacheEntry, text: string): boolean {
+    const normalized = this.normalizeText(text)
+    const hashes = new Set([
+      this.hash(normalized, 24),
+      this.hash(normalized, 20),
+      this.hash(text, 24),
+      this.hash(text, 20)
+    ])
+    return hashes.has(String(entry.textHash || ''))
+  }
+
   async get(provider: string, request: TranslationRequest): Promise<string | undefined> {
     const cache = await this.store.read()
-    const expectedTextHash = this.textHash(request.text)
-    const candidates = [
+    const primary = [
       this.messageKey(request),
       this.contextualKey(request),
-      this.looseConversationKey(request),
-      this.legacyKey(provider, request)
+      this.conversationTextKey(request),
+      this.accountTextKey(request),
+      this.globalTextKey(request)
     ].filter((value): value is string => Boolean(value))
+    const candidates = [...primary, ...this.v2Keys(request), this.legacyKey(provider, request)]
 
     for (const key of candidates) {
       const entry = cache[key]
-      if (!entry || entry.textHash !== expectedTextHash) continue
+      if (!entry || !this.entryMatchesText(entry, request.text)) continue
 
-      // Any legacy or secondary hit is promoted to all v2 aliases so the next
-      // restart becomes an immediate local restore with no API request.
-      if (key !== this.messageKey(request)) {
-        void this.set(provider, request, entry.translated)
-      }
+      // Promote every old/secondary hit into the full v3 alias set. From this
+      // point onward restarts, contact-title changes and DOM changes remain local.
+      if (!primary.includes(key)) void this.set(provider, request, entry.translated)
       return entry.translated
     }
     return undefined
@@ -134,22 +178,22 @@ export class TranslationCache {
         textHash: this.textHash(request.text),
         updatedAt: Date.now()
       }
-
       const keys = [
         this.messageKey(request),
         this.contextualKey(request),
-        this.looseConversationKey(request)
+        this.conversationTextKey(request),
+        this.accountTextKey(request),
+        this.globalTextKey(request)
       ].filter((value): value is string => Boolean(value))
 
       for (const key of keys) cache[key] = entry
 
-      // Three aliases per translation are expected. Keep roughly ten thousand
-      // translated messages while preventing the local JSON file from growing
-      // forever.
+      // Up to five aliases per translation are expected. Keep a generous local
+      // history while preventing the JSON file from growing forever.
       const allKeys = Object.keys(cache)
-      if (allKeys.length > 36000) {
+      if (allKeys.length > 60000) {
         allKeys.sort((a, b) => (cache[a]?.updatedAt || 0) - (cache[b]?.updatedAt || 0))
-        for (const key of allKeys.slice(0, allKeys.length - 30000)) delete cache[key]
+        for (const key of allKeys.slice(0, allKeys.length - 50000)) delete cache[key]
       }
       await this.store.write(cache)
     }).catch(() => undefined)
