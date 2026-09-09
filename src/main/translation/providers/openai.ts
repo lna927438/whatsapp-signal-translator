@@ -23,24 +23,66 @@ export class OpenAIProvider implements TranslationProvider {
       'Return only the translated text.'
     ].join(' ')
 
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: this.config.model,
-        reasoning: { effort: 'none' },
-        instructions,
-        input: request.text
+    let response: Response
+    try {
+      response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: this.config.model,
+          reasoning: { effort: 'none' },
+          instructions,
+          input: request.text,
+          store: false,
+          max_output_tokens: 4096
+        }),
+        signal: AbortSignal.timeout(30000)
       })
-    })
+    } catch (error: any) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new Error('OpenAI API connection timed out after 30 seconds. Check your network or proxy and try again.')
+      }
+      throw new Error(`Could not connect to OpenAI API: ${String(error?.message || error)}`)
+    }
 
-    if (!response.ok) throw new Error(`OpenAI translation failed: ${response.status} ${await response.text()}`)
-    const data = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }
-    const text = data.output_text || data.output?.flatMap((o) => o.content || []).find((c) => c.type === 'output_text')?.text
-    if (!text) throw new Error('OpenAI translation returned no text')
+    if (!response.ok) {
+      const detail = await readApiError(response)
+      if (response.status === 401) {
+        throw new Error('OpenAI rejected this API key (401). Check that the key was copied from the OpenAI API Platform and has not been revoked.')
+      }
+      if (response.status === 429) {
+        throw new Error(`OpenAI API quota or rate limit reached (429). API billing is separate from ChatGPT subscriptions.${detail ? ` ${detail}` : ''}`)
+      }
+      if (response.status === 404) {
+        throw new Error(`OpenAI model "${this.config.model}" is not available to this API project (404). Try gpt-5.6-luna or check the API project's model access.`)
+      }
+      if (response.status === 403) {
+        throw new Error(`OpenAI API permission denied (403). Check the API project's permissions and organization settings.${detail ? ` ${detail}` : ''}`)
+      }
+      throw new Error(`OpenAI API request failed (${response.status}).${detail ? ` ${detail}` : ''}`)
+    }
+
+    const data = await response.json() as {
+      output_text?: string
+      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>
+    }
+    const text = data.output_text || data.output?.flatMap((item) => item.content || []).find((item) => item.type === 'output_text')?.text
+    if (!text) throw new Error('OpenAI API succeeded but returned no translated text.')
     return text.trim()
+  }
+}
+
+async function readApiError(response: Response): Promise<string> {
+  try {
+    const raw = await response.text()
+    if (!raw) return ''
+    const parsed = JSON.parse(raw) as { error?: { message?: string } }
+    const message = parsed.error?.message || raw
+    return String(message).replace(/\s+/g, ' ').trim().slice(0, 420)
+  } catch {
+    return ''
   }
 }
