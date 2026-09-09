@@ -9,6 +9,7 @@ const defaults: AppSettings = {
   provider: 'openai',
   receiveAutoTranslate: true,
   sendAutoTranslate: true,
+  blockChineseSend: true,
   openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6-luna'
 }
 
@@ -57,7 +58,8 @@ export class SettingsStore {
       targetLanguage: s.targetLanguage,
       provider: s.provider,
       receiveAutoTranslate: s.receiveAutoTranslate,
-      sendAutoTranslate: s.sendAutoTranslate
+      sendAutoTranslate: s.sendAutoTranslate,
+      blockChineseSend: s.blockChineseSend !== false
     }
   }
 }
