@@ -16,6 +16,7 @@ export interface RuntimeSettings {
   provider: TranslationProviderName
   receiveAutoTranslate: boolean
   sendAutoTranslate: boolean
+  blockChineseSend: boolean
 }
 
 export interface ProviderSettings {
