@@ -54,9 +54,9 @@ export class SignalAdapter {
     return this.cli.call('startLink', {})
   }
 
-  async finishLink(deviceLinkUri: string, deviceName = 'Realtime Translator'): Promise<any> {
+  async finishLink(deviceLinkUri: string, deviceName = 'Realtime Translator'): Promise<{ number?: string }> {
     await this.start()
-    return this.cli.call('finishLink', { deviceLinkUri, deviceName }, 120000)
+    return this.cli.call('finishLink', { deviceLinkUri, deviceName }, 180000)
   }
 
   async listContacts(account: string): Promise<any[]> {
