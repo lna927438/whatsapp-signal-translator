@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     ipcRenderer.on('signal:message', fn)
     return () => ipcRenderer.removeListener('signal:message', fn)
   },
+  onTranslatorStatus: (callback: (status: any) => void) => {
+    const fn = (_e: any, status: any) => callback(status)
+    ipcRenderer.on('translator:status', fn)
+    return () => ipcRenderer.removeListener('translator:status', fn)
+  },
   onTranslatorError: (callback: (msg: string) => void) => {
     const fn = (_e: any, msg: string) => callback(msg)
     ipcRenderer.on('translator:error', fn)
