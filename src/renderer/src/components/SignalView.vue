@@ -20,6 +20,11 @@ let offDiagnostic: undefined | (() => void)
 
 const runtimeReady = computed(() => runtime.value?.state === 'ready')
 const runtimeBusy = computed(() => ['checking', 'downloading-signal', 'downloading-java', 'installing'].includes(runtime.value?.state))
+const prepareLabel = computed(() => {
+  if (runtimeBusy.value) return 'Preparing…'
+  if (runtime.value?.state === 'error') return 'Repair Signal Core'
+  return 'Prepare Signal automatically'
+})
 
 async function refreshRuntime() {
   try {
@@ -30,11 +35,13 @@ async function refreshRuntime() {
 }
 
 async function prepareRuntime() {
-  status.value = 'Preparing Signal core. The first setup downloads signal-cli and Java 25…'
+  status.value = runtime.value?.state === 'error'
+    ? 'Repairing Signal core…'
+    : 'Preparing Signal core. The first setup downloads signal-cli and Java 25…'
   diagnostic.value = ''
   try {
     runtime.value = await window.desktopAPI.signalPrepareRuntime()
-    status.value = 'Signal core is ready.'
+    status.value = 'Signal core is ready and verified.'
     await refreshAccounts()
   } catch (error: any) {
     status.value = error.message || String(error)
@@ -55,6 +62,7 @@ async function startLink() {
   if (!runtimeReady.value) await prepareRuntime()
   if (!runtimeReady.value) return
   try {
+    diagnostic.value = ''
     status.value = 'Starting Signal link…'
     const result = await window.desktopAPI.signalStartLink()
     linkUri.value = result.deviceLinkUri
@@ -141,10 +149,8 @@ onUnmounted(() => {
       <div v-if="typeof runtime.progress === 'number'" class="runtime-progress">
         <div :style="{ width: runtime.progress + '%' }"></div>
       </div>
-      <button class="primary" :disabled="runtimeBusy" @click="prepareRuntime">
-        {{ runtimeBusy ? 'Preparing…' : 'Prepare Signal automatically' }}
-      </button>
-      <small>First setup downloads the current signal-cli release and a Java 25 runtime from their upstream providers.</small>
+      <button class="primary" :disabled="runtimeBusy" @click="prepareRuntime">{{ prepareLabel }}</button>
+      <small>Setup uses the current signal-cli release and Java 25. If startup fails, Repair Signal Core replaces only the runtime files; linked-account data is kept separately.</small>
     </div>
 
     <div v-if="qr" class="qr-box">
@@ -153,7 +159,7 @@ onUnmounted(() => {
       <button class="primary" @click="finishLink">I scanned it — finish linking</button>
     </div>
     <p v-else-if="status" class="status">{{ status }}</p>
-    <p v-if="diagnostic && runtimeReady" class="diagnostic">{{ diagnostic }}</p>
+    <p v-if="diagnostic" class="diagnostic">{{ diagnostic }}</p>
 
     <template v-if="runtimeReady">
       <div class="signal-recipient">
