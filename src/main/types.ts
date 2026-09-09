@@ -83,3 +83,28 @@ export interface TranslationMetrics {
   lastError?: string
   lastUpdatedAt: number
 }
+
+export type CharacterLedgerType = 'translation' | 'recharge' | 'adjustment'
+
+export interface CharacterLedgerEntry {
+  id: string
+  type: CharacterLedgerType
+  characters: number
+  createdAt: number
+  note?: string
+  provider?: TranslationProviderName
+  accountId?: string
+  conversationId?: string
+}
+
+export interface UserProfile {
+  username: string
+  email: string
+  planName: string
+  totalCharacters: number
+  usedCharacters: number
+  remainingCharacters: number
+  registeredAt: number
+  updatedAt: number
+  ledger: CharacterLedgerEntry[]
+}
