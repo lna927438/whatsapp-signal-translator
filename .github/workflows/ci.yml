@@ -22,3 +22,14 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Package Windows installer
+        if: github.event_name == 'push'
+        run: npm run dist:win
+      - name: Upload Windows installer
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whatsapp-signal-translator-windows
+          path: release/**/*
+          if-no-files-found: error
+          retention-days: 7
