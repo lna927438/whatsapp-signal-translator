@@ -48,9 +48,14 @@ async function remove(account: Account) {
   }
   await reload()
 }
+async function openSettings() {
+  await window.desktopAPI.setOverlayOpen(true)
+  showSettings.value = true
+}
 async function closeSettings() {
   showSettings.value = false
   await reloadSettings()
+  await window.desktopAPI.setOverlayOpen(false)
 }
 
 onMounted(async () => {
@@ -73,7 +78,7 @@ onMounted(async () => {
           <span class="dot" :class="account.platform"></span><span class="account-label">{{ account.label }}</span><span class="close" @click.stop="remove(account)">×</span>
         </button>
       </div>
-      <button class="settings-btn" @click="showSettings=true">⚙ Settings</button>
+      <button class="settings-btn" @click="openSettings">⚙ Settings</button>
     </aside>
 
     <header class="toolbar">
@@ -86,7 +91,7 @@ onMounted(async () => {
         <span :class="{ on: settings?.receiveAutoTranslate }">Receive</span>
         <span :class="{ on: settings?.sendAutoTranslate }">Send</span>
       </div>
-      <button @click="showSettings=true">Translation Settings</button>
+      <button @click="openSettings">Translation Settings</button>
     </header>
 
     <main class="content" :class="{ 'signal-content': selectedIsSignal }">
