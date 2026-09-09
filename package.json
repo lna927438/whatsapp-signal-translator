@@ -13,6 +13,7 @@
     "dist:win": "npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
+    "@supabase/supabase-js": "latest",
     "qrcode": "latest",
     "vue": "latest"
   },
