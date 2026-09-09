@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { AppSettings } from './types'
+import type { AppSettings, RuntimeSettings } from './types'
 import { AccountManager } from './accounts/accountManager'
 import { SettingsStore } from './storage/settingsStore'
 import { TranslationEngine } from './translation/translationEngine'
@@ -11,6 +11,25 @@ import { SignalAdapter } from './platforms/signal/signalAdapter'
 export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
   const accounts = new AccountManager()
   const settings = new SettingsStore()
+
+  const accountRuntime = async (accountId?: string): Promise<RuntimeSettings> => {
+    const base = await settings.runtime()
+    if (!accountId) return base
+    const all = await accounts.list()
+    const account = all.find((item) => item.id === accountId)
+    if (!account) return base
+    return {
+      ...base,
+      localLanguage: account.localLanguage || base.localLanguage,
+      targetLanguage: account.targetLanguage || base.targetLanguage,
+      receiveAutoTranslate: account.receiveAutoTranslate ?? base.receiveAutoTranslate,
+      sendAutoTranslate: account.sendAutoTranslate ?? base.sendAutoTranslate,
+      blockChineseSend: account.blockChineseSend ?? base.blockChineseSend,
+      groupTranslate: account.groupTranslate ?? base.groupTranslate,
+      fontSize: Number(account.fontSize || base.fontSize || 13),
+      translationColor: account.translationColor || base.translationColor || '#c8d4e4'
+    }
+  }
 
   ipcMain.handle('accounts:list', () => accounts.list())
   ipcMain.handle('accounts:add', async (_e, args: { platform: 'whatsapp' | 'signal'; label?: string; signalAccount?: string }) => accounts.add(args.platform, args.label, args.signalAccount))
@@ -38,14 +57,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     await settings.save(value)
     return true
   })
-  ipcMain.handle('translator:get-runtime-settings', () => settings.runtime())
+  ipcMain.handle('translator:get-runtime-settings', (_e, accountId?: string) => accountRuntime(accountId))
   ipcMain.handle('translator:languages', () => languages)
-  ipcMain.handle('translator:translate-incoming', async (_e, text: string) => {
-    const current = await settings.get()
+  ipcMain.handle('translator:translate-incoming', async (_e, accountId: string | undefined, text: string) => {
+    const current = await accountRuntime(accountId)
     return translator.translate({ text, sourceLanguage: 'auto', targetLanguage: current.localLanguage })
   })
-  ipcMain.handle('translator:translate-outgoing', async (_e, text: string) => {
-    const current = await settings.get()
+  ipcMain.handle('translator:translate-outgoing', async (_e, accountId: string | undefined, text: string) => {
+    const current = await accountRuntime(accountId)
     return translator.translate({ text, sourceLanguage: current.localLanguage, targetLanguage: current.targetLanguage })
   })
   ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => translator.translate({ text, sourceLanguage: 'auto', targetLanguage }))
@@ -56,7 +75,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
         sourceLanguage: 'auto',
         targetLanguage
       })
-      return { ok: true, translated, message: 'API connection and translation test succeeded.' }
+      return { ok: true, translated, message: 'API 连接和翻译测试成功。' }
     } catch (error: any) {
       return { ok: false, message: String(error?.message || error) }
     }
@@ -68,7 +87,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('signal:start-link', () => signal.startLink())
   ipcMain.handle('signal:finish-link', (_e, uri: string, name?: string) => signal.finishLink(uri, name))
   ipcMain.handle('signal:list-contacts', (_e, account: string) => signal.listContacts(account))
-  ipcMain.handle('signal:send', (_e, account: string, recipient: string, text: string) => signal.send(account, recipient, text))
+  ipcMain.handle('signal:send', (_e, recordId: string, account: string, recipient: string, text: string) => signal.send(recordId, account, recipient, text))
 
   ipcMain.on('translator:error', (_e, message: string) => mainWindow.webContents.send('translator:error', message))
 }
