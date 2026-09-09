@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import SignalView from './components/SignalView.vue'
 
+type ContactPreference = { language: string; name?: string; updatedAt: number; source?: 'manual'|'auto' }
 type Account = {
   id: string
   platform: 'whatsapp'|'signal'
@@ -16,9 +17,11 @@ type Account = {
   groupTranslate?: boolean
   fontSize?: number
   translationColor?: string
+  contactLanguages?: Record<string, ContactPreference>
 }
 
 type LiveStatus = { state: 'ready'|'working'|'success'|'error'; message: string; at?: number }
+type ConversationInfo = { id: string; name?: string }
 
 const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
@@ -27,12 +30,20 @@ const error = ref('')
 const settings = ref<any>(null)
 const languages = ref<any[]>([])
 const liveStatuses = ref<Record<string, LiveStatus>>({})
+const conversations = ref<Record<string, ConversationInfo>>({})
+const metrics = ref<any>({ totalRequests: 0, providerCalls: 0, cacheHits: 0, dedupHits: 0, activeRequests: 0, queueDepth: 0, lastLatencyMs: 0, averageLatencyMs: 0 })
 const controlFeedback = ref<{ state: 'idle'|'saving'|'saved'|'error'; message: string }>({ state: 'idle', message: '' })
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined
+let metricsTimer: ReturnType<typeof setInterval> | undefined
 
 const selectedIsSignal = computed(() => selected.value?.platform === 'signal')
+const selectedConversation = computed(() => selected.value?.id ? conversations.value[selected.value.id] : undefined)
+const contactPreference = computed(() => {
+  const conversationId = selectedConversation.value?.id
+  return conversationId && selected.value?.contactLanguages ? selected.value.contactLanguages[conversationId] : undefined
+})
 const localLanguage = computed(() => selected.value?.localLanguage || settings.value?.localLanguage || 'zh-CN')
-const targetLanguage = computed(() => selected.value?.targetLanguage || settings.value?.targetLanguage || 'en-US')
+const targetLanguage = computed(() => contactPreference.value?.language || selected.value?.targetLanguage || settings.value?.targetLanguage || 'en-US')
 const receiveAutoTranslate = computed(() => selected.value?.receiveAutoTranslate ?? settings.value?.receiveAutoTranslate ?? true)
 const sendAutoTranslate = computed(() => selected.value?.sendAutoTranslate ?? settings.value?.sendAutoTranslate ?? true)
 const blockChineseSend = computed(() => selected.value?.blockChineseSend ?? settings.value?.blockChineseSend ?? true)
@@ -61,6 +72,18 @@ const selectedLiveStatus = computed<LiveStatus>(() => {
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
   return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
 })
+const metricLabel = computed(() => {
+  const delay = Number(metrics.value?.lastLatencyMs || 0)
+  const queue = Number(metrics.value?.queueDepth || 0)
+  const hits = Number(metrics.value?.cacheHits || 0) + Number(metrics.value?.dedupHits || 0)
+  return `延迟 ${delay} ms · 队列 ${queue} · 缓存 ${hits}`
+})
+const contactLabel = computed(() => {
+  const conversation = selectedConversation.value
+  if (!conversation?.id) return ''
+  const source = contactPreference.value?.source === 'manual' ? '手动' : contactPreference.value?.source === 'auto' ? '自动识别' : '账号默认'
+  return `${conversation.name || '当前联系人'} · ${source}`
+})
 
 async function reload() {
   accounts.value = await window.desktopAPI.listAccounts()
@@ -73,6 +96,10 @@ async function reload() {
 async function reloadSettings() {
   settings.value = await window.desktopAPI.getSettings()
   if (!languages.value.length) languages.value = await window.desktopAPI.getLanguages()
+}
+
+async function reloadMetrics() {
+  try { metrics.value = await window.desktopAPI.getTranslationMetrics() } catch { /* ignore transient UI metric errors */ }
 }
 
 async function addWhatsApp() {
@@ -133,6 +160,28 @@ function setNumberField(field: string, event: Event) {
   void patchSelected({ [field]: value })
 }
 
+async function setTargetLanguage(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  const account = selected.value
+  const conversation = selectedConversation.value
+  if (account?.platform === 'whatsapp' && conversation?.id) {
+    setFeedback('saving', '正在保存联系人语言…')
+    try {
+      const updated = await window.desktopAPI.setContactLanguage(account.id, conversation.id, value, conversation.name)
+      if (updated) {
+        selected.value = updated
+        const index = accounts.value.findIndex((item) => item.id === updated.id)
+        if (index >= 0) accounts.value[index] = updated
+      }
+      setFeedback('saved', '联系人语言已保存')
+    } catch (e: any) {
+      setFeedback('error', e?.message || '联系人语言保存失败')
+    }
+    return
+  }
+  await patchSelected({ targetLanguage: value })
+}
+
 async function openSettings() {
   await window.desktopAPI.setOverlayOpen(true)
   showSettings.value = true
@@ -145,7 +194,13 @@ async function closeSettings() {
 }
 
 onMounted(async () => {
-  await Promise.all([reload(), reloadSettings()])
+  await Promise.all([reload(), reloadSettings(), reloadMetrics()])
+  metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
+  window.desktopAPI.onWhatsAppConversation((info: any) => {
+    if (!info?.accountId || !info?.conversationId) return
+    conversations.value = { ...conversations.value, [info.accountId]: { id: info.conversationId, name: info.conversationName } }
+  })
+  window.desktopAPI.onContactLanguage(() => { void reload() })
   window.desktopAPI.onTranslatorStatus((status: any) => {
     if (!status?.accountId) return
     liveStatuses.value = {
@@ -161,6 +216,11 @@ onMounted(async () => {
     error.value = message
     setTimeout(() => error.value = '', 6500)
   })
+})
+
+onUnmounted(() => {
+  if (metricsTimer) clearInterval(metricsTimer)
+  if (feedbackTimer) clearTimeout(feedbackTimer)
 })
 </script>
 
@@ -184,7 +244,7 @@ onMounted(async () => {
           <input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />
           <span>对方的语言</span>
         </label>
-        <select :value="targetLanguage" @change="setStringField('targetLanguage', $event)">
+        <select :value="targetLanguage" @change="setTargetLanguage">
           <option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option>
         </select>
 
@@ -223,9 +283,9 @@ onMounted(async () => {
         <span class="control-name">禁止中文</span>
         <button class="mini-switch" :class="{ on: blockChineseSend }" :title="blockChineseSend ? '中文原文禁止直接发送' : '允许直接发送中文'" @click="patchSelected({ blockChineseSend: !blockChineseSend })"><span></span></button>
 
-        <div class="live-status" :class="selectedLiveStatus.state" :title="selectedLiveStatus.message">
-          <i></i><span>{{ selectedLiveStatus.message }}</span>
-        </div>
+        <div class="live-status" :class="selectedLiveStatus.state" :title="selectedLiveStatus.message"><i></i><span>{{ selectedLiveStatus.message }}</span></div>
+        <span class="metric-badge" :title="`累计请求 ${metrics.totalRequests || 0}，API 调用 ${metrics.providerCalls || 0}，平均延迟 ${metrics.averageLatencyMs || 0} ms`">{{ metricLabel }}</span>
+        <span v-if="contactLabel" class="contact-badge" :title="selectedConversation?.id">{{ contactLabel }}</span>
         <span v-if="controlFeedback.message" class="save-feedback" :class="controlFeedback.state">{{ controlFeedback.message }}</span>
         <span class="precise-badge">精准翻译</span>
       </div>
@@ -238,9 +298,7 @@ onMounted(async () => {
 
     <main class="content" :class="{ 'signal-content': selectedIsSignal }">
       <SignalView v-if="selectedIsSignal" :account-record="selected!" @linked="reload" />
-      <div v-else-if="!selected" class="empty">
-        <h2>添加或选择一个账号</h2><p>WhatsApp 使用原生 WhatsApp Web 界面，Signal 使用内置聊天界面。</p>
-      </div>
+      <div v-else-if="!selected" class="empty"><h2>添加或选择一个账号</h2><p>WhatsApp 使用原生 WhatsApp Web 界面，Signal 使用内置聊天界面。</p></div>
     </main>
 
     <SettingsPanel v-if="showSettings" @close="closeSettings" />
