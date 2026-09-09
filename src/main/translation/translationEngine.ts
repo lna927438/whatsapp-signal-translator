@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import type { AppSettings, TranslationMetrics, TranslationRequest } from '../types'
 import { SettingsStore } from '../storage/settingsStore'
 import { ProfileStore } from '../storage/profileStore'
+import { ChargeRegistry } from '../storage/chargeRegistry'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
 import { OpenAIProvider } from './providers/openai'
@@ -18,6 +19,7 @@ interface QueueJob {
 export class TranslationEngine {
   private readonly settings = new SettingsStore()
   private readonly profile = new ProfileStore()
+  private readonly charges = new ChargeRegistry()
   private readonly cache = new TranslationCache()
   private readonly inFlight = new Map<string, Promise<string>>()
   private readonly queue: QueueJob[] = []
@@ -52,6 +54,10 @@ export class TranslationEngine {
     return { ...this.metricsState, activeRequests: this.activeRequests, queueDepth: this.queue.length }
   }
 
+  private normalizeText(text: string): string {
+    return String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim()
+  }
+
   private requestKey(provider: string, request: TranslationRequest): string {
     const context = (request.context || []).slice(-4).map((item) => `${item.role}:${item.text}`).join('\u241e')
     return createHash('sha256').update([
@@ -63,6 +69,19 @@ export class TranslationEngine {
       request.messageId || '',
       request.text,
       context
+    ].join('\u241f')).digest('hex')
+  }
+
+  private chargeFingerprint(request: TranslationRequest): string {
+    // The charging key intentionally ignores provider, context, WhatsApp DOM ids,
+    // account ids and conversation titles. Those values can change across app
+    // restarts even though the user is looking at the exact same source text.
+    // A source/target/text translation is therefore charged at most once locally.
+    return createHash('sha256').update([
+      'translation-charge-v1',
+      request.sourceLanguage || 'auto',
+      request.targetLanguage,
+      this.normalizeText(request.text)
     ].join('\u241f')).digest('hex')
   }
 
@@ -124,14 +143,32 @@ export class TranslationEngine {
         this.recordLatency(latency)
         this.metricsState.lastError = undefined
 
-        await this.profile.consumeCharacters(charge, {
-          provider: settings.provider,
-          accountId: normalized.accountId,
-          conversationId: normalized.conversationId,
-          note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
-        })
-
+        // Persist the translation BEFORE touching the character balance. If the
+        // app is closed immediately after an API response, the next launch still
+        // restores the result locally instead of repeating the API request.
         if (useCache) await this.cache.set(settings.provider, normalized, translated)
+
+        // Character billing is separately idempotent. Even if a future cache
+        // migration or DOM change somehow causes another API request, the same
+        // source/target/text translation cannot decrement the local quota twice.
+        if (useCache) {
+          await this.charges.runOnce(this.chargeFingerprint(normalized), async () => {
+            await this.profile.consumeCharacters(charge, {
+              provider: settings.provider,
+              accountId: normalized.accountId,
+              conversationId: normalized.conversationId,
+              note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
+            })
+          })
+        } else {
+          await this.profile.consumeCharacters(charge, {
+            provider: settings.provider,
+            accountId: normalized.accountId,
+            conversationId: normalized.conversationId,
+            note: 'API 翻译测试'
+          })
+        }
+
         return translated
       } catch (error: any) {
         const latency = Date.now() - started
