@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld('realtimeTranslator', {
   getRuntimeSettings: () => ipcRenderer.invoke('translator:get-runtime-settings', accountId),
   translateIncoming: (text: string) => ipcRenderer.invoke('translator:translate-incoming', accountId, text),
   translateOutgoing: (text: string) => ipcRenderer.invoke('translator:translate-outgoing', accountId, text),
+  sendNativeEnter: () => ipcRenderer.invoke('whatsapp:send-native-enter', accountId),
   notifyError: (message: string) => ipcRenderer.send('translator:error', message)
 })
