@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SignalView from './components/SignalView.vue'
+import { cloudApi } from './lib/cloudApi'
 
 type ContactPreference = { language: string; name?: string; updatedAt: number; source?: 'manual'|'auto' }
 type Account = {
@@ -38,6 +39,7 @@ const metrics = ref<any>({ totalRequests: 0, providerCalls: 0, cacheHits: 0, ded
 const controlFeedback = ref<{ state: 'idle'|'saving'|'saved'|'error'; message: string }>({ state: 'idle', message: '' })
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined
 let metricsTimer: ReturnType<typeof setInterval> | undefined
+let walletTimer: ReturnType<typeof setInterval> | undefined
 
 const selectedIsSignal = computed(() => selected.value?.platform === 'signal')
 const selectedConversation = computed(() => selected.value?.id ? conversations.value[selected.value.id] : undefined)
@@ -55,23 +57,24 @@ const fontSize = computed(() => Number(selected.value?.fontSize || settings.valu
 const translationColor = computed(() => selected.value?.translationColor || settings.value?.translationColor || '#c8d4e4')
 const apiConfigured = computed(() => {
   const provider = settings.value?.provider
-  if (provider === 'openai') return Boolean(String(settings.value?.openaiApiKey || '').trim())
+  if (provider === 'openai') return true
   if (provider === 'deepl') return Boolean(String(settings.value?.deeplApiKey || '').trim())
   if (provider === 'google') return Boolean(String(settings.value?.googleApiKey || '').trim())
   return false
 })
 const channelName = computed(() => {
-  if (settings.value?.provider === 'openai') return settings.value?.openaiModel === 'gpt-5.6-luna' ? 'GPT-5.6 LUNA' : String(settings.value?.openaiModel || 'OpenAI')
+  if (settings.value?.provider === 'openai') return 'GPT-5.6 LUNA'
   if (settings.value?.provider === 'deepl') return 'DeepL'
   return 'Google Translate'
 })
 const serverName = computed(() => {
-  if (settings.value?.provider === 'openai') return 'OpenAI API'
+  if (settings.value?.provider === 'openai') return 'Cloudflare API'
   if (settings.value?.provider === 'deepl') return 'DeepL API'
   return 'Google API'
 })
+const serverStatusLabel = computed(() => settings.value?.provider === 'openai' ? '云端已配置' : (apiConfigured.value ? '密钥已配置' : '未配置'))
 const selectedLiveStatus = computed<LiveStatus>(() => {
-  if (!apiConfigured.value) return { state: 'error', message: 'API 密钥未配置' }
+  if (!apiConfigured.value) return { state: 'error', message: '翻译服务未配置' }
   if (Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: '字符额度已用完' }
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
   return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
@@ -95,6 +98,26 @@ const quotaLow = computed(() => {
   return total > 0 && remaining / total <= 0.1
 })
 
+function cloudProfileFromState(state: any) {
+  const wallet = state?.wallet || {}
+  const cloudProfile = state?.profile || {}
+  const user = state?.user || {}
+  const remaining = Number(wallet.balance || 0)
+  const used = Number(wallet.lifetime_debited || 0)
+  const credited = Number(wallet.lifetime_credited || 0)
+  return {
+    username: cloudProfile.username || '',
+    email: user.email || cloudProfile.email || '',
+    planName: cloudProfile.plan_code || 'free',
+    totalCharacters: Math.max(remaining + used, credited, 0),
+    usedCharacters: used,
+    remainingCharacters: remaining,
+    registeredAt: cloudProfile.created_at ? Date.parse(cloudProfile.created_at) : 0,
+    updatedAt: wallet.updated_at ? Date.parse(wallet.updated_at) : Date.now(),
+    cloud: true
+  }
+}
+
 async function reload() {
   accounts.value = await window.desktopAPI.listAccounts()
   if (selected.value) {
@@ -109,12 +132,17 @@ async function reloadSettings() {
 }
 
 async function reloadProfile() {
-  try { profile.value = await window.desktopAPI.getProfile() } catch { /* ignore transient profile read errors */ }
+  try {
+    profile.value = cloudProfileFromState(await cloudApi.me())
+  } catch {
+    if (!profile.value) {
+      profile.value = { totalCharacters: 0, usedCharacters: 0, remainingCharacters: 0, planName: 'free', cloud: true }
+    }
+  }
 }
 
 async function reloadMetrics() {
   try { metrics.value = await window.desktopAPI.getTranslationMetrics() } catch { /* ignore transient UI metric errors */ }
-  await reloadProfile()
 }
 
 async function addWhatsApp() {
@@ -204,7 +232,7 @@ async function openSettings() {
 
 async function closeSettings() {
   showSettings.value = false
-  await reloadSettings()
+  await Promise.all([reloadSettings(), reloadProfile()])
   await window.desktopAPI.setOverlayOpen(false)
 }
 
@@ -221,12 +249,14 @@ async function closeProfile() {
 }
 
 function onProfileUpdated(next: any) {
-  profile.value = next
+  if (next?.wallet || next?.profile || next?.user) profile.value = cloudProfileFromState(next)
+  else void reloadProfile()
 }
 
 onMounted(async () => {
-  await Promise.all([reload(), reloadSettings(), reloadMetrics()])
+  await Promise.all([reload(), reloadSettings(), reloadMetrics(), reloadProfile()])
   metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
+  walletTimer = setInterval(() => { void reloadProfile() }, 15000)
   window.desktopAPI.onWhatsAppConversation((info: any) => {
     if (!info?.accountId || !info?.conversationId) return
     conversations.value = { ...conversations.value, [info.accountId]: { id: info.conversationId, name: info.conversationName } }
@@ -242,6 +272,7 @@ onMounted(async () => {
         at: status.at || Date.now()
       }
     }
+    if (status?.state === 'success') void reloadProfile()
   })
   window.desktopAPI.onTranslatorError((message: string) => {
     error.value = message
@@ -251,6 +282,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (metricsTimer) clearInterval(metricsTimer)
+  if (walletTimer) clearInterval(walletTimer)
   if (feedbackTimer) clearTimeout(feedbackTimer)
 })
 </script>
@@ -267,7 +299,7 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="sidebar-bottom">
-        <button class="profile-btn" @click="openProfile"><span>👤 个人中心</span><small>剩余 {{ remainingCharsLabel }} 字符</small></button>
+        <button class="profile-btn" @click="openProfile"><span>👤 个人中心</span><small>云端剩余 {{ remainingCharsLabel }} 字符</small></button>
         <button class="settings-btn" @click="openSettings">⚙ 设置</button>
       </div>
     </aside>
@@ -306,7 +338,7 @@ onUnmounted(() => {
         </select>
 
         <span class="control-name">翻译服务器</span>
-        <div class="server-box"><b>{{ serverName }}</b><em :class="{ ready: apiConfigured }">{{ apiConfigured ? '密钥已配置' : '未配置' }}</em></div>
+        <div class="server-box"><b>{{ serverName }}</b><em :class="{ ready: apiConfigured }">{{ serverStatusLabel }}</em></div>
 
         <span class="control-name">字体颜色</span>
         <div class="color-box">
