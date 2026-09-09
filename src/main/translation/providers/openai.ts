@@ -14,12 +14,17 @@ export class OpenAIProvider implements TranslationProvider {
       : 'the source language automatically detected from the text'
 
     const instructions = [
-      'You are a precise translation engine.',
+      'You are a precise translation engine for real-time private chat messages.',
       `Translate from ${source} into ${target}.`,
       'Preserve the exact meaning, intent, names, numbers, dates, URLs, emojis, punctuation and line breaks.',
       'Do not summarize, embellish, soften, intensify, answer questions, explain, comment, or add quotation marks.',
-      'Keep proper nouns unchanged unless there is a standard target-language form.',
-      'If the text is already in the target language, return it unchanged.',
+      'Translate slang, insults, internet expressions, colloquialisms and common abbreviations when they have a clear established meaning.',
+      'Do not treat a word as a proper noun merely because it is short, capitalized, or appears alone.',
+      'For a one-word or very short message, translate it whenever it is semantically translatable.',
+      'When translating from Chinese, interpret common Chinese internet abbreviations written with Latin letters (for example SB when clearly used as Chinese slang) by their intended Chinese meaning instead of blindly preserving the letters.',
+      'When translating into Chinese, render common English chat slang such as simp, idiot, fool, WTF and similar expressions into the closest concise Chinese meaning when context makes the meaning clear.',
+      'Keep genuine proper nouns unchanged unless there is a standard target-language form.',
+      'If the text is already in the target language and is not a source-language slang abbreviation, return it unchanged.',
       'Return only the translated text.'
     ].join(' ')
 
