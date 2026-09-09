@@ -18,12 +18,17 @@ type Account = {
   translationColor?: string
 }
 
+type LiveStatus = { state: 'ready'|'working'|'success'|'error'; message: string; at?: number }
+
 const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
 const showSettings = ref(false)
 const error = ref('')
 const settings = ref<any>(null)
 const languages = ref<any[]>([])
+const liveStatuses = ref<Record<string, LiveStatus>>({})
+const controlFeedback = ref<{ state: 'idle'|'saving'|'saved'|'error'; message: string }>({ state: 'idle', message: '' })
+let feedbackTimer: ReturnType<typeof setTimeout> | undefined
 
 const selectedIsSignal = computed(() => selected.value?.platform === 'signal')
 const localLanguage = computed(() => selected.value?.localLanguage || settings.value?.localLanguage || 'zh-CN')
@@ -34,7 +39,13 @@ const blockChineseSend = computed(() => selected.value?.blockChineseSend ?? sett
 const groupTranslate = computed(() => selected.value?.groupTranslate ?? false)
 const fontSize = computed(() => Number(selected.value?.fontSize || settings.value?.fontSize || 13))
 const translationColor = computed(() => selected.value?.translationColor || settings.value?.translationColor || '#c8d4e4')
-const apiConfigured = computed(() => Boolean(settings.value?.openaiApiKey || settings.value?.deeplApiKey || settings.value?.googleApiKey))
+const apiConfigured = computed(() => {
+  const provider = settings.value?.provider
+  if (provider === 'openai') return Boolean(String(settings.value?.openaiApiKey || '').trim())
+  if (provider === 'deepl') return Boolean(String(settings.value?.deeplApiKey || '').trim())
+  if (provider === 'google') return Boolean(String(settings.value?.googleApiKey || '').trim())
+  return false
+})
 const channelName = computed(() => {
   if (settings.value?.provider === 'openai') return settings.value?.openaiModel === 'gpt-5.6-luna' ? 'GPT-5.6 LUNA' : String(settings.value?.openaiModel || 'OpenAI')
   if (settings.value?.provider === 'deepl') return 'DeepL'
@@ -44,6 +55,11 @@ const serverName = computed(() => {
   if (settings.value?.provider === 'openai') return 'OpenAI API'
   if (settings.value?.provider === 'deepl') return 'DeepL API'
   return 'Google API'
+})
+const selectedLiveStatus = computed<LiveStatus>(() => {
+  if (!apiConfigured.value) return { state: 'error', message: 'API 密钥未配置' }
+  if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
+  return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
 })
 
 async function reload() {
@@ -73,6 +89,7 @@ async function addSignalRecord(signalAccount?: string) {
 
 async function select(account: Account) {
   selected.value = account
+  controlFeedback.value = { state: 'idle', message: '' }
   await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id })
 }
 
@@ -85,13 +102,25 @@ async function remove(account: Account) {
   await reload()
 }
 
+function setFeedback(state: 'idle'|'saving'|'saved'|'error', message: string) {
+  controlFeedback.value = { state, message }
+  if (feedbackTimer) clearTimeout(feedbackTimer)
+  if (state === 'saved') feedbackTimer = setTimeout(() => { controlFeedback.value = { state: 'idle', message: '' } }, 1800)
+}
+
 async function patchSelected(patch: Record<string, unknown>) {
   if (!selected.value) return
-  const updated = await window.desktopAPI.updateAccount(selected.value.id, patch)
-  if (!updated) return
-  selected.value = updated
-  const index = accounts.value.findIndex((item) => item.id === updated.id)
-  if (index >= 0) accounts.value[index] = updated
+  setFeedback('saving', '正在保存…')
+  try {
+    const updated = await window.desktopAPI.updateAccount(selected.value.id, patch)
+    if (!updated) throw new Error('保存失败')
+    selected.value = updated
+    const index = accounts.value.findIndex((item) => item.id === updated.id)
+    if (index >= 0) accounts.value[index] = updated
+    setFeedback('saved', '设置已保存')
+  } catch (e: any) {
+    setFeedback('error', e?.message || '设置保存失败')
+  }
 }
 
 function setStringField(field: string, event: Event) {
@@ -117,6 +146,17 @@ async function closeSettings() {
 
 onMounted(async () => {
   await Promise.all([reload(), reloadSettings()])
+  window.desktopAPI.onTranslatorStatus((status: any) => {
+    if (!status?.accountId) return
+    liveStatuses.value = {
+      ...liveStatuses.value,
+      [status.accountId]: {
+        state: status.state || 'ready',
+        message: status.message || '翻译器就绪',
+        at: status.at || Date.now()
+      }
+    }
+  })
   window.desktopAPI.onTranslatorError((message: string) => {
     error.value = message
     setTimeout(() => error.value = '', 6500)
@@ -140,7 +180,7 @@ onMounted(async () => {
 
     <header v-if="selected" class="account-toolbar">
       <div class="account-control-row">
-        <label class="check-label">
+        <label class="check-label" title="开启后自动把对方消息翻译成我的语言">
           <input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />
           <span>对方的语言</span>
         </label>
@@ -157,13 +197,13 @@ onMounted(async () => {
         </select>
 
         <span class="control-name">群组翻译</span>
-        <button class="mini-switch" :class="{ on: groupTranslate }" @click="patchSelected({ groupTranslate: !groupTranslate })"><span></span></button>
+        <button class="mini-switch" :class="{ on: groupTranslate }" :title="groupTranslate ? '群组消息自动翻译已开启' : '群组消息自动翻译已关闭'" @click="patchSelected({ groupTranslate: !groupTranslate })"><span></span></button>
 
         <button class="toolbar-settings" @click="openSettings">翻译设置</button>
       </div>
 
       <div class="account-control-row second-row">
-        <label class="check-label">
+        <label class="check-label" title="开启后中文输入会先翻译成对方语言再发送">
           <input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />
           <span>自己的语言</span>
         </label>
@@ -172,17 +212,21 @@ onMounted(async () => {
         </select>
 
         <span class="control-name">翻译服务器</span>
-        <div class="server-box"><b>{{ serverName }}</b><em :class="{ ready: apiConfigured }">{{ apiConfigured ? '已配置' : '未配置' }}</em></div>
+        <div class="server-box"><b>{{ serverName }}</b><em :class="{ ready: apiConfigured }">{{ apiConfigured ? '密钥已配置' : '未配置' }}</em></div>
 
         <span class="control-name">字体颜色</span>
         <div class="color-box">
-          <input type="color" :value="translationColor" @input="setStringField('translationColor', $event)" />
+          <input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" />
           <code>{{ translationColor }}</code>
         </div>
 
         <span class="control-name">禁止中文</span>
-        <button class="mini-switch" :class="{ on: blockChineseSend }" @click="patchSelected({ blockChineseSend: !blockChineseSend })"><span></span></button>
+        <button class="mini-switch" :class="{ on: blockChineseSend }" :title="blockChineseSend ? '中文原文禁止直接发送' : '允许直接发送中文'" @click="patchSelected({ blockChineseSend: !blockChineseSend })"><span></span></button>
 
+        <div class="live-status" :class="selectedLiveStatus.state" :title="selectedLiveStatus.message">
+          <i></i><span>{{ selectedLiveStatus.message }}</span>
+        </div>
+        <span v-if="controlFeedback.message" class="save-feedback" :class="controlFeedback.state">{{ controlFeedback.message }}</span>
         <span class="precise-badge">精准翻译</span>
       </div>
     </header>
