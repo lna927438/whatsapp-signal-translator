@@ -17,6 +17,14 @@ export class AccountManager {
       platform,
       label: label?.trim() || `${platform === 'whatsapp' ? 'WhatsApp' : 'Signal'} ${count}`,
       signalAccount,
+      localLanguage: 'zh-CN',
+      targetLanguage: 'en-US',
+      receiveAutoTranslate: true,
+      sendAutoTranslate: true,
+      blockChineseSend: true,
+      groupTranslate: false,
+      fontSize: 13,
+      translationColor: '#c8d4e4',
       createdAt: Date.now()
     }
     accounts.push(record)
