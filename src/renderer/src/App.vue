@@ -8,31 +8,57 @@ const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
 const showSettings = ref(false)
 const error = ref('')
+const settings = ref<any>(null)
+const languages = ref<any[]>([])
 
 const selectedIsSignal = computed(() => selected.value?.platform === 'signal')
+const languageName = (code?: string) => languages.value.find((item) => item.code === code)?.name || code || '—'
+const providerName = computed(() => {
+  const value = settings.value?.provider
+  if (value === 'openai') return 'OpenAI'
+  if (value === 'deepl') return 'DeepL'
+  if (value === 'google') return 'Google Translate'
+  return '—'
+})
 
 async function reload() { accounts.value = await window.desktopAPI.listAccounts() }
+async function reloadSettings() {
+  settings.value = await window.desktopAPI.getSettings()
+  if (!languages.value.length) languages.value = await window.desktopAPI.getLanguages()
+}
 async function addWhatsApp() {
-  const a = await window.desktopAPI.addAccount({ platform: 'whatsapp' })
-  await reload(); await select(a)
+  const account = await window.desktopAPI.addAccount({ platform: 'whatsapp' })
+  await reload()
+  await select(account)
 }
 async function addSignalRecord(signalAccount?: string) {
-  const a = await window.desktopAPI.addAccount({ platform: 'signal', signalAccount })
-  await reload(); await select(a)
-}
-async function select(a: Account) {
-  selected.value = a
-  await window.desktopAPI.focusPlatform({ platform: a.platform, accountId: a.id })
-}
-async function remove(a: Account) {
-  await window.desktopAPI.removeAccount(a.id)
-  if (selected.value?.id === a.id) { selected.value = null; await window.desktopAPI.focusPlatform({ platform: 'signal' }) }
+  const account = await window.desktopAPI.addAccount({ platform: 'signal', signalAccount })
   await reload()
+  await select(account)
+}
+async function select(account: Account) {
+  selected.value = account
+  await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id })
+}
+async function remove(account: Account) {
+  await window.desktopAPI.removeAccount(account.id)
+  if (selected.value?.id === account.id) {
+    selected.value = null
+    await window.desktopAPI.focusPlatform({ platform: 'signal' })
+  }
+  await reload()
+}
+async function closeSettings() {
+  showSettings.value = false
+  await reloadSettings()
 }
 
 onMounted(async () => {
-  await reload()
-  window.desktopAPI.onTranslatorError((m: string) => { error.value = m; setTimeout(() => error.value = '', 5000) })
+  await Promise.all([reload(), reloadSettings()])
+  window.desktopAPI.onTranslatorError((message: string) => {
+    error.value = message
+    setTimeout(() => error.value = '', 5000)
+  })
 })
 </script>
 
@@ -43,16 +69,23 @@ onMounted(async () => {
       <button class="add wa" @click="addWhatsApp">＋ WhatsApp</button>
       <button class="add signal" @click="addSignalRecord()">＋ Signal</button>
       <div class="account-list">
-        <button v-for="a in accounts" :key="a.id" class="account" :class="{ active: selected?.id===a.id }" @click="select(a)">
-          <span class="dot" :class="a.platform"></span><span class="account-label">{{ a.label }}</span><span class="close" @click.stop="remove(a)">×</span>
+        <button v-for="account in accounts" :key="account.id" class="account" :class="{ active: selected?.id===account.id }" @click="select(account)">
+          <span class="dot" :class="account.platform"></span><span class="account-label">{{ account.label }}</span><span class="close" @click.stop="remove(account)">×</span>
         </button>
       </div>
       <button class="settings-btn" @click="showSettings=true">⚙ Settings</button>
     </aside>
 
     <header class="toolbar">
-      <div><small>Translation mode</small><strong>Precise Translation</strong></div>
-      <div class="toolbar-note">Incoming and outgoing text are translated faithfully without rewriting.</div>
+      <div class="toolbar-field"><small>Your language</small><strong>{{ languageName(settings?.localLanguage) }}</strong></div>
+      <div class="toolbar-field"><small>Recipient language</small><strong>{{ languageName(settings?.targetLanguage) }}</strong></div>
+      <div class="toolbar-field"><small>Provider</small><strong>{{ providerName }}</strong></div>
+      <div class="toolbar-field"><small>Mode</small><strong>Precise Translation</strong></div>
+      <div class="toolbar-spacer"></div>
+      <div class="auto-state">
+        <span :class="{ on: settings?.receiveAutoTranslate }">Receive</span>
+        <span :class="{ on: settings?.sendAutoTranslate }">Send</span>
+      </div>
       <button @click="showSettings=true">Translation Settings</button>
     </header>
 
@@ -63,7 +96,7 @@ onMounted(async () => {
       </div>
     </main>
 
-    <SettingsPanel v-if="showSettings" @close="showSettings=false" />
+    <SettingsPanel v-if="showSettings" @close="closeSettings" />
     <div v-if="error" class="toast">{{ error }}</div>
   </div>
 </template>
