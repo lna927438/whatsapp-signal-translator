@@ -16,8 +16,6 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
 
     steps:
@@ -29,6 +27,46 @@ jobs:
           cache: 'npm'
           cache-dependency-path: package.json
 
+      - name: Install AWS CLI
+        shell: powershell
+        run: python -m pip install --disable-pip-version-check awscli
+
+      - name: Validate R2 credentials before building
+        shell: powershell
+        run: |
+          $required = @('R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_ENDPOINT','R2_BUCKET')
+          foreach ($name in $required) {
+            $value = (Get-Item "Env:$name").Value
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Missing GitHub Actions secret: $name"
+            }
+          }
+
+          $endpointUri = [Uri]$env:R2_ENDPOINT.Trim()
+          $endpoint = "$($endpointUri.Scheme)://$($endpointUri.Host)"
+          $bucket = $env:R2_BUCKET.Trim()
+          $env:AWS_ACCESS_KEY_ID = $env:R2_ACCESS_KEY_ID.Trim()
+          $env:AWS_SECRET_ACCESS_KEY = $env:R2_SECRET_ACCESS_KEY.Trim()
+
+          if ($endpointUri.Scheme -ne 'https') { throw 'R2_ENDPOINT must use https.' }
+          if ($endpointUri.Host -notmatch '\.r2\.cloudflarestorage\.com$') { throw 'R2_ENDPOINT host is not a Cloudflare R2 S3 endpoint.' }
+
+          Write-Host "R2 endpoint host: $($endpointUri.Host)"
+          Write-Host "R2 bucket: $bucket"
+          if ($endpointUri.AbsolutePath -and $endpointUri.AbsolutePath -ne '/') {
+            Write-Host "R2_ENDPOINT contained a path; it will be normalized to the account-level endpoint."
+          }
+
+          aws s3api list-objects-v2 --bucket $bucket --max-items 1 --endpoint-url $endpoint --region auto | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw 'R2 credential test failed. Verify Access Key ID, Secret Access Key, and that the token belongs to this Cloudflare account/bucket.'
+          }
+
+          "R2_ENDPOINT_NORMALIZED=$endpoint" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "R2_BUCKET_NORMALIZED=$bucket" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
@@ -38,25 +76,14 @@ jobs:
       - name: Build Windows installer
         run: npm run dist:win
 
-      - name: Install AWS CLI
-        shell: powershell
-        run: python -m pip install --disable-pip-version-check awscli
-
-      - name: Validate R2 configuration
-        shell: powershell
-        run: |
-          $required = @('R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_ENDPOINT','R2_BUCKET')
-          foreach ($name in $required) {
-            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
-              throw "Missing GitHub Actions secret: $name"
-            }
-          }
-
       - name: Publish installer and metadata to R2
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $pkg = Get-Content package.json | ConvertFrom-Json
           $version = [string]$pkg.version
+          $endpoint = $env:R2_ENDPOINT_NORMALIZED
+          $bucket = $env:R2_BUCKET_NORMALIZED
           $installer = Get-ChildItem -Path release -Recurse -File -Filter '*.exe' |
             Where-Object { $_.Name -match 'Setup|setup' } |
             Sort-Object Length -Descending |
@@ -64,20 +91,24 @@ jobs:
 
           if (-not $installer) { throw 'Windows Setup.exe was not found under release/.' }
 
+          function Invoke-AwsUpload {
+            param(
+              [string]$Source,
+              [string]$Destination,
+              [string]$ContentType,
+              [string]$CacheControl
+            )
+            aws s3 cp $Source $Destination --endpoint-url $endpoint --region auto --content-type $ContentType --cache-control $CacheControl
+            if ($LASTEXITCODE -ne 0) { throw "R2 upload failed: $Destination" }
+          }
+
           $sha256 = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
           $size = $installer.Length
           $versionKey = "windows/v$version/WhatsApp-Signal-Translator-Setup-v$version.exe"
           $latestKey = 'windows/latest/WhatsApp-Signal-Translator-Setup.exe'
 
-          aws s3 cp $installer.FullName "s3://$env:R2_BUCKET/$versionKey" `
-            --endpoint-url $env:R2_ENDPOINT `
-            --content-type 'application/vnd.microsoft.portable-executable' `
-            --cache-control 'public,max-age=31536000,immutable'
-
-          aws s3 cp $installer.FullName "s3://$env:R2_BUCKET/$latestKey" `
-            --endpoint-url $env:R2_ENDPOINT `
-            --content-type 'application/vnd.microsoft.portable-executable' `
-            --cache-control 'no-cache'
+          Invoke-AwsUpload $installer.FullName "s3://$bucket/$versionKey" 'application/vnd.microsoft.portable-executable' 'public,max-age=31536000,immutable'
+          Invoke-AwsUpload $installer.FullName "s3://$bucket/$latestKey" 'application/vnd.microsoft.portable-executable' 'no-cache'
 
           $metadata = [ordered]@{
             version = $version
@@ -90,26 +121,25 @@ jobs:
           } | ConvertTo-Json -Depth 4
 
           $metadata | Set-Content -Path version.json -Encoding utf8
-          aws s3 cp version.json "s3://$env:R2_BUCKET/metadata/version.json" `
-            --endpoint-url $env:R2_ENDPOINT `
-            --content-type 'application/json; charset=utf-8' `
-            --cache-control 'no-cache'
+          Invoke-AwsUpload 'version.json' "s3://$bucket/metadata/version.json" 'application/json; charset=utf-8' 'no-cache'
 
           Get-ChildItem -Path release -Recurse -File |
             Where-Object { $_.Extension -in '.yml', '.blockmap' } |
             ForEach-Object {
               $key = "windows/v$version/$($_.Name)"
-              aws s3 cp $_.FullName "s3://$env:R2_BUCKET/$key" --endpoint-url $env:R2_ENDPOINT
+              $contentType = if ($_.Extension -eq '.yml') { 'text/yaml; charset=utf-8' } else { 'application/octet-stream' }
+              Invoke-AwsUpload $_.FullName "s3://$bucket/$key" $contentType 'no-cache'
             }
 
-          Write-Host "Published v$version to R2 bucket $env:R2_BUCKET"
+          Write-Host "Published v$version to R2 bucket $bucket"
           Write-Host "Installer: $versionKey"
           Write-Host "Latest:    $latestKey"
 
       - name: Upload CI artifact as fallback
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: whatsapp-signal-translator-windows-r2-published
           path: release/**/*
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
