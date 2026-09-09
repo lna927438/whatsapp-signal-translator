@@ -4,6 +4,8 @@ import type { SignalRuntimeStatus } from './signalRuntime'
 import { TranslationEngine } from '../../translation/translationEngine'
 import { SettingsStore } from '../../storage/settingsStore'
 
+const CHINESE_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/
+
 export interface SignalMessage {
   account: string
   peer: string
@@ -54,7 +56,7 @@ export class SignalAdapter {
     return this.cli.call('startLink', {})
   }
 
-  async finishLink(deviceLinkUri: string, deviceName = 'Realtime Translator'): Promise<{ number?: string }> {
+  async finishLink(deviceLinkUri: string, deviceName = '实时翻译器'): Promise<{ number?: string }> {
     await this.start()
     return this.cli.call('finishLink', { deviceLinkUri, deviceName }, 180000)
   }
@@ -74,9 +76,18 @@ export class SignalAdapter {
   async send(account: string, recipient: string, original: string): Promise<SignalMessage> {
     await this.start()
     const settings = await this.settings.get()
+    if (!settings.sendAutoTranslate && settings.blockChineseSend !== false && CHINESE_RE.test(original)) {
+      throw new Error('已开启“禁止发送中文”，请先开启发送自动翻译或改为目标语言。')
+    }
+
     const translated = settings.sendAutoTranslate
       ? await this.translator.translate({ text: original, sourceLanguage: settings.localLanguage, targetLanguage: settings.targetLanguage })
       : original
+
+    if (settings.blockChineseSend !== false && CHINESE_RE.test(translated)) {
+      throw new Error('翻译结果仍包含中文，已阻止发送。请检查目标语言或 API 设置。')
+    }
+
     const result = await this.cli.call('send', { account, recipients: [recipient], message: translated })
     const msg: SignalMessage = {
       account,
