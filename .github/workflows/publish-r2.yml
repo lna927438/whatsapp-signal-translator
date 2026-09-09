@@ -1,0 +1,115 @@
+name: Publish Windows Release to R2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Windows installer
+        run: npm run dist:win
+
+      - name: Install AWS CLI
+        shell: powershell
+        run: python -m pip install --disable-pip-version-check awscli
+
+      - name: Validate R2 configuration
+        shell: powershell
+        run: |
+          $required = @('R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_ENDPOINT','R2_BUCKET')
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
+              throw "Missing GitHub Actions secret: $name"
+            }
+          }
+
+      - name: Publish installer and metadata to R2
+        shell: powershell
+        run: |
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $version = [string]$pkg.version
+          $installer = Get-ChildItem -Path release -Recurse -File -Filter '*.exe' |
+            Where-Object { $_.Name -match 'Setup|setup' } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+
+          if (-not $installer) { throw 'Windows Setup.exe was not found under release/.' }
+
+          $sha256 = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+          $size = $installer.Length
+          $versionKey = "windows/v$version/WhatsApp-Signal-Translator-Setup-v$version.exe"
+          $latestKey = 'windows/latest/WhatsApp-Signal-Translator-Setup.exe'
+
+          aws s3 cp $installer.FullName "s3://$env:R2_BUCKET/$versionKey" `
+            --endpoint-url $env:R2_ENDPOINT `
+            --content-type 'application/vnd.microsoft.portable-executable' `
+            --cache-control 'public,max-age=31536000,immutable'
+
+          aws s3 cp $installer.FullName "s3://$env:R2_BUCKET/$latestKey" `
+            --endpoint-url $env:R2_ENDPOINT `
+            --content-type 'application/vnd.microsoft.portable-executable' `
+            --cache-control 'no-cache'
+
+          $metadata = [ordered]@{
+            version = $version
+            platform = 'windows'
+            versionKey = $versionKey
+            latestKey = $latestKey
+            sha256 = $sha256
+            size = $size
+            releasedAt = (Get-Date).ToUniversalTime().ToString('o')
+          } | ConvertTo-Json -Depth 4
+
+          $metadata | Set-Content -Path version.json -Encoding utf8
+          aws s3 cp version.json "s3://$env:R2_BUCKET/metadata/version.json" `
+            --endpoint-url $env:R2_ENDPOINT `
+            --content-type 'application/json; charset=utf-8' `
+            --cache-control 'no-cache'
+
+          Get-ChildItem -Path release -Recurse -File |
+            Where-Object { $_.Extension -in '.yml', '.blockmap' } |
+            ForEach-Object {
+              $key = "windows/v$version/$($_.Name)"
+              aws s3 cp $_.FullName "s3://$env:R2_BUCKET/$key" --endpoint-url $env:R2_ENDPOINT
+            }
+
+          Write-Host "Published v$version to R2 bucket $env:R2_BUCKET"
+          Write-Host "Installer: $versionKey"
+          Write-Host "Latest:    $latestKey"
+
+      - name: Upload CI artifact as fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: whatsapp-signal-translator-windows-r2-published
+          path: release/**/*
+          if-no-files-found: error
+          retention-days: 7
