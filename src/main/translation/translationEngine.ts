@@ -5,7 +5,7 @@ import { ProfileStore } from '../storage/profileStore'
 import { ChargeRegistry } from '../storage/chargeRegistry'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
-import { OpenAIProvider } from './providers/openai'
+import { CloudflareProvider } from './providers/cloudflare'
 import { DeepLProvider } from './providers/deepl'
 import { GoogleProvider } from './providers/google'
 import type { TranslationProvider } from './providers/provider'
@@ -28,6 +28,7 @@ export class TranslationEngine {
   private reservedCharacters = 0
   private latencyTotal = 0
   private latencySamples = 0
+  private onlineAccessToken = ''
   private metricsState: TranslationMetrics = {
     totalRequests: 0,
     providerCalls: 0,
@@ -39,6 +40,10 @@ export class TranslationEngine {
     lastLatencyMs: 0,
     averageLatencyMs: 0,
     lastUpdatedAt: Date.now()
+  }
+
+  setOnlineAccessToken(token?: string | null): void {
+    this.onlineAccessToken = String(token || '').trim()
   }
 
   async translate(request: TranslationRequest): Promise<string> {
@@ -73,10 +78,6 @@ export class TranslationEngine {
   }
 
   private chargeFingerprint(request: TranslationRequest): string {
-    // The charging key intentionally ignores provider, context, WhatsApp DOM ids,
-    // account ids and conversation titles. Those values can change across app
-    // restarts even though the user is looking at the exact same source text.
-    // A source/target/text translation is therefore charged at most once locally.
     return createHash('sha256').update([
       'translation-charge-v1',
       request.sourceLanguage || 'auto',
@@ -130,11 +131,14 @@ export class TranslationEngine {
     const promise = this.enqueue(async () => {
       const started = Date.now()
       const charge = this.characterCount(text)
+      const cloudManaged = settings.provider === 'openai'
       let reserved = false
       try {
-        await this.profile.ensureAvailable(charge, this.reservedCharacters)
-        this.reservedCharacters += charge
-        reserved = true
+        if (!cloudManaged) {
+          await this.profile.ensureAvailable(charge, this.reservedCharacters)
+          this.reservedCharacters += charge
+          reserved = true
+        }
 
         this.metricsState.providerCalls += 1
         const provider = this.createProvider(settings)
@@ -143,30 +147,28 @@ export class TranslationEngine {
         this.recordLatency(latency)
         this.metricsState.lastError = undefined
 
-        // Persist the translation BEFORE touching the character balance. If the
-        // app is closed immediately after an API response, the next launch still
-        // restores the result locally instead of repeating the API request.
         if (useCache) await this.cache.set(settings.provider, normalized, translated)
 
-        // Character billing is separately idempotent. Even if a future cache
-        // migration or DOM change somehow causes another API request, the same
-        // source/target/text translation cannot decrement the local quota twice.
-        if (useCache) {
-          await this.charges.runOnce(this.chargeFingerprint(normalized), async () => {
+        // OpenAI billing is now authoritative on the Cloudflare + Supabase server.
+        // DeepL/Google remain local legacy providers for now and keep the old local quota path.
+        if (!cloudManaged) {
+          if (useCache) {
+            await this.charges.runOnce(this.chargeFingerprint(normalized), async () => {
+              await this.profile.consumeCharacters(charge, {
+                provider: settings.provider,
+                accountId: normalized.accountId,
+                conversationId: normalized.conversationId,
+                note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
+              })
+            })
+          } else {
             await this.profile.consumeCharacters(charge, {
               provider: settings.provider,
               accountId: normalized.accountId,
               conversationId: normalized.conversationId,
-              note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
+              note: 'API 翻译测试'
             })
-          })
-        } else {
-          await this.profile.consumeCharacters(charge, {
-            provider: settings.provider,
-            accountId: normalized.accountId,
-            conversationId: normalized.conversationId,
-            note: 'API 翻译测试'
-          })
+          }
         }
 
         return translated
@@ -223,9 +225,8 @@ export class TranslationEngine {
 
   private createProvider(settings: AppSettings): TranslationProvider {
     if (settings.provider === 'openai') {
-      const apiKey = settings.openaiApiKey?.trim()
-      if (!apiKey) throw new Error('缺少 OpenAI API Key。请在翻译设置中填写并测试。')
-      return new OpenAIProvider({ apiKey, model: settings.openaiModel?.trim() || 'gpt-5.6-luna' })
+      if (!this.onlineAccessToken) throw new Error('在线登录令牌缺失，请重新登录。')
+      return new CloudflareProvider(this.onlineAccessToken)
     }
 
     if (settings.provider === 'deepl') {
