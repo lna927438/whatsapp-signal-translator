@@ -51,6 +51,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     whatsapp.setOverlayOpen(Boolean(open))
     return true
   })
+  ipcMain.handle('whatsapp:send-native-enter', (_e, accountId?: string) => whatsapp.sendNativeEnter(accountId))
 
   ipcMain.handle('settings:get', () => settings.get())
   ipcMain.handle('settings:save', async (_e, value) => {
