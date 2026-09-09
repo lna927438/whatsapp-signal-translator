@@ -19,7 +19,7 @@ interface TranslatePayload {
   context?: TranslationRequest['context']
 }
 
-type OnlineIdentity = { userId: string; email?: string; username?: string } | null
+type OnlineIdentity = { userId: string; email?: string; username?: string; accessToken?: string } | null
 
 export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
   const accounts = new AccountManager()
@@ -68,15 +68,16 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
 
   ipcMain.handle('auth:set-online-session', async (_e, identity: OnlineIdentity) => {
     onlineIdentity = identity?.userId ? identity : null
+    translator.setOnlineAccessToken(onlineIdentity?.accessToken || null)
     if (onlineIdentity) {
       await profile.updateIdentity({ username: onlineIdentity.username, email: onlineIdentity.email })
     } else {
       whatsapp.hideAll()
     }
-    return { authenticated: Boolean(onlineIdentity), source: 'supabase', user: onlineIdentity }
+    return { authenticated: Boolean(onlineIdentity), source: 'supabase', user: onlineIdentity ? { ...onlineIdentity, accessToken: undefined } : null }
   })
   ipcMain.handle('auth:status', async () => onlineIdentity?.userId
-    ? { authenticated: true, source: 'supabase', user: onlineIdentity }
+    ? { authenticated: true, source: 'supabase', user: { ...onlineIdentity, accessToken: undefined } }
     : auth.status())
   ipcMain.handle('auth:register', async (_e, input: { username: string; email: string; password: string; remember?: boolean }) => {
     const result = await auth.register(input)
@@ -86,6 +87,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('auth:login', (_e, input: { identifier: string; password: string; remember?: boolean }) => auth.login(input))
   ipcMain.handle('auth:logout', async () => {
     onlineIdentity = null
+    translator.setOnlineAccessToken(null)
     whatsapp.hideAll()
     return auth.logout()
   })
@@ -160,7 +162,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => { await requireAuth(); return translator.translate({ text, sourceLanguage: 'auto', targetLanguage }) })
   ipcMain.handle('translator:test-config', async (_e, value: AppSettings, text: string, targetLanguage: string) => {
     await requireAuth()
-    try { const translated = await translator.testWithSettings(value, { text, sourceLanguage: 'auto', targetLanguage }); return { ok: true, translated, message: 'API 连接和翻译测试成功。' } }
+    try { const translated = await translator.testWithSettings(value, { text, sourceLanguage: 'auto', targetLanguage }); return { ok: true, translated, message: '云端翻译连接和测试成功。' } }
     catch (error: any) { return { ok: false, message: String(error?.message || error) } }
   })
 
