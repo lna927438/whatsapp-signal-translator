@@ -5,6 +5,7 @@ export const whatsappInjectionScript = String.raw`
 
   const RT_ATTR = 'data-rt-translated';
   const CHINESE_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
+  const pendingSent = [];
   let sending = false;
   let nativeBypassUntil = 0;
   let statusTimer;
@@ -33,6 +34,7 @@ export const whatsappInjectionScript = String.raw`
     messageText: [
       '#main [data-testid="msg-container"] span.selectable-text',
       '#main .message-in span.selectable-text',
+      '#main .message-out span.selectable-text',
       '#main [data-id] span.selectable-text.copyable-text',
       '#main span.selectable-text.copyable-text'
     ]
@@ -50,28 +52,23 @@ export const whatsappInjectionScript = String.raw`
   const composerText = (composer) => (composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
   const containsChinese = (text) => CHINESE_RE.test(String(text || ''));
   const bypassNative = () => Date.now() < nativeBypassUntil;
+  const normalizeMessage = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+
+  const reportStatus = (state, message) => {
+    window.realtimeTranslator?.reportStatus?.({ state, message, at: Date.now() });
+  };
 
   const showSendStatus = (message, type = 'working', autoHide = true) => {
+    reportStatus(type, message);
     let box = document.getElementById('rt-send-status');
     if (!box) {
       box = document.createElement('div');
       box.id = 'rt-send-status';
       box.setAttribute('data-rt-ui', 'send-status');
       Object.assign(box.style, {
-        position: 'fixed',
-        top: '76px',
-        right: '18px',
-        zIndex: '2147483647',
-        maxWidth: '420px',
-        padding: '10px 14px',
-        borderRadius: '10px',
-        fontSize: '13px',
-        lineHeight: '1.45',
-        color: '#fff',
-        boxShadow: '0 8px 28px rgba(0,0,0,.28)',
-        pointerEvents: 'none',
-        transition: 'opacity .18s ease',
-        opacity: '1'
+        position: 'fixed', top: '76px', right: '18px', zIndex: '2147483647', maxWidth: '420px',
+        padding: '10px 14px', borderRadius: '10px', fontSize: '13px', lineHeight: '1.45', color: '#fff',
+        boxShadow: '0 8px 28px rgba(0,0,0,.28)', pointerEvents: 'none', transition: 'opacity .18s ease', opacity: '1'
       });
       document.body.appendChild(box);
     }
@@ -79,9 +76,7 @@ export const whatsappInjectionScript = String.raw`
     box.textContent = message;
     box.style.background = type === 'error' ? '#a72b3a' : type === 'success' ? '#176b4d' : '#2456a6';
     box.style.opacity = '1';
-    if (autoHide) {
-      statusTimer = setTimeout(() => { if (box) box.style.opacity = '0'; }, type === 'error' ? 6000 : 2200);
-    }
+    if (autoHide) statusTimer = setTimeout(() => { if (box) box.style.opacity = '0'; }, type === 'error' ? 6000 : 2200);
   };
 
   const getComposer = (target) => {
@@ -142,38 +137,89 @@ export const whatsappInjectionScript = String.raw`
     return /,\s*[^,]+/.test(text) && text.length > 12;
   };
 
-  const addTranslation = (el, text, settings) => {
+  const originalMessageText = (el) => {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll?.('.rt-translation').forEach((node) => node.remove());
+    return (clone.innerText || clone.textContent || '').replace(/\u00a0/g, ' ').trim();
+  };
+
+  const translationHost = (el) => {
+    if (el instanceof HTMLElement) return el;
+    return el.parentElement || el;
+  };
+
+  const applyTranslationStyle = (settings) => {
+    document.querySelectorAll('.rt-translation').forEach((node) => {
+      node.style.fontSize = String(Number(settings?.fontSize || 13)) + 'px';
+      node.style.color = settings?.translationColor || '#c8d4e4';
+    });
+  };
+
+  const addTranslation = (el, text, settings, kind = 'incoming') => {
     if (!text) return;
-    const container = messageContainer(el) || el.parentElement || el;
-    if (container.querySelector?.(':scope > .rt-translation')) return;
-    const node = document.createElement('div');
+    const host = translationHost(el);
+    if (host.querySelector?.(':scope > .rt-translation')) return;
+    const node = document.createElement('span');
     node.className = 'rt-translation';
     node.textContent = text;
     node.setAttribute('data-rt-ui', 'translation');
+    node.setAttribute('data-rt-kind', kind);
     Object.assign(node.style, {
-      marginTop: '4px', paddingTop: '4px', borderTop: '1px dashed rgba(120,120,120,.35)',
-      fontSize: String(Number(settings?.fontSize || 13)) + 'px', lineHeight: '1.38',
-      color: settings?.translationColor || '#c8d4e4', opacity: '.94', whiteSpace: 'pre-wrap', userSelect: 'text'
+      display: 'block', marginTop: '5px', paddingTop: '5px', borderTop: '1px dashed rgba(120,120,120,.38)',
+      fontSize: String(Number(settings?.fontSize || 13)) + 'px', lineHeight: '1.38', fontWeight: '500',
+      color: settings?.translationColor || '#c8d4e4', opacity: '.98', whiteSpace: 'pre-wrap', userSelect: 'text'
     });
-    container.appendChild(node);
+    host.appendChild(node);
+  };
+
+  const cleanupPendingSent = () => {
+    const now = Date.now();
+    for (let i = pendingSent.length - 1; i >= 0; i -= 1) {
+      if (pendingSent[i].expires < now) pendingSent.splice(i, 1);
+    }
+    while (pendingSent.length > 24) pendingSent.shift();
+  };
+
+  const rememberSent = (translated, original) => {
+    cleanupPendingSent();
+    pendingSent.push({ translated: normalizeMessage(translated), original, expires: Date.now() + 45000 });
+  };
+
+  const annotateOutgoing = (el, settings) => {
+    cleanupPendingSent();
+    const text = normalizeMessage(originalMessageText(el));
+    if (!text) return false;
+    const index = pendingSent.findIndex((item) => item.translated === text);
+    if (index < 0) return false;
+    const item = pendingSent.splice(index, 1)[0];
+    if (normalizeMessage(item.original) !== text) addTranslation(el, item.original, settings, 'outgoing-original');
+    el.setAttribute(RT_ATTR, 'outgoing-done');
+    return true;
   };
 
   const translateVisible = async () => {
     const api = window.realtimeTranslator;
     if (!api) return;
     const settings = await api.getRuntimeSettings();
-    if (!settings.receiveAutoTranslate) return;
-    if (!settings.groupTranslate && isGroupChat()) return;
+    applyTranslationStyle(settings);
+    if (!settings.receiveAutoTranslate && pendingSent.length === 0) return;
+    if (!settings.groupTranslate && isGroupChat() && pendingSent.length === 0) return;
 
     for (const el of allMessages()) {
-      if (el.getAttribute(RT_ATTR) || el.closest('.rt-translation') || !isVisible(el)) continue;
-      if (isOutgoing(el)) { el.setAttribute(RT_ATTR, 'outgoing'); continue; }
-      const text = (el.innerText || el.textContent || '').trim();
+      if (el.closest('.rt-translation') || !isVisible(el)) continue;
+      if (isOutgoing(el)) {
+        if (!el.getAttribute(RT_ATTR)) annotateOutgoing(el, settings);
+        continue;
+      }
+      if (!settings.receiveAutoTranslate) continue;
+      if (!settings.groupTranslate && isGroupChat()) continue;
+      if (el.getAttribute(RT_ATTR)) continue;
+      const text = originalMessageText(el);
       if (!text) { el.setAttribute(RT_ATTR, 'empty'); continue; }
       el.setAttribute(RT_ATTR, 'working');
       try {
         const translated = await api.translateIncoming(text);
-        if (translated && translated.trim() !== text) addTranslation(el, translated, settings);
+        if (translated && translated.trim() !== text) addTranslation(el, translated, settings, 'incoming');
         el.setAttribute(RT_ATTR, 'done');
       } catch (error) {
         el.removeAttribute(RT_ATTR);
@@ -231,7 +277,6 @@ export const whatsappInjectionScript = String.raw`
       const accepted = await api.commitTranslatedSend(finalText);
       if (accepted) return true;
     }
-    // Backward-compatible fallback if the native editor bridge is unavailable.
     replaceComposerText(composer, finalText);
     await sleep(100);
     return nativeSend(composer, api);
@@ -255,6 +300,7 @@ export const whatsappInjectionScript = String.raw`
         if (blockChinese && containsChinese(original)) throw new Error('已开启“禁止发送中文”。请开启发送翻译，或直接输入目标语言。');
         showSendStatus('发送翻译已关闭，正在按原文发送…', 'working', false);
         if (!await nativeSend(composer, api)) throw new Error('WhatsApp 原生发送动作未触发。');
+        showSendStatus('消息已发送。', 'success');
         return;
       }
 
@@ -263,12 +309,14 @@ export const whatsappInjectionScript = String.raw`
       if (!finalText) throw new Error('翻译结果为空，已阻止发送。');
       if (blockChinese && containsChinese(finalText)) throw new Error('翻译结果仍包含中文，已阻止发送。请检查目标语言或 API 设置。');
 
+      rememberSent(finalText, original);
       showSendStatus('翻译完成，正在通过 WhatsApp 原生输入发送…', 'working', false);
       if (!await commitTranslatedSend(composer, api, finalText)) throw new Error('无法提交译文到 WhatsApp 输入框。');
 
       const completed = await waitForSendCompletion(composer, original, finalText);
       if (!completed) throw new Error('译文已生成，但 WhatsApp 没有完成发送。中文原文没有被发送，请重试。');
       showSendStatus('已发送目标语言译文。', 'success');
+      setTimeout(() => { void translateVisible(); }, 180);
     } catch (error) {
       const message = String(error?.message || error);
       const current = composerText(composer);
@@ -322,10 +370,12 @@ export const whatsappInjectionScript = String.raw`
   let mutationTimer;
   const observer = new MutationObserver(() => {
     clearTimeout(mutationTimer);
-    mutationTimer = setTimeout(translateVisible, 180);
+    mutationTimer = setTimeout(translateVisible, 160);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
-  setInterval(translateVisible, 1400);
+
+  reportStatus('ready', '翻译器已就绪');
+  setInterval(translateVisible, 1100);
   translateVisible();
 })();
 `
