@@ -63,7 +63,7 @@ export class SignalAdapter {
     await this.start()
     const result = await this.cli.call('listContacts', {
       account,
-      recipient: [],
+      recipients: [],
       allRecipients: true,
       detailed: true,
       internal: false
@@ -77,7 +77,7 @@ export class SignalAdapter {
     const translated = settings.sendAutoTranslate
       ? await this.translator.translate({ text: original, sourceLanguage: settings.localLanguage, targetLanguage: settings.targetLanguage })
       : original
-    const result = await this.cli.call('send', { account, recipient: [recipient], message: translated })
+    const result = await this.cli.call('send', { account, recipients: [recipient], message: translated })
     const msg: SignalMessage = {
       account,
       peer: recipient,
