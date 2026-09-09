@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { requireSupabase } from '../lib/supabase'
 
 const emit = defineEmits(['close'])
 const settings = ref<any>(null)
@@ -40,6 +41,20 @@ function settingsSnapshot(): any {
   return snapshot
 }
 
+async function syncCloudSession() {
+  const client = requireSupabase()
+  const { data, error } = await client.auth.getSession()
+  if (error) throw error
+  const session = data.session
+  if (!session?.user?.id || !session.access_token) throw new Error('在线登录状态已失效，请重新登录。')
+  await window.desktopAPI.authSetOnlineSession({
+    userId: session.user.id,
+    email: session.user.email,
+    username: String(session.user.user_metadata?.username || ''),
+    accessToken: session.access_token
+  })
+}
+
 onMounted(async () => {
   settings.value = await window.desktopAPI.getSettings()
   if (settings.value.blockChineseSend === undefined) settings.value.blockChineseSend = true
@@ -64,9 +79,10 @@ async function testApi() {
 
   testing.value = true
   apiState.value = 'idle'
-  apiMessage.value = settings.value.provider === 'openai' ? '正在测试 Cloudflare + Supabase + OpenAI 云端翻译链路…' : '正在测试 API 连接和翻译…'
+  apiMessage.value = settings.value.provider === 'openai' ? '正在同步登录令牌并测试 Cloudflare + Supabase + OpenAI 云端翻译链路…' : '正在测试 API 连接和翻译…'
   testResult.value = ''
   try {
+    if (settings.value.provider === 'openai') await syncCloudSession()
     const current = settingsSnapshot()
     const result = await window.desktopAPI.testTranslationConfig(current, testText.value, current.localLanguage)
     if (result.ok) {
