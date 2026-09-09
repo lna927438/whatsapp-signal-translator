@@ -1,0 +1,90 @@
+import { BrowserWindow } from 'electron'
+import { SignalCli } from './signalCli'
+import { TranslationEngine } from '../../translation/translationEngine'
+import { SettingsStore } from '../../storage/settingsStore'
+
+export interface SignalMessage {
+  account: string
+  peer: string
+  fromMe: boolean
+  original: string
+  translated?: string
+  timestamp: number
+}
+
+export class SignalAdapter {
+  private readonly cli = new SignalCli()
+  private readonly translator: TranslationEngine
+  private readonly settings = new SettingsStore()
+  private mainWindow?: BrowserWindow
+
+  constructor(translator: TranslationEngine) {
+    this.translator = translator
+    this.cli.on('receive', (params) => void this.onReceive(params))
+  }
+
+  attachMainWindow(window: BrowserWindow): void { this.mainWindow = window }
+  async start(): Promise<void> { await this.cli.start() }
+  stop(): void { this.cli.stop() }
+
+  async listAccounts(): Promise<string[]> {
+    await this.start()
+    const result = await this.cli.call('listAccounts', {})
+    if (!Array.isArray(result)) return []
+    return result.map((v) => typeof v === 'string' ? v : (v.number || v.account || '')).filter(Boolean)
+  }
+
+  async startLink(): Promise<{ deviceLinkUri: string }> {
+    await this.start()
+    return this.cli.call('startLink', {})
+  }
+
+  async finishLink(deviceLinkUri: string, deviceName = 'Realtime Translator'): Promise<any> {
+    await this.start()
+    return this.cli.call('finishLink', { deviceLinkUri, deviceName }, 120000)
+  }
+
+  async listContacts(account: string): Promise<any[]> {
+    await this.start()
+    const result = await this.cli.call('listContacts', { account, recipient: [], allRecipients: true, detailed: true, internal: false })
+    return Array.isArray(result) ? result : []
+  }
+
+  async send(account: string, recipient: string, original: string): Promise<SignalMessage> {
+    await this.start()
+    const settings = await this.settings.get()
+    const translated = settings.sendAutoTranslate
+      ? await this.translator.translate({ text: original, sourceLanguage: settings.localLanguage, targetLanguage: settings.targetLanguage })
+      : original
+    const result = await this.cli.call('send', { account, recipient: [recipient], message: translated })
+    const msg: SignalMessage = {
+      account, peer: recipient, fromMe: true, original, translated,
+      timestamp: Number(result?.timestamp || Date.now())
+    }
+    this.mainWindow?.webContents.send('signal:message', msg)
+    return msg
+  }
+
+  private async onReceive(params: any): Promise<void> {
+    const envelope = params?.envelope || params?.result?.envelope
+    if (!envelope) return
+    const account = params?.account || params?.result?.account || ''
+    const data = envelope.dataMessage || envelope.syncMessage?.sentMessage
+    const text = data?.message
+    if (!text) return
+    const source = envelope.sourceNumber || envelope.source || data.destinationNumber || data.destination || ''
+    const settings = await this.settings.get()
+    const translated = settings.receiveAutoTranslate
+      ? await this.translator.translate({ text, sourceLanguage: 'auto', targetLanguage: settings.localLanguage }).catch(() => undefined)
+      : undefined
+    const msg: SignalMessage = {
+      account,
+      peer: source,
+      fromMe: Boolean(envelope.syncMessage?.sentMessage),
+      original: text,
+      translated,
+      timestamp: Number(data.timestamp || envelope.timestamp || Date.now())
+    }
+    this.mainWindow?.webContents.send('signal:message', msg)
+  }
+}
