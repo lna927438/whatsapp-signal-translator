@@ -10,11 +10,31 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   saveSettings: (value: any) => ipcRenderer.invoke('settings:save', value),
   getLanguages: () => ipcRenderer.invoke('translator:languages'),
   testTranslation: (text: string, target: string) => ipcRenderer.invoke('translator:test', text, target),
+  signalRuntimeStatus: () => ipcRenderer.invoke('signal:runtime-status'),
+  signalPrepareRuntime: () => ipcRenderer.invoke('signal:prepare-runtime'),
   signalListAccounts: () => ipcRenderer.invoke('signal:list-accounts'),
   signalStartLink: () => ipcRenderer.invoke('signal:start-link'),
   signalFinishLink: (uri: string, name?: string) => ipcRenderer.invoke('signal:finish-link', uri, name),
   signalListContacts: (account: string) => ipcRenderer.invoke('signal:list-contacts', account),
   signalSend: (account: string, recipient: string, text: string) => ipcRenderer.invoke('signal:send', account, recipient, text),
-  onSignalMessage: (callback: (msg: any) => void) => { const fn = (_e: any, msg: any) => callback(msg); ipcRenderer.on('signal:message', fn); return () => ipcRenderer.removeListener('signal:message', fn) },
-  onTranslatorError: (callback: (msg: string) => void) => { const fn = (_e: any, msg: string) => callback(msg); ipcRenderer.on('translator:error', fn); return () => ipcRenderer.removeListener('translator:error', fn) }
+  onSignalRuntime: (callback: (status: any) => void) => {
+    const fn = (_e: any, status: any) => callback(status)
+    ipcRenderer.on('signal:runtime', fn)
+    return () => ipcRenderer.removeListener('signal:runtime', fn)
+  },
+  onSignalDiagnostic: (callback: (message: string) => void) => {
+    const fn = (_e: any, message: string) => callback(message)
+    ipcRenderer.on('signal:diagnostic', fn)
+    return () => ipcRenderer.removeListener('signal:diagnostic', fn)
+  },
+  onSignalMessage: (callback: (msg: any) => void) => {
+    const fn = (_e: any, msg: any) => callback(msg)
+    ipcRenderer.on('signal:message', fn)
+    return () => ipcRenderer.removeListener('signal:message', fn)
+  },
+  onTranslatorError: (callback: (msg: string) => void) => {
+    const fn = (_e: any, msg: string) => callback(msg)
+    ipcRenderer.on('translator:error', fn)
+    return () => ipcRenderer.removeListener('translator:error', fn)
+  }
 })
