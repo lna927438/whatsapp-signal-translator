@@ -14,7 +14,7 @@ A Windows-first Electron desktop app for **real-time precise translation** in Wh
 - Signal account linking via QR device-link URI
 - Incoming/outgoing Signal text translation
 - Automatic first-run Signal runtime preparation on Windows
-- OpenAI / DeepL / Google Translate providers
+- OpenAI / DeepL / Google Cloud Translation providers
 - One translation mode only: **Precise Translation**
 - API credentials stored locally with Electron `safeStorage` when available
 - Translation cache to reduce duplicate calls
@@ -22,6 +22,22 @@ A Windows-first Electron desktop app for **real-time precise translation** in Wh
 ## Translation behavior
 
 Precise Translation preserves meaning, names, numbers, URLs, emojis, punctuation and line breaks. It does not add explanations, answer the message, or rewrite the text stylistically.
+
+## Translation API setup
+
+The app does not reuse a ChatGPT login or ChatGPT subscription. Translation providers require their own API credentials.
+
+For OpenAI:
+
+1. Create an API key in the OpenAI API Platform.
+2. Configure API billing separately from a ChatGPT subscription.
+3. Paste the key into **Translation Settings**.
+4. Keep `gpt-5.6-luna` for the lowest-cost GPT-5.6 translation option unless another model is preferred.
+5. Click **Test API + Translation** before saving. The test uses the values currently entered in the form, so the key does not need to be saved first.
+
+The settings screen reports common failures such as missing/invalid keys, quota/rate-limit responses, unavailable models, network timeouts and permission errors.
+
+DeepL API Free/Pro and Google Cloud Translation API keys can also be configured from the same settings panel.
 
 ## Development
 
