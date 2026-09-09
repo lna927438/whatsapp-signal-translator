@@ -14,7 +14,7 @@ const qr = ref('')
 const status = ref('')
 const diagnostic = ref('')
 const linking = ref(false)
-const runtime = ref<any>({ state: 'checking', message: 'Checking Signal runtime…' })
+const runtime = ref<any>({ state: 'checking', message: '正在检查 Signal 核心…' })
 let linkAttempt = 0
 let offMessage: undefined | (() => void)
 let offRuntime: undefined | (() => void)
@@ -23,9 +23,19 @@ let offDiagnostic: undefined | (() => void)
 const runtimeReady = computed(() => runtime.value?.state === 'ready')
 const runtimeBusy = computed(() => ['checking', 'downloading-signal', 'downloading-java', 'installing'].includes(runtime.value?.state))
 const prepareLabel = computed(() => {
-  if (runtimeBusy.value) return 'Preparing…'
-  if (runtime.value?.state === 'error') return 'Repair Signal Core'
-  return 'Prepare Signal automatically'
+  if (runtimeBusy.value) return '准备中…'
+  if (runtime.value?.state === 'error') return '修复 Signal 核心'
+  return '自动准备 Signal 核心'
+})
+const runtimeStateLabel = computed(() => {
+  const state = runtime.value?.state
+  if (state === 'ready') return '已就绪'
+  if (state === 'checking') return '检查中'
+  if (state === 'downloading-signal') return '下载 Signal'
+  if (state === 'downloading-java') return '下载 Java'
+  if (state === 'installing') return '安装中'
+  if (state === 'error') return '错误'
+  return '未安装'
 })
 
 async function refreshRuntime() {
@@ -38,12 +48,12 @@ async function refreshRuntime() {
 
 async function prepareRuntime() {
   status.value = runtime.value?.state === 'error'
-    ? 'Repairing Signal core…'
-    : 'Preparing Signal core. The first setup downloads signal-cli and Java 25…'
+    ? '正在修复 Signal 核心…'
+    : '正在准备 Signal 核心。首次使用会自动下载 signal-cli 和 Java 25…'
   diagnostic.value = ''
   try {
     runtime.value = await window.desktopAPI.signalPrepareRuntime()
-    status.value = 'Signal core is ready and verified.'
+    status.value = 'Signal 核心已准备并验证完成。'
     await refreshAccounts()
   } catch (error: any) {
     status.value = error.message || String(error)
@@ -70,22 +80,20 @@ async function startLink() {
   diagnostic.value = ''
   qr.value = ''
   linkUri.value = ''
-  status.value = 'Creating a fresh Signal device link…'
+  status.value = '正在生成新的 Signal 设备关联链接…'
 
   try {
     const result = await window.desktopAPI.signalStartLink()
     if (attempt !== linkAttempt) return
 
     const uri = String(result?.deviceLinkUri || '')
-    if (!uri.startsWith('sgnl://linkdevice?')) throw new Error('Signal returned an invalid device-link URI.')
+    if (!uri.startsWith('sgnl://linkdevice?')) throw new Error('Signal 返回了无效的设备关联链接。')
 
     linkUri.value = uri
 
-    // finishLink must already be waiting when the primary phone scans the QR.
-    // Calling it only after the scan can make Signal report an invalid server response.
-    const finishPromise = window.desktopAPI.signalFinishLink(uri, 'Realtime Translator')
+    const finishPromise = window.desktopAPI.signalFinishLink(uri, '实时翻译器')
     qr.value = await QRCode.toDataURL(uri, { width: 260, margin: 2, errorCorrectionLevel: 'M' })
-    status.value = 'Scan now in Signal → Settings → Linked devices. The desktop is already waiting for approval.'
+    status.value = '请立即在手机 Signal 中打开“设置 → 已关联设备”扫描二维码。电脑端已在等待确认。'
 
     void completeLink(finishPromise, attempt)
   } catch (error: any) {
@@ -113,7 +121,7 @@ async function completeLink(finishPromise: Promise<any>, attempt: number) {
 
     qr.value = ''
     linkUri.value = ''
-    status.value = activeAccount.value ? `Signal linked successfully as ${activeAccount.value}.` : 'Signal linked successfully.'
+    status.value = activeAccount.value ? `Signal 绑定成功：${activeAccount.value}` : 'Signal 绑定成功。'
     emit('linked')
   } catch (error: any) {
     if (attempt !== linkAttempt) return
@@ -121,8 +129,8 @@ async function completeLink(finishPromise: Promise<any>, attempt: number) {
     linkUri.value = ''
     const message = String(error?.message || error)
     status.value = /timed out/i.test(message)
-      ? 'Signal linking timed out. Click Link Signal to generate a fresh QR code and scan it promptly.'
-      : `Signal linking failed: ${message}`
+      ? 'Signal 绑定超时。请重新点击“关联 Signal”生成新的二维码，并尽快扫码。'
+      : `Signal 绑定失败：${message}`
   } finally {
     if (attempt === linkAttempt) linking.value = false
   }
@@ -169,42 +177,42 @@ onUnmounted(() => {
     <div class="signal-top">
       <div>
         <h2>Signal</h2>
-        <p v-if="activeAccount">Linked as {{ activeAccount }}</p>
-        <p v-else>No linked Signal account found.</p>
+        <p v-if="activeAccount">已绑定账号：{{ activeAccount }}</p>
+        <p v-else>尚未绑定 Signal 账号。</p>
       </div>
       <select v-if="signalAccounts.length" v-model="activeAccount">
         <option v-for="account in signalAccounts" :key="account" :value="account">{{ account }}</option>
       </select>
-      <button :disabled="runtimeBusy || linking" @click="startLink">{{ linking ? 'Waiting for scan…' : 'Link Signal' }}</button>
+      <button :disabled="runtimeBusy || linking" @click="startLink">{{ linking ? '等待扫码…' : '关联 Signal' }}</button>
     </div>
 
     <div v-if="!runtimeReady" class="runtime-card">
       <div class="runtime-row">
         <div>
-          <strong>Signal Core</strong>
-          <p>{{ runtime.message || 'Signal runtime is required.' }}</p>
+          <strong>Signal 核心</strong>
+          <p>{{ runtime.message || '需要先准备 Signal 运行环境。' }}</p>
         </div>
-        <span class="runtime-state" :class="runtime.state">{{ runtime.state }}</span>
+        <span class="runtime-state" :class="runtime.state">{{ runtimeStateLabel }}</span>
       </div>
       <div v-if="typeof runtime.progress === 'number'" class="runtime-progress">
         <div :style="{ width: runtime.progress + '%' }"></div>
       </div>
       <button class="primary" :disabled="runtimeBusy" @click="prepareRuntime">{{ prepareLabel }}</button>
-      <small>Setup uses the current signal-cli release and Java 25. If startup fails, Repair Signal Core replaces only the runtime files; linked-account data is kept separately.</small>
+      <small>首次准备会下载当前 signal-cli 和 Java 25。若启动失败，“修复 Signal 核心”只替换运行文件，不删除已绑定账号数据。</small>
     </div>
 
     <div v-if="qr" class="qr-box signal-link-box">
       <img :src="qr" />
-      <div class="link-wait"><span class="link-dot"></span><strong>Waiting for your phone</strong></div>
+      <div class="link-wait"><span class="link-dot"></span><strong>等待手机扫码确认</strong></div>
       <p>{{ status }}</p>
-      <small>Do not press another desktop button after scanning. Approval completes automatically.</small>
+      <small>扫码后无需再点击电脑端按钮，绑定会自动完成。</small>
     </div>
     <p v-else-if="status" class="status">{{ status }}</p>
     <p v-if="diagnostic" class="diagnostic">{{ diagnostic }}</p>
 
     <template v-if="runtimeReady">
       <div class="signal-recipient">
-        <label>Recipient phone number<input v-model="recipient" placeholder="+1…" /></label>
+        <label>对方手机号<input v-model="recipient" placeholder="例如 +1…" /></label>
       </div>
       <div class="messages">
         <div v-for="message in messages" :key="message.timestamp + ':' + message.peer" class="msg" :class="{ mine: message.fromMe }">
@@ -215,8 +223,8 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="composer">
-        <textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="Type in your language…"></textarea>
-        <button class="primary" @click="send">Translate & Send</button>
+        <textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="输入中文，发送前自动翻译…"></textarea>
+        <button class="primary" @click="send">翻译并发送</button>
       </div>
     </template>
   </div>
