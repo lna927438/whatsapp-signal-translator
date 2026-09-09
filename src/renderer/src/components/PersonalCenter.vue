@@ -1,30 +1,52 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { requireSupabase, supabaseConfigured } from '../lib/supabase'
+import { cloudApi } from '../lib/cloudApi'
 
 const emit = defineEmits(['close', 'updated'])
-const profile = ref<any>(null)
+const localProfile = ref<any>(null)
+const cloudState = ref<any>(null)
+const cloudUsage = ref<any[]>([])
 const editing = ref(false)
 const username = ref('')
 const email = ref('')
 const busy = ref(false)
 const message = ref('')
-const topupOptions = [100_000, 500_000, 1_000_000]
+const cloudError = ref('')
 
 const formatter = new Intl.NumberFormat('zh-CN')
-const remaining = computed(() => Number(profile.value?.remainingCharacters || 0))
-const total = computed(() => Number(profile.value?.totalCharacters || 0))
-const used = computed(() => Number(profile.value?.usedCharacters || 0))
+const remaining = computed(() => Number(cloudState.value?.wallet?.balance || 0))
+const credited = computed(() => Number(cloudState.value?.wallet?.lifetime_credited || 0))
+const used = computed(() => Number(cloudState.value?.wallet?.lifetime_debited || 0))
+const total = computed(() => Math.max(remaining.value + used.value, credited.value, 0))
 const usedPercent = computed(() => total.value > 0 ? Math.min(100, Math.round((used.value / total.value) * 100)) : 0)
+const profile = computed(() => cloudState.value?.profile || {})
+const user = computed(() => cloudState.value?.user || {})
 
 function formatChars(value: number) { return formatter.format(Math.max(0, Math.floor(Number(value || 0)))) }
-function formatDate(value: number) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
-function scrollToTopup() { globalThis.document?.getElementById('character-topup')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
+function formatDate(value: string | number | undefined) {
+  if (!value) return '—'
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
 
 async function reload() {
-  profile.value = await window.desktopAPI.getProfile()
-  username.value = profile.value?.username || ''
-  email.value = profile.value?.email || ''
+  busy.value = true
+  cloudError.value = ''
+  try {
+    localProfile.value = await window.desktopAPI.getProfile()
+    cloudState.value = await cloudApi.me()
+    const usageResult = await cloudApi.usage().catch(() => ({ usage: [] }))
+    cloudUsage.value = Array.isArray(usageResult?.usage) ? usageResult.usage : []
+    username.value = profile.value?.username || localProfile.value?.username || ''
+    email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
+  } catch (error: any) {
+    cloudError.value = error?.message || String(error)
+    localProfile.value = await window.desktopAPI.getProfile().catch(() => null)
+    username.value = localProfile.value?.username || ''
+    email.value = localProfile.value?.email || ''
+  } finally {
+    busy.value = false
+  }
 }
 
 async function saveAccount() {
@@ -43,20 +65,11 @@ async function saveAccount() {
         }
       }
     }
-    profile.value = await window.desktopAPI.updateProfile({ username: username.value, email: email.value })
+    await window.desktopAPI.updateProfile({ username: username.value, email: email.value })
     editing.value = false
-    message.value = '账号信息已保存。邮箱修改可能需要按 Supabase 安全策略完成确认。'
-    emit('updated', profile.value)
-  } catch (error: any) { message.value = error?.message || String(error) }
-  finally { busy.value = false }
-}
-
-async function topup(amount: number) {
-  busy.value = true; message.value = ''
-  try {
-    profile.value = await window.desktopAPI.topUpCharacters(amount, `字符包 +${formatChars(amount)}`)
-    message.value = `开发测试额度已增加 ${formatChars(amount)} 个字符。正式版将改为服务端充值。`
-    emit('updated', profile.value)
+    message.value = '账号信息已保存。'
+    await reload()
+    emit('updated', cloudState.value)
   } catch (error: any) { message.value = error?.message || String(error) }
   finally { busy.value = false }
 }
@@ -68,7 +81,10 @@ async function logout() {
     if (supabaseConfigured) await requireSupabase().auth.signOut()
     await window.desktopAPI.authSetOnlineSession(null)
     globalThis.location.reload()
-  } catch (error: any) { message.value = error?.message || String(error); busy.value = false }
+  } catch (error: any) {
+    message.value = error?.message || String(error)
+    busy.value = false
+  }
 }
 
 onMounted(reload)
@@ -77,18 +93,56 @@ onMounted(reload)
 <template>
   <div class="modal-backdrop personal-center-backdrop" @click.self="emit('close')">
     <section class="personal-center-card">
-      <header class="personal-center-header"><div><span class="personal-center-kicker">ACCOUNT</span><h2>个人中心</h2><p>在线身份由 Supabase Auth 管理；字符钱包正在迁移到服务端。</p></div><button class="personal-close" @click="emit('close')">×</button></header>
-      <div v-if="profile" class="personal-center-body">
-        <div class="quota-hero"><div><small>剩余字符数</small><strong>{{ formatChars(remaining) }}</strong><span>{{ profile.planName || '高级套餐' }}</span></div><div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ 100 - usedPercent }}%</b><small>剩余</small></div></div>
-        <div class="quota-progress"><i :style="{ width: usedPercent + '%' }"></i></div><div class="quota-progress-labels"><span>已用 {{ formatChars(used) }}</span><span>总额度 {{ formatChars(total) }}</span></div>
-        <div class="profile-grid"><div class="profile-row"><span>用户名</span><b>{{ profile.username || '未设置' }}</b></div><div class="profile-row"><span>邮箱</span><b>{{ profile.email || '未设置' }}</b></div><div class="profile-row"><span>套餐类型</span><b>{{ profile.planName || '高级套餐' }}</b></div><div class="profile-row"><span>注册时间</span><b>{{ formatDate(profile.registeredAt) }}</b></div></div>
-        <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">账号中心</button><button class="personal-secondary" @click="scrollToTopup">充值</button></div>
-        <div v-if="editing" class="account-editor"><label>用户名<input v-model="username" placeholder="请输入用户名" maxlength="80" /></label><label>邮箱<input v-model="email" type="email" placeholder="请输入邮箱" maxlength="160" /></label><div class="account-editor-actions"><button class="secondary" @click="editing = false">取消</button><button class="primary" :disabled="busy" @click="saveAccount">{{ busy ? '保存中…' : '保存资料' }}</button></div><small>用户名同步到 Supabase profiles；邮箱由 Supabase Auth 管理。</small></div>
-        <div id="character-topup" class="topup-section"><div class="section-title"><div><strong>字符充值</strong><small>按源文本字符数计算</small></div><span>迁移中：当前为本地测试额度</span></div><div class="topup-grid"><button v-for="amount in topupOptions" :key="amount" :disabled="busy" @click="topup(amount)"><b>+{{ formatChars(amount) }}</b><span>字符</span></button></div><p>正式版充值会由 Cloudflare API + Supabase 钱包 + Stripe webhook 完成，客户端不能直接修改余额。</p></div>
-        <div class="usage-history"><div class="section-title"><div><strong>字符明细</strong><small>最近 {{ Math.min(profile.ledger?.length || 0, 20) }} 条</small></div></div><div v-if="profile.ledger?.length" class="usage-list"><div v-for="item in profile.ledger.slice(0, 20)" :key="item.id" class="usage-row"><div><b>{{ item.note || (item.type === 'translation' ? '翻译' : '充值') }}</b><small>{{ formatDate(item.createdAt) }}</small></div><strong :class="item.characters >= 0 ? 'plus' : 'minus'">{{ item.characters >= 0 ? '+' : '' }}{{ formatChars(Math.abs(item.characters)) }}</strong></div></div><div v-else class="usage-empty">暂时没有字符使用记录。</div></div>
-        <button class="personal-logout" :disabled="busy" @click="logout">退出在线账号</button><p class="personal-logout-note">退出不会清除 WhatsApp 登录状态或本地翻译缓存。</p><p v-if="message" class="personal-message">{{ message }}</p>
+      <header class="personal-center-header">
+        <div><span class="personal-center-kicker">ONLINE ACCOUNT</span><h2>个人中心</h2><p>在线身份、字符余额和使用记录均来自 Supabase 云端账户。</p></div>
+        <div style="display:flex;gap:8px;align-items:center"><button class="personal-logout" :disabled="busy" @click="logout">退出登录</button><button class="personal-close" @click="emit('close')">×</button></div>
+      </header>
+
+      <div v-if="cloudState || localProfile" class="personal-center-body">
+        <div v-if="cloudError" class="api-message error">云端账户读取失败：{{ cloudError }}</div>
+
+        <div class="quota-hero">
+          <div><small>云端剩余字符数</small><strong>{{ formatChars(remaining) }}</strong><span>{{ profile?.plan_code || 'free' }}</span></div>
+          <div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ total > 0 ? 100 - usedPercent : 0 }}%</b><small>剩余</small></div>
+        </div>
+        <div class="quota-progress"><i :style="{ width: usedPercent + '%' }"></i></div>
+        <div class="quota-progress-labels"><span>累计使用 {{ formatChars(used) }}</span><span>累计入账 {{ formatChars(credited) }}</span></div>
+
+        <div class="profile-grid">
+          <div class="profile-row"><span>用户名</span><b>{{ profile?.username || localProfile?.username || '未设置' }}</b></div>
+          <div class="profile-row"><span>邮箱</span><b>{{ user?.email || profile?.email || localProfile?.email || '未设置' }}</b></div>
+          <div class="profile-row"><span>套餐类型</span><b>{{ profile?.plan_code || 'free' }}</b></div>
+          <div class="profile-row"><span>账号状态</span><b>{{ profile?.status || 'active' }}</b></div>
+          <div class="profile-row"><span>注册时间</span><b>{{ formatDate(profile?.created_at) }}</b></div>
+          <div class="profile-row"><span>云端服务</span><b>Cloudflare API 已连接</b></div>
+        </div>
+
+        <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">账号中心</button><button class="personal-secondary" disabled title="支付系统接入后开放">充值即将开放</button></div>
+
+        <div v-if="editing" class="account-editor">
+          <label>用户名<input v-model="username" placeholder="请输入用户名" maxlength="80" /></label>
+          <label>邮箱<input v-model="email" type="email" placeholder="请输入邮箱" maxlength="160" /></label>
+          <div class="account-editor-actions"><button class="secondary" @click="editing = false">取消</button><button class="primary" :disabled="busy" @click="saveAccount">{{ busy ? '保存中…' : '保存资料' }}</button></div>
+          <small>用户名写入 Supabase profiles；邮箱由 Supabase Auth 管理。</small>
+        </div>
+
+        <div class="usage-history">
+          <div class="section-title"><div><strong>最近云端翻译消耗</strong><small>最近 {{ Math.min(cloudUsage.length, 50) }} 条</small></div></div>
+          <div v-if="cloudUsage.length" class="usage-list">
+            <div v-for="item in cloudUsage" :key="item.request_id" class="usage-row">
+              <div><b>{{ item.model || item.provider || '云端翻译' }}</b><small>{{ formatDate(item.created_at) }} · {{ item.latency_ms || 0 }} ms</small></div>
+              <strong class="minus">-{{ formatChars(item.source_characters || 0) }}</strong>
+            </div>
+          </div>
+          <div v-else class="usage-empty">暂时没有云端翻译使用记录。</div>
+        </div>
+
+        <button class="personal-logout" :disabled="busy" @click="logout">退出当前账号</button>
+        <p class="personal-logout-note">退出账号不会清除 WhatsApp / Signal 登录状态，也不会删除本地历史翻译缓存。字符余额保存在云端。</p>
+        <p v-if="message" class="personal-message">{{ message }}</p>
       </div>
-      <div v-else class="personal-loading">正在读取个人中心…</div>
+
+      <div v-else class="personal-loading">正在读取云端个人中心…</div>
     </section>
   </div>
 </template>
