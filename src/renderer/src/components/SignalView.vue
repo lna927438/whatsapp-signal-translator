@@ -13,7 +13,9 @@ const linkUri = ref('')
 const qr = ref('')
 const status = ref('')
 const diagnostic = ref('')
+const linking = ref(false)
 const runtime = ref<any>({ state: 'checking', message: 'Checking Signal runtime…' })
+let linkAttempt = 0
 let offMessage: undefined | (() => void)
 let offRuntime: undefined | (() => void)
 let offDiagnostic: undefined | (() => void)
@@ -59,33 +61,70 @@ async function refreshAccounts() {
 }
 
 async function startLink() {
+  if (linking.value) return
   if (!runtimeReady.value) await prepareRuntime()
   if (!runtimeReady.value) return
+
+  const attempt = ++linkAttempt
+  linking.value = true
+  diagnostic.value = ''
+  qr.value = ''
+  linkUri.value = ''
+  status.value = 'Creating a fresh Signal device link…'
+
   try {
-    diagnostic.value = ''
-    status.value = 'Starting Signal link…'
     const result = await window.desktopAPI.signalStartLink()
-    linkUri.value = result.deviceLinkUri
-    qr.value = await QRCode.toDataURL(linkUri.value, { width: 220, margin: 1 })
-    status.value = 'Scan this QR code from Signal → Settings → Linked devices.'
+    if (attempt !== linkAttempt) return
+
+    const uri = String(result?.deviceLinkUri || '')
+    if (!uri.startsWith('sgnl://linkdevice?')) throw new Error('Signal returned an invalid device-link URI.')
+
+    linkUri.value = uri
+
+    // finishLink must already be waiting when the primary phone scans the QR.
+    // Calling it only after the scan can make Signal report an invalid server response.
+    const finishPromise = window.desktopAPI.signalFinishLink(uri, 'Realtime Translator')
+    qr.value = await QRCode.toDataURL(uri, { width: 260, margin: 2, errorCorrectionLevel: 'M' })
+    status.value = 'Scan now in Signal → Settings → Linked devices. The desktop is already waiting for approval.'
+
+    void completeLink(finishPromise, attempt)
   } catch (error: any) {
+    if (attempt !== linkAttempt) return
+    linking.value = false
+    linkUri.value = ''
+    qr.value = ''
     status.value = error.message || String(error)
   }
 }
 
-async function finishLink() {
-  if (!linkUri.value) return
+async function completeLink(finishPromise: Promise<any>, attempt: number) {
   try {
-    status.value = 'Waiting for Signal to finish linking…'
-    await window.desktopAPI.signalFinishLink(linkUri.value, 'Realtime Translator')
-    linkUri.value = ''
-    qr.value = ''
+    const result = await finishPromise
+    if (attempt !== linkAttempt) return
+
+    const linkedNumber = String(result?.number || '')
     await refreshAccounts()
-    if (activeAccount.value) await window.desktopAPI.updateAccount(props.accountRecord.id, { signalAccount: activeAccount.value })
+    if (linkedNumber) activeAccount.value = linkedNumber
+    else if (!activeAccount.value && signalAccounts.value[0]) activeAccount.value = signalAccounts.value[0]
+
+    if (activeAccount.value) {
+      await window.desktopAPI.updateAccount(props.accountRecord.id, { signalAccount: activeAccount.value })
+    }
+
+    qr.value = ''
+    linkUri.value = ''
+    status.value = activeAccount.value ? `Signal linked successfully as ${activeAccount.value}.` : 'Signal linked successfully.'
     emit('linked')
-    status.value = 'Signal linked.'
   } catch (error: any) {
-    status.value = error.message || String(error)
+    if (attempt !== linkAttempt) return
+    qr.value = ''
+    linkUri.value = ''
+    const message = String(error?.message || error)
+    status.value = /timed out/i.test(message)
+      ? 'Signal linking timed out. Click Link Signal to generate a fresh QR code and scan it promptly.'
+      : `Signal linking failed: ${message}`
+  } finally {
+    if (attempt === linkAttempt) linking.value = false
   }
 }
 
@@ -118,6 +157,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  linkAttempt += 1
   offMessage?.()
   offRuntime?.()
   offDiagnostic?.()
@@ -135,7 +175,7 @@ onUnmounted(() => {
       <select v-if="signalAccounts.length" v-model="activeAccount">
         <option v-for="account in signalAccounts" :key="account" :value="account">{{ account }}</option>
       </select>
-      <button :disabled="runtimeBusy" @click="startLink">Link Signal</button>
+      <button :disabled="runtimeBusy || linking" @click="startLink">{{ linking ? 'Waiting for scan…' : 'Link Signal' }}</button>
     </div>
 
     <div v-if="!runtimeReady" class="runtime-card">
@@ -153,10 +193,11 @@ onUnmounted(() => {
       <small>Setup uses the current signal-cli release and Java 25. If startup fails, Repair Signal Core replaces only the runtime files; linked-account data is kept separately.</small>
     </div>
 
-    <div v-if="qr" class="qr-box">
+    <div v-if="qr" class="qr-box signal-link-box">
       <img :src="qr" />
+      <div class="link-wait"><span class="link-dot"></span><strong>Waiting for your phone</strong></div>
       <p>{{ status }}</p>
-      <button class="primary" @click="finishLink">I scanned it — finish linking</button>
+      <small>Do not press another desktop button after scanning. Approval completes automatically.</small>
     </div>
     <p v-else-if="status" class="status">{{ status }}</p>
     <p v-if="diagnostic" class="diagnostic">{{ diagnostic }}</p>
