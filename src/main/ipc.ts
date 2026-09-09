@@ -91,5 +91,13 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('signal:list-contacts', (_e, account: string) => signal.listContacts(account))
   ipcMain.handle('signal:send', (_e, recordId: string, account: string, recipient: string, text: string) => signal.send(recordId, account, recipient, text))
 
+  ipcMain.on('translator:status', (_e, accountId: string | undefined, status: any) => {
+    mainWindow.webContents.send('translator:status', {
+      accountId,
+      state: status?.state || 'ready',
+      message: status?.message || '翻译器已就绪',
+      at: Number(status?.at || Date.now())
+    })
+  })
   ipcMain.on('translator:error', (_e, message: string) => mainWindow.webContents.send('translator:error', message))
 }
