@@ -2,6 +2,9 @@ import { BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
 import { whatsappInjectionScript } from './inject/script'
 
+const SIDEBAR_WIDTH = 268
+const ACCOUNT_TOOLBAR_HEIGHT = 118
+
 function chromeUserAgent(): string {
   const chromeVersion = process.versions.chrome || '140.0.0.0'
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
@@ -70,6 +73,7 @@ export class WhatsAppAdapter {
       webPreferences: {
         partition: `persist:wa:${accountId}`,
         preload,
+        additionalArguments: [`--rt-account-id=${accountId}`],
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false
@@ -112,8 +116,11 @@ export class WhatsAppAdapter {
     const view = this.views.get(this.activeId)
     if (!view || view.webContents.isDestroyed()) return
     const [width, height] = this.mainWindow.getContentSize()
-    const sidebar = 268
-    const toolbar = 84
-    view.setBounds({ x: sidebar, y: toolbar, width: Math.max(360, width - sidebar), height: Math.max(300, height - toolbar) })
+    view.setBounds({
+      x: SIDEBAR_WIDTH,
+      y: ACCOUNT_TOOLBAR_HEIGHT,
+      width: Math.max(360, width - SIDEBAR_WIDTH),
+      height: Math.max(300, height - ACCOUNT_TOOLBAR_HEIGHT)
+    })
   }
 }
