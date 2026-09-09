@@ -1,14 +1,22 @@
 export type Platform = 'whatsapp' | 'signal'
 
+export type TranslationProviderName = 'openai' | 'deepl' | 'google'
+
 export interface AccountRecord {
   id: string
   platform: Platform
   label: string
   signalAccount?: string
+  localLanguage?: string
+  targetLanguage?: string
+  receiveAutoTranslate?: boolean
+  sendAutoTranslate?: boolean
+  blockChineseSend?: boolean
+  groupTranslate?: boolean
+  fontSize?: number
+  translationColor?: string
   createdAt: number
 }
-
-export type TranslationProviderName = 'openai' | 'deepl' | 'google'
 
 export interface RuntimeSettings {
   localLanguage: string
@@ -17,6 +25,9 @@ export interface RuntimeSettings {
   receiveAutoTranslate: boolean
   sendAutoTranslate: boolean
   blockChineseSend: boolean
+  groupTranslate: boolean
+  fontSize: number
+  translationColor: string
 }
 
 export interface ProviderSettings {
@@ -26,7 +37,11 @@ export interface ProviderSettings {
   googleApiKey?: string
 }
 
-export interface AppSettings extends RuntimeSettings, ProviderSettings {}
+export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor'>, ProviderSettings {
+  groupTranslate?: boolean
+  fontSize?: number
+  translationColor?: string
+}
 
 export interface TranslationRequest {
   text: string
