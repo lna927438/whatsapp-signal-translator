@@ -4,6 +4,7 @@ import type { AppSettings, RuntimeSettings, TranslationRequest } from './types'
 import { AccountManager } from './accounts/accountManager'
 import { SettingsStore } from './storage/settingsStore'
 import { ProfileStore } from './storage/profileStore'
+import { AuthStore } from './storage/authStore'
 import { TranslationEngine } from './translation/translationEngine'
 import { detectContactLanguage } from './translation/languageDetection'
 import { languages } from './translation/languages'
@@ -22,6 +23,13 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   const accounts = new AccountManager()
   const settings = new SettingsStore()
   const profile = new ProfileStore()
+  const auth = new AuthStore()
+
+  const requireAuth = async () => {
+    const state = await auth.status()
+    if (!state.authenticated) throw new Error('登录状态已失效，请重新登录。')
+    return state
+  }
 
   const accountRuntime = async (accountId?: string, conversationId?: string): Promise<RuntimeSettings> => {
     const base = await settings.runtime()
@@ -54,15 +62,36 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     mainWindow.webContents.send('whatsapp:conversation', { accountId, conversationId, conversationName })
   }
 
-  ipcMain.handle('accounts:list', () => accounts.list())
-  ipcMain.handle('accounts:add', async (_e, args: { platform: 'whatsapp' | 'signal'; label?: string; signalAccount?: string }) => accounts.add(args.platform, args.label, args.signalAccount))
-  ipcMain.handle('accounts:update', async (_e, id: string, patch: any) => accounts.update(id, patch))
+  ipcMain.handle('auth:status', () => auth.status())
+  ipcMain.handle('auth:register', async (_e, input: { username: string; email: string; password: string; remember?: boolean }) => {
+    const result = await auth.register(input)
+    await profile.updateIdentity({ username: result.user?.username, email: result.user?.email })
+    return result
+  })
+  ipcMain.handle('auth:login', (_e, input: { identifier: string; password: string; remember?: boolean }) => auth.login(input))
+  ipcMain.handle('auth:logout', async () => {
+    whatsapp.hideAll()
+    return auth.logout()
+  })
+  ipcMain.handle('auth:reset-password', (_e, input: { identifier: string; recoveryCode: string; newPassword: string }) => auth.resetPassword(input))
+
+  ipcMain.handle('accounts:list', async () => { await requireAuth(); return accounts.list() })
+  ipcMain.handle('accounts:add', async (_e, args: { platform: 'whatsapp' | 'signal'; label?: string; signalAccount?: string }) => {
+    await requireAuth()
+    return accounts.add(args.platform, args.label, args.signalAccount)
+  })
+  ipcMain.handle('accounts:update', async (_e, id: string, patch: any) => {
+    await requireAuth()
+    return accounts.update(id, patch)
+  })
   ipcMain.handle('accounts:set-contact-language', async (_e, accountId: string, conversationId: string, language: string, name?: string) => {
+    await requireAuth()
     const updated = await accounts.updateContactLanguage(accountId, conversationId, language, name, 'manual')
     mainWindow.webContents.send('accounts:contact-language', { accountId, conversationId, language, name, source: 'manual' })
     return updated
   })
   ipcMain.handle('accounts:remove', async (_e, id: string) => {
+    await requireAuth()
     const all = await accounts.list()
     const item = all.find((account) => account.id === id)
     if (item?.platform === 'whatsapp') whatsapp.remove(id)
@@ -70,35 +99,53 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return true
   })
 
-  ipcMain.handle('profile:get', () => profile.get())
-  ipcMain.handle('profile:update', async (_e, patch: { username?: string; email?: string; planName?: string }) => profile.updateIdentity(patch))
-  ipcMain.handle('profile:topup', async (_e, characters: number, note?: string) => profile.addCharacters(characters, note || '字符充值'))
+  ipcMain.handle('profile:get', async () => { await requireAuth(); return profile.get() })
+  ipcMain.handle('profile:update', async (_e, patch: { username?: string; email?: string; planName?: string }) => {
+    await requireAuth()
+    if (patch.username !== undefined || patch.email !== undefined) await auth.updateIdentity({ username: patch.username, email: patch.email })
+    return profile.updateIdentity(patch)
+  })
+  ipcMain.handle('profile:topup', async (_e, characters: number, note?: string) => {
+    await requireAuth()
+    return profile.addCharacters(characters, note || '字符充值')
+  })
 
   ipcMain.handle('platform:focus', async (_e, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => {
+    await requireAuth()
     if (args.platform === 'whatsapp' && args.accountId) await whatsapp.focus(args.accountId)
     else whatsapp.hideAll()
     return true
   })
-  ipcMain.handle('ui:set-overlay-open', (_e, open: boolean) => {
+  ipcMain.handle('ui:set-overlay-open', async (_e, open: boolean) => {
+    await requireAuth()
     whatsapp.setOverlayOpen(Boolean(open))
     return true
   })
-  ipcMain.handle('whatsapp:send-native-enter', (_e, accountId?: string) => whatsapp.sendNativeEnter(accountId))
-  ipcMain.handle('whatsapp:commit-translated-send', (_e, accountId: string | undefined, text: string) => whatsapp.commitTranslatedSend(accountId, text))
+  ipcMain.handle('whatsapp:send-native-enter', async (_e, accountId?: string) => { await requireAuth(); return whatsapp.sendNativeEnter(accountId) })
+  ipcMain.handle('whatsapp:commit-translated-send', async (_e, accountId: string | undefined, text: string) => {
+    await requireAuth()
+    return whatsapp.commitTranslatedSend(accountId, text)
+  })
 
-  ipcMain.on('whatsapp:conversation', (_e, accountId: string | undefined, info: { id?: string; name?: string }) => {
+  ipcMain.on('whatsapp:conversation', async (_e, accountId: string | undefined, info: { id?: string; name?: string }) => {
+    if (!(await auth.status()).authenticated) return
     announceConversation(accountId, info?.id, info?.name)
   })
 
-  ipcMain.handle('settings:get', () => settings.get())
+  ipcMain.handle('settings:get', async () => { await requireAuth(); return settings.get() })
   ipcMain.handle('settings:save', async (_e, value) => {
+    await requireAuth()
     await settings.save(value)
     return true
   })
-  ipcMain.handle('translator:get-runtime-settings', (_e, accountId?: string, conversationId?: string) => accountRuntime(accountId, conversationId))
-  ipcMain.handle('translator:metrics', () => translator.metrics())
-  ipcMain.handle('translator:languages', () => languages)
+  ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => {
+    await requireAuth()
+    return accountRuntime(accountId, conversationId)
+  })
+  ipcMain.handle('translator:metrics', async () => { await requireAuth(); return translator.metrics() })
+  ipcMain.handle('translator:languages', async () => { await requireAuth(); return languages })
   ipcMain.handle('translator:translate-incoming', async (_e, accountId: string | undefined, raw: string | TranslatePayload) => {
+    await requireAuth()
     const payload = normalizePayload(raw)
     if (accountId && payload.conversationId) {
       const detected = detectContactLanguage(payload.text)
@@ -129,6 +176,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     })
   })
   ipcMain.handle('translator:translate-outgoing', async (_e, accountId: string | undefined, raw: string | TranslatePayload) => {
+    await requireAuth()
     const payload = normalizePayload(raw)
     const current = await accountRuntime(accountId, payload.conversationId)
     return translator.translate({
@@ -141,8 +189,12 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       context: payload.context
     })
   })
-  ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => translator.translate({ text, sourceLanguage: 'auto', targetLanguage }))
+  ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => {
+    await requireAuth()
+    return translator.translate({ text, sourceLanguage: 'auto', targetLanguage })
+  })
   ipcMain.handle('translator:test-config', async (_e, value: AppSettings, text: string, targetLanguage: string) => {
+    await requireAuth()
     try {
       const translated = await translator.testWithSettings(value, { text, sourceLanguage: 'auto', targetLanguage })
       return { ok: true, translated, message: 'API 连接和翻译测试成功。' }
@@ -151,15 +203,19 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     }
   })
 
-  ipcMain.handle('signal:runtime-status', () => signal.runtimeStatus())
-  ipcMain.handle('signal:prepare-runtime', () => signal.prepareRuntime())
-  ipcMain.handle('signal:list-accounts', () => signal.listAccounts())
-  ipcMain.handle('signal:start-link', () => signal.startLink())
-  ipcMain.handle('signal:finish-link', (_e, uri: string, name?: string) => signal.finishLink(uri, name))
-  ipcMain.handle('signal:list-contacts', (_e, account: string) => signal.listContacts(account))
-  ipcMain.handle('signal:send', (_e, recordId: string, account: string, recipient: string, text: string) => signal.send(recordId, account, recipient, text))
+  ipcMain.handle('signal:runtime-status', async () => { await requireAuth(); return signal.runtimeStatus() })
+  ipcMain.handle('signal:prepare-runtime', async () => { await requireAuth(); return signal.prepareRuntime() })
+  ipcMain.handle('signal:list-accounts', async () => { await requireAuth(); return signal.listAccounts() })
+  ipcMain.handle('signal:start-link', async () => { await requireAuth(); return signal.startLink() })
+  ipcMain.handle('signal:finish-link', async (_e, uri: string, name?: string) => { await requireAuth(); return signal.finishLink(uri, name) })
+  ipcMain.handle('signal:list-contacts', async (_e, account: string) => { await requireAuth(); return signal.listContacts(account) })
+  ipcMain.handle('signal:send', async (_e, recordId: string, account: string, recipient: string, text: string) => {
+    await requireAuth()
+    return signal.send(recordId, account, recipient, text)
+  })
 
-  ipcMain.on('translator:status', (_e, accountId: string | undefined, status: any) => {
+  ipcMain.on('translator:status', async (_e, accountId: string | undefined, status: any) => {
+    if (!(await auth.status()).authenticated) return
     mainWindow.webContents.send('translator:status', {
       accountId,
       state: status?.state || 'ready',
@@ -167,5 +223,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       at: Number(status?.at || Date.now())
     })
   })
-  ipcMain.on('translator:error', (_e, message: string) => mainWindow.webContents.send('translator:error', message))
+  ipcMain.on('translator:error', async (_e, message: string) => {
+    if (!(await auth.status()).authenticated) return
+    mainWindow.webContents.send('translator:error', message)
+  })
 }
