@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('desktopAPI', {
   authStatus: () => ipcRenderer.invoke('auth:status'),
+  authSetOnlineSession: (identity: any) => ipcRenderer.invoke('auth:set-online-session', identity),
   authRegister: (input: any) => ipcRenderer.invoke('auth:register', input),
   authLogin: (input: any) => ipcRenderer.invoke('auth:login', input),
   authLogout: () => ipcRenderer.invoke('auth:logout'),
@@ -29,39 +30,11 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   signalFinishLink: (uri: string, name?: string) => ipcRenderer.invoke('signal:finish-link', uri, name),
   signalListContacts: (account: string) => ipcRenderer.invoke('signal:list-contacts', account),
   signalSend: (recordId: string, account: string, recipient: string, text: string) => ipcRenderer.invoke('signal:send', recordId, account, recipient, text),
-  onSignalRuntime: (callback: (status: any) => void) => {
-    const fn = (_e: any, status: any) => callback(status)
-    ipcRenderer.on('signal:runtime', fn)
-    return () => ipcRenderer.removeListener('signal:runtime', fn)
-  },
-  onSignalDiagnostic: (callback: (message: string) => void) => {
-    const fn = (_e: any, message: string) => callback(message)
-    ipcRenderer.on('signal:diagnostic', fn)
-    return () => ipcRenderer.removeListener('signal:diagnostic', fn)
-  },
-  onSignalMessage: (callback: (msg: any) => void) => {
-    const fn = (_e: any, msg: any) => callback(msg)
-    ipcRenderer.on('signal:message', fn)
-    return () => ipcRenderer.removeListener('signal:message', fn)
-  },
-  onWhatsAppConversation: (callback: (info: any) => void) => {
-    const fn = (_e: any, info: any) => callback(info)
-    ipcRenderer.on('whatsapp:conversation', fn)
-    return () => ipcRenderer.removeListener('whatsapp:conversation', fn)
-  },
-  onContactLanguage: (callback: (info: any) => void) => {
-    const fn = (_e: any, info: any) => callback(info)
-    ipcRenderer.on('accounts:contact-language', fn)
-    return () => ipcRenderer.removeListener('accounts:contact-language', fn)
-  },
-  onTranslatorStatus: (callback: (status: any) => void) => {
-    const fn = (_e: any, status: any) => callback(status)
-    ipcRenderer.on('translator:status', fn)
-    return () => ipcRenderer.removeListener('translator:status', fn)
-  },
-  onTranslatorError: (callback: (msg: string) => void) => {
-    const fn = (_e: any, msg: string) => callback(msg)
-    ipcRenderer.on('translator:error', fn)
-    return () => ipcRenderer.removeListener('translator:error', fn)
-  }
+  onSignalRuntime: (callback: (status: any) => void) => { const fn = (_e: any, status: any) => callback(status); ipcRenderer.on('signal:runtime', fn); return () => ipcRenderer.removeListener('signal:runtime', fn) },
+  onSignalDiagnostic: (callback: (message: string) => void) => { const fn = (_e: any, message: string) => callback(message); ipcRenderer.on('signal:diagnostic', fn); return () => ipcRenderer.removeListener('signal:diagnostic', fn) },
+  onSignalMessage: (callback: (msg: any) => void) => { const fn = (_e: any, msg: any) => callback(msg); ipcRenderer.on('signal:message', fn); return () => ipcRenderer.removeListener('signal:message', fn) },
+  onWhatsAppConversation: (callback: (info: any) => void) => { const fn = (_e: any, info: any) => callback(info); ipcRenderer.on('whatsapp:conversation', fn); return () => ipcRenderer.removeListener('whatsapp:conversation', fn) },
+  onContactLanguage: (callback: (info: any) => void) => { const fn = (_e: any, info: any) => callback(info); ipcRenderer.on('accounts:contact-language', fn); return () => ipcRenderer.removeListener('accounts:contact-language', fn) },
+  onTranslatorStatus: (callback: (status: any) => void) => { const fn = (_e: any, status: any) => callback(status); ipcRenderer.on('translator:status', fn); return () => ipcRenderer.removeListener('translator:status', fn) },
+  onTranslatorError: (callback: (msg: string) => void) => { const fn = (_e: any, msg: string) => callback(msg); ipcRenderer.on('translator:error', fn); return () => ipcRenderer.removeListener('translator:error', fn) }
 })
