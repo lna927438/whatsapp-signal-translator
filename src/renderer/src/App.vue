@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import PersonalCenter from './components/PersonalCenter.vue'
 import SignalView from './components/SignalView.vue'
 
 type ContactPreference = { language: string; name?: string; updatedAt: number; source?: 'manual'|'auto' }
@@ -26,8 +27,10 @@ type ConversationInfo = { id: string; name?: string }
 const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
 const showSettings = ref(false)
+const showProfile = ref(false)
 const error = ref('')
 const settings = ref<any>(null)
+const profile = ref<any>(null)
 const languages = ref<any[]>([])
 const liveStatuses = ref<Record<string, LiveStatus>>({})
 const conversations = ref<Record<string, ConversationInfo>>({})
@@ -69,6 +72,7 @@ const serverName = computed(() => {
 })
 const selectedLiveStatus = computed<LiveStatus>(() => {
   if (!apiConfigured.value) return { state: 'error', message: 'API 密钥未配置' }
+  if (Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: '字符额度已用完' }
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
   return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
 })
@@ -84,6 +88,12 @@ const contactLabel = computed(() => {
   const source = contactPreference.value?.source === 'manual' ? '手动' : contactPreference.value?.source === 'auto' ? '自动识别' : '账号默认'
   return `${conversation.name || '当前联系人'} · ${source}`
 })
+const remainingCharsLabel = computed(() => new Intl.NumberFormat('zh-CN').format(Math.max(0, Number(profile.value?.remainingCharacters || 0))))
+const quotaLow = computed(() => {
+  const total = Number(profile.value?.totalCharacters || 0)
+  const remaining = Number(profile.value?.remainingCharacters || 0)
+  return total > 0 && remaining / total <= 0.1
+})
 
 async function reload() {
   accounts.value = await window.desktopAPI.listAccounts()
@@ -98,8 +108,13 @@ async function reloadSettings() {
   if (!languages.value.length) languages.value = await window.desktopAPI.getLanguages()
 }
 
+async function reloadProfile() {
+  try { profile.value = await window.desktopAPI.getProfile() } catch { /* ignore transient profile read errors */ }
+}
+
 async function reloadMetrics() {
   try { metrics.value = await window.desktopAPI.getTranslationMetrics() } catch { /* ignore transient UI metric errors */ }
+  await reloadProfile()
 }
 
 async function addWhatsApp() {
@@ -193,6 +208,22 @@ async function closeSettings() {
   await window.desktopAPI.setOverlayOpen(false)
 }
 
+async function openProfile() {
+  await window.desktopAPI.setOverlayOpen(true)
+  await reloadProfile()
+  showProfile.value = true
+}
+
+async function closeProfile() {
+  showProfile.value = false
+  await reloadProfile()
+  await window.desktopAPI.setOverlayOpen(false)
+}
+
+function onProfileUpdated(next: any) {
+  profile.value = next
+}
+
 onMounted(async () => {
   await Promise.all([reload(), reloadSettings(), reloadMetrics()])
   metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
@@ -235,7 +266,10 @@ onUnmounted(() => {
           <span class="dot" :class="account.platform"></span><span class="account-label">{{ account.label }}</span><span class="close" title="删除账号" @click.stop="remove(account)">×</span>
         </button>
       </div>
-      <button class="settings-btn" @click="openSettings">⚙ 设置</button>
+      <div class="sidebar-bottom">
+        <button class="profile-btn" @click="openProfile"><span>👤 个人中心</span><small>剩余 {{ remainingCharsLabel }} 字符</small></button>
+        <button class="settings-btn" @click="openSettings">⚙ 设置</button>
+      </div>
     </aside>
 
     <header v-if="selected" class="account-toolbar">
@@ -284,6 +318,7 @@ onUnmounted(() => {
         <button class="mini-switch" :class="{ on: blockChineseSend }" :title="blockChineseSend ? '中文原文禁止直接发送' : '允许直接发送中文'" @click="patchSelected({ blockChineseSend: !blockChineseSend })"><span></span></button>
 
         <div class="live-status" :class="selectedLiveStatus.state" :title="selectedLiveStatus.message"><i></i><span>{{ selectedLiveStatus.message }}</span></div>
+        <span class="quota-badge" :class="{ low: quotaLow }" title="只有新的 API 翻译成功后才扣字符；缓存和历史恢复不扣字符">余 {{ remainingCharsLabel }} 字符</span>
         <span class="metric-badge" :title="`累计请求 ${metrics.totalRequests || 0}，API 调用 ${metrics.providerCalls || 0}，平均延迟 ${metrics.averageLatencyMs || 0} ms`">{{ metricLabel }}</span>
         <span v-if="contactLabel" class="contact-badge" :title="selectedConversation?.id">{{ contactLabel }}</span>
         <span v-if="controlFeedback.message" class="save-feedback" :class="controlFeedback.state">{{ controlFeedback.message }}</span>
@@ -293,7 +328,7 @@ onUnmounted(() => {
 
     <header v-else class="account-toolbar empty-toolbar">
       <strong>请选择或添加一个账号</strong>
-      <button class="toolbar-settings" @click="openSettings">翻译设置</button>
+      <div class="empty-toolbar-actions"><span class="quota-badge" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span><button class="toolbar-settings" @click="openSettings">翻译设置</button></div>
     </header>
 
     <main class="content" :class="{ 'signal-content': selectedIsSignal }">
@@ -302,6 +337,7 @@ onUnmounted(() => {
     </main>
 
     <SettingsPanel v-if="showSettings" @close="closeSettings" />
+    <PersonalCenter v-if="showProfile" @close="closeProfile" @updated="onProfileUpdated" />
     <div v-if="error" class="toast">{{ error }}</div>
   </div>
 </template>
