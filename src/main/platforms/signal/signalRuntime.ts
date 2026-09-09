@@ -26,7 +26,7 @@ export interface SignalRuntimeStatus {
   javaHome?: string
 }
 
-interface RuntimeInfo {
+export interface SignalRuntimeInfo {
   signalCliPath: string
   javaHome?: string
   source: 'env' | 'bundled' | 'managed' | 'path'
@@ -41,7 +41,7 @@ interface RuntimeManifest {
 }
 
 export class SignalRuntimeManager extends EventEmitter {
-  private installing?: Promise<RuntimeInfo>
+  private installing?: Promise<SignalRuntimeInfo>
 
   async status(): Promise<SignalRuntimeStatus> {
     this.emitStatus({ state: 'checking', message: 'Checking Signal runtime…' })
@@ -56,7 +56,7 @@ export class SignalRuntimeManager extends EventEmitter {
     }
   }
 
-  async ensureReady(): Promise<RuntimeInfo> {
+  async ensureReady(): Promise<SignalRuntimeInfo> {
     const existing = await this.locate()
     if (existing) {
       this.emitStatus({
@@ -79,7 +79,24 @@ export class SignalRuntimeManager extends EventEmitter {
     return this.installing
   }
 
-  private async locate(): Promise<RuntimeInfo | undefined> {
+  async repair(): Promise<SignalRuntimeInfo> {
+    if (process.platform !== 'win32') {
+      throw new Error('Automatic Signal runtime repair is currently supported on Windows only.')
+    }
+    if (process.env.SIGNAL_CLI_PATH) {
+      throw new Error('Signal is using SIGNAL_CLI_PATH. Remove or correct that override before using automatic repair.')
+    }
+    if (!this.installing) {
+      this.installing = (async () => {
+        this.emitStatus({ state: 'checking', message: 'Repairing Signal runtime…' })
+        await rm(this.runtimeRoot(), { recursive: true, force: true })
+        return this.installWindowsRuntime()
+      })().finally(() => { this.installing = undefined })
+    }
+    return this.installing
+  }
+
+  private async locate(): Promise<SignalRuntimeInfo | undefined> {
     const envPath = process.env.SIGNAL_CLI_PATH
     if (envPath && (existsSync(envPath) || !isAbsoluteLike(envPath))) {
       return { signalCliPath: envPath, source: 'env', javaHome: process.env.JAVA_HOME }
@@ -119,11 +136,14 @@ export class SignalRuntimeManager extends EventEmitter {
     return join(app.getPath('userData'), 'signal-runtime')
   }
 
-  private async readManagedManifest(): Promise<RuntimeInfo | undefined> {
+  private async readManagedManifest(): Promise<SignalRuntimeInfo | undefined> {
     try {
       const raw = await readFile(join(this.runtimeRoot(), 'runtime.json'), 'utf8')
       const manifest = JSON.parse(raw) as RuntimeManifest
-      if (existsSync(manifest.signalCliPath) && existsSync(join(manifest.javaHome, 'bin', 'java.exe'))) {
+      const javaExe = join(manifest.javaHome, 'bin', 'java.exe')
+      const signalHome = dirname(dirname(manifest.signalCliPath))
+      const signalLib = join(signalHome, 'lib')
+      if (existsSync(manifest.signalCliPath) && existsSync(javaExe) && existsSync(signalLib)) {
         return {
           signalCliPath: manifest.signalCliPath,
           javaHome: manifest.javaHome,
@@ -136,7 +156,7 @@ export class SignalRuntimeManager extends EventEmitter {
     return undefined
   }
 
-  private async installWindowsRuntime(): Promise<RuntimeInfo> {
+  private async installWindowsRuntime(): Promise<SignalRuntimeInfo> {
     const root = this.runtimeRoot()
     const staging = join(root, '.staging')
     await rm(staging, { recursive: true, force: true })
@@ -145,7 +165,7 @@ export class SignalRuntimeManager extends EventEmitter {
     try {
       this.emitStatus({ state: 'checking', message: 'Finding the latest Signal runtime…' })
       const signalRelease = await fetchJson<any>('https://api.github.com/repos/AsamK/signal-cli/releases/latest', {
-        'Accept': 'application/vnd.github+json',
+        Accept: 'application/vnd.github+json',
         'User-Agent': 'WhatsApp-Signal-Translator'
       })
       const signalAsset = (signalRelease.assets || []).find((asset: any) => /^signal-cli-[0-9][0-9.]*\.tar\.gz$/i.test(asset.name))
@@ -187,6 +207,8 @@ export class SignalRuntimeManager extends EventEmitter {
       if (!signalCliPath) throw new Error('Signal core was downloaded but signal-cli.bat was not found after extraction.')
       if (!javaExe) throw new Error('Java runtime was downloaded but java.exe was not found after extraction.')
       const javaHome = dirname(dirname(javaExe))
+      const signalHome = dirname(dirname(signalCliPath))
+      if (!existsSync(join(signalHome, 'lib'))) throw new Error('Signal core is incomplete: the lib directory is missing.')
 
       const manifest: RuntimeManifest = {
         signalCliPath: resolve(signalCliPath),
@@ -198,7 +220,7 @@ export class SignalRuntimeManager extends EventEmitter {
       await writeFile(join(root, 'runtime.json'), JSON.stringify(manifest, null, 2), 'utf8')
       await rm(staging, { recursive: true, force: true })
 
-      const result: RuntimeInfo = {
+      const result: SignalRuntimeInfo = {
         signalCliPath: manifest.signalCliPath,
         javaHome: manifest.javaHome,
         source: 'managed'
