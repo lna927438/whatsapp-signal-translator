@@ -15,7 +15,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('accounts:add', async (_e, args: { platform: 'whatsapp' | 'signal'; label?: string; signalAccount?: string }) => accounts.add(args.platform, args.label, args.signalAccount))
   ipcMain.handle('accounts:update', async (_e, id: string, patch: any) => accounts.update(id, patch))
   ipcMain.handle('accounts:remove', async (_e, id: string) => {
-    const all = await accounts.list(); const item = all.find((a) => a.id === id)
+    const all = await accounts.list()
+    const item = all.find((a) => a.id === id)
     if (item?.platform === 'whatsapp') whatsapp.remove(id)
     await accounts.remove(id)
     return true
@@ -28,19 +29,24 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
 
   ipcMain.handle('settings:get', () => settings.get())
-  ipcMain.handle('settings:save', async (_e, value) => { await settings.save(value); return true })
+  ipcMain.handle('settings:save', async (_e, value) => {
+    await settings.save(value)
+    return true
+  })
   ipcMain.handle('translator:get-runtime-settings', () => settings.runtime())
   ipcMain.handle('translator:languages', () => languages)
   ipcMain.handle('translator:translate-incoming', async (_e, text: string) => {
-    const s = await settings.get()
-    return translator.translate({ text, sourceLanguage: 'auto', targetLanguage: s.localLanguage })
+    const current = await settings.get()
+    return translator.translate({ text, sourceLanguage: 'auto', targetLanguage: current.localLanguage })
   })
   ipcMain.handle('translator:translate-outgoing', async (_e, text: string) => {
-    const s = await settings.get()
-    return translator.translate({ text, sourceLanguage: s.localLanguage, targetLanguage: s.targetLanguage })
+    const current = await settings.get()
+    return translator.translate({ text, sourceLanguage: current.localLanguage, targetLanguage: current.targetLanguage })
   })
   ipcMain.handle('translator:test', async (_e, text: string, targetLanguage: string) => translator.translate({ text, sourceLanguage: 'auto', targetLanguage }))
 
+  ipcMain.handle('signal:runtime-status', () => signal.runtimeStatus())
+  ipcMain.handle('signal:prepare-runtime', () => signal.prepareRuntime())
   ipcMain.handle('signal:list-accounts', () => signal.listAccounts())
   ipcMain.handle('signal:start-link', () => signal.startLink())
   ipcMain.handle('signal:finish-link', (_e, uri: string, name?: string) => signal.finishLink(uri, name))
