@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   updateAccount: (id: string, patch: any) => ipcRenderer.invoke('accounts:update', id, patch),
   removeAccount: (id: string) => ipcRenderer.invoke('accounts:remove', id),
   focusPlatform: (args: any) => ipcRenderer.invoke('platform:focus', args),
+  setOverlayOpen: (open: boolean) => ipcRenderer.invoke('ui:set-overlay-open', open),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (value: any) => ipcRenderer.invoke('settings:save', value),
   getLanguages: () => ipcRenderer.invoke('translator:languages'),
