@@ -37,11 +37,12 @@ function validateCaptcha() {
 }
 
 async function finishSession(session: any) {
-  if (!session?.user?.id) throw new Error('没有获得有效登录会话，请重试。')
+  if (!session?.user?.id || !session?.access_token) throw new Error('没有获得有效登录会话，请重试。')
   await window.desktopAPI.authSetOnlineSession({
     userId: session.user.id,
     email: session.user.email,
-    username: String(session.user.user_metadata?.username || '')
+    username: String(session.user.user_metadata?.username || ''),
+    accessToken: session.access_token
   })
   emit('authenticated', { authenticated: true, source: 'supabase', user: session.user })
 }
@@ -138,31 +139,30 @@ async function resetPassword() {
           <label class="auth-field"><span>{{ loginType === 'username' ? '用户名' : '邮箱' }}</span><input v-model="identifier" :placeholder="loginType === 'username' ? '暂未启用' : '请输入邮箱地址'" autocomplete="username" @keydown.enter="login" /></label>
           <label class="auth-field"><span>密码</span><div class="auth-password-wrap"><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="请输入密码" autocomplete="current-password" @keydown.enter="login" /><button type="button" @click="showPassword = !showPassword">{{ showPassword ? '隐藏' : '显示' }}</button></div></label>
           <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" @keydown.enter="login" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <div class="auth-options"><label><input v-model="remember" type="checkbox" /> 保持登录</label><button @click="switchMode('reset')">忘记密码？</button></div>
-          <button class="auth-submit" :disabled="busy || loginType === 'username'" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
-          <div class="auth-switch">还没有账号？<button @click="switchMode('register')">免费注册</button></div>
+          <label class="auth-remember"><input v-model="remember" type="checkbox" />记住登录</label>
+          <button class="auth-primary" :disabled="busy || loginType === 'username'" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
+          <div class="auth-links"><button @click="switchMode('register')">免费注册</button><button @click="switchMode('reset')">忘记密码？</button></div>
         </template>
 
         <template v-else-if="mode === 'register'">
-          <label class="auth-field"><span>用户名</span><input v-model="username" placeholder="3–40 个字符" autocomplete="username" /></label>
-          <label class="auth-field"><span>邮箱</span><input v-model="email" type="email" placeholder="用于登录和找回密码" autocomplete="email" /></label>
-          <label class="auth-field"><span>密码</span><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="至少 8 个字符" autocomplete="new-password" /></label>
-          <label class="auth-field"><span>确认密码</span><input v-model="confirmPassword" :type="showPassword ? 'text' : 'password'" placeholder="再次输入密码" autocomplete="new-password" /></label>
-          <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <button class="auth-submit" :disabled="busy" @click="register">{{ busy ? '创建中…' : '注册并登录' }}</button>
-          <div class="auth-switch">已经有账号？<button @click="switchMode('login')">返回登录</button></div>
+          <label class="auth-field"><span>用户名</span><input v-model="username" placeholder="至少 3 个字符" autocomplete="username" /></label>
+          <label class="auth-field"><span>邮箱</span><input v-model="email" type="email" placeholder="请输入邮箱地址" autocomplete="email" /></label>
+          <label class="auth-field"><span>密码</span><div class="auth-password-wrap"><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="至少 8 个字符" autocomplete="new-password" /><button type="button" @click="showPassword = !showPassword">{{ showPassword ? '隐藏' : '显示' }}</button></div></label>
+          <label class="auth-field"><span>确认密码</span><input v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" /></label>
+          <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
+          <button class="auth-primary" :disabled="busy" @click="register">{{ busy ? '创建中…' : '创建账号' }}</button>
+          <div class="auth-links"><button @click="switchMode('login')">已有账号？返回登录</button></div>
         </template>
 
         <template v-else>
-          <label class="auth-field"><span>注册邮箱</span><input v-model="identifier" type="email" placeholder="请输入注册邮箱" /></label>
-          <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <button class="auth-submit" :disabled="busy" @click="resetPassword">{{ busy ? '发送中…' : '发送重置邮件' }}</button>
-          <div class="auth-switch"><button @click="switchMode('login')">返回登录</button></div>
+          <label class="auth-field"><span>注册邮箱</span><input v-model="identifier" type="email" placeholder="请输入注册邮箱" autocomplete="email" /></label>
+          <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
+          <button class="auth-primary" :disabled="busy" @click="resetPassword">{{ busy ? '发送中…' : '发送重置邮件' }}</button>
+          <div class="auth-links"><button @click="switchMode('login')">返回登录</button></div>
         </template>
 
         <p v-if="error" class="auth-error">{{ error }}</p>
-        <p v-else-if="success" class="auth-success">{{ success }}</p>
-        <p class="auth-local-note">当前阶段：Supabase 已负责在线身份认证和 Session。字符钱包仍在逐步迁移到服务端，下一阶段会接入 Cloudflare API。</p>
+        <p v-if="success" class="auth-success">{{ success }}</p>
       </div>
     </section>
   </div>
