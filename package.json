@@ -22,9 +22,9 @@
     "electron": "latest",
     "electron-builder": "latest",
     "electron-vite": "latest",
-    "typescript": "latest",
+    "typescript": "5.9.2",
     "vite": "latest",
-    "vue-tsc": "latest"
+    "vue-tsc": "3.3.11"
   },
   "build": {
     "appId": "com.local.whatsappsignaltranslator",
