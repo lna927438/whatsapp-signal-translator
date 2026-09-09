@@ -41,7 +41,7 @@ async function saveAccount() {
   try {
     profile.value = await window.desktopAPI.updateProfile({ username: username.value, email: email.value })
     editing.value = false
-    message.value = '账号信息已保存。'
+    message.value = '账号信息已保存，新的用户名/邮箱也可用于登录。'
     emit('updated', profile.value)
   } catch (error: any) {
     message.value = error?.message || String(error)
@@ -60,6 +60,19 @@ async function topup(amount: number) {
   } catch (error: any) {
     message.value = error?.message || String(error)
   } finally {
+    busy.value = false
+  }
+}
+
+async function logout() {
+  if (busy.value) return
+  busy.value = true
+  message.value = ''
+  try {
+    await window.desktopAPI.authLogout()
+    globalThis.location.reload()
+  } catch (error: any) {
+    message.value = error?.message || String(error)
     busy.value = false
   }
 }
@@ -117,7 +130,7 @@ onMounted(reload)
             <button class="secondary" @click="editing = false">取消</button>
             <button class="primary" :disabled="busy" @click="saveAccount">{{ busy ? '保存中…' : '保存资料' }}</button>
           </div>
-          <small>用户名和邮箱只保存在当前电脑，不会写入公开 GitHub 仓库。</small>
+          <small>用户名和邮箱同时作为本机登录身份；密码只保存为安全哈希，不保存明文。</small>
         </div>
 
         <div id="character-topup" class="topup-section">
@@ -144,6 +157,8 @@ onMounted(reload)
           <div v-else class="usage-empty">暂时没有字符使用记录。</div>
         </div>
 
+        <button class="personal-logout" :disabled="busy" @click="logout">退出登录</button>
+        <p class="personal-logout-note">退出登录不会清除 WhatsApp 登录状态、翻译缓存、字符记录或账号数据。</p>
         <p v-if="message" class="personal-message">{{ message }}</p>
       </div>
 
