@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 import type { AppSettings, TranslationMetrics, TranslationRequest } from '../types'
 import { SettingsStore } from '../storage/settingsStore'
+import { ProfileStore } from '../storage/profileStore'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
 import { OpenAIProvider } from './providers/openai'
@@ -16,11 +17,13 @@ interface QueueJob {
 
 export class TranslationEngine {
   private readonly settings = new SettingsStore()
+  private readonly profile = new ProfileStore()
   private readonly cache = new TranslationCache()
   private readonly inFlight = new Map<string, Promise<string>>()
   private readonly queue: QueueJob[] = []
   private readonly maxConcurrent = 3
   private activeRequests = 0
+  private reservedCharacters = 0
   private latencyTotal = 0
   private latencySamples = 0
   private metricsState: TranslationMetrics = {
@@ -63,6 +66,10 @@ export class TranslationEngine {
     ].join('\u241f')).digest('hex')
   }
 
+  private characterCount(text: string): number {
+    return Array.from(text).length
+  }
+
   private async translateWithSettings(request: TranslationRequest, settings: AppSettings, useCache: boolean): Promise<string> {
     const text = request.text.trim()
     if (!text) return request.text
@@ -73,7 +80,7 @@ export class TranslationEngine {
     }
 
     this.metricsState.totalRequests += 1
-    this.metricsState.translatedCharacters += text.length
+    this.metricsState.translatedCharacters += this.characterCount(text)
     this.metricsState.lastProvider = settings.provider
     this.metricsState.lastUpdatedAt = Date.now()
 
@@ -103,13 +110,27 @@ export class TranslationEngine {
 
     const promise = this.enqueue(async () => {
       const started = Date.now()
+      const charge = this.characterCount(text)
+      let reserved = false
       try {
+        await this.profile.ensureAvailable(charge, this.reservedCharacters)
+        this.reservedCharacters += charge
+        reserved = true
+
         this.metricsState.providerCalls += 1
         const provider = this.createProvider(settings)
         const translated = await provider.translate(normalized)
         const latency = Date.now() - started
         this.recordLatency(latency)
         this.metricsState.lastError = undefined
+
+        await this.profile.consumeCharacters(charge, {
+          provider: settings.provider,
+          accountId: normalized.accountId,
+          conversationId: normalized.conversationId,
+          note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
+        })
+
         if (useCache) await this.cache.set(settings.provider, normalized, translated)
         return translated
       } catch (error: any) {
@@ -118,6 +139,7 @@ export class TranslationEngine {
         this.metricsState.lastError = String(error?.message || error)
         throw error
       } finally {
+        if (reserved) this.reservedCharacters = Math.max(0, this.reservedCharacters - charge)
         this.metricsState.lastUpdatedAt = Date.now()
       }
     })
