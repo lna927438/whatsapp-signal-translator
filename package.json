@@ -1,0 +1,40 @@
+{
+  "name": "whatsapp-signal-translator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop real-time precise translation for WhatsApp and Signal",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "dist:win": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "qrcode": "latest",
+    "vue": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/qrcode": "latest",
+    "@vitejs/plugin-vue": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "electron-vite": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vue-tsc": "latest"
+  },
+  "build": {
+    "appId": "com.local.whatsappsignaltranslator",
+    "productName": "WhatsApp Signal Translator",
+    "directories": { "output": "release" },
+    "files": ["out/**/*", "package.json"],
+    "extraResources": [
+      { "from": "resources/signal", "to": "signal", "filter": ["**/*"] }
+    ],
+    "win": { "target": ["nsis"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}
