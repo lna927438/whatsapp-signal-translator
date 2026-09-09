@@ -4,6 +4,7 @@ export const whatsappInjectionScript = String.raw`
   window.__RT_TRANSLATOR_INSTALLED__ = true;
 
   const RT_ATTR = 'data-rt-translated';
+  const CHINESE_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
   let sending = false;
   let allowNativeEnterOnce = false;
   let allowNativeClickOnce = false;
@@ -11,6 +12,7 @@ export const whatsappInjectionScript = String.raw`
   const selectors = {
     composer: [
       'footer [contenteditable="true"][role="textbox"]',
+      '#main footer [contenteditable="true"][role="textbox"]',
       'footer div[contenteditable="true"]',
       '#main footer [contenteditable="true"]'
     ],
@@ -18,7 +20,9 @@ export const whatsappInjectionScript = String.raw`
       'footer button[aria-label="Send"]',
       'footer button[aria-label="发送"]',
       'footer button[aria-label*="Send"]',
-      'footer [data-testid="compose-btn-send"]'
+      'footer button[aria-label*="发送"]',
+      'footer [data-testid="compose-btn-send"]',
+      'footer [data-testid*="send"]'
     ],
     messageText: [
       '#main [data-testid="msg-container"] span.selectable-text',
@@ -36,11 +40,32 @@ export const whatsappInjectionScript = String.raw`
     return null;
   };
 
+  const composerText = (composer) => (composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
+  const containsChinese = (text) => CHINESE_RE.test(String(text || ''));
+
   const findSendButton = () => {
     const direct = first(selectors.sendButton);
     if (direct) return direct;
-    const icon = document.querySelector('footer span[data-icon="send"], footer [data-icon="send"]');
+    const icon = document.querySelector(
+      'footer span[data-icon="send"], footer [data-icon="send"], footer [data-icon*="send"], footer [data-testid*="send"]'
+    );
     return icon?.closest('button, [role="button"]') || null;
+  };
+
+  const isSendTarget = (target) => {
+    if (!(target instanceof Node)) return false;
+    const known = findSendButton();
+    if (known && (known === target || known.contains(target))) return true;
+    const element = target instanceof Element ? target : target.parentElement;
+    const button = element?.closest?.('button, [role="button"]');
+    if (!button || !button.closest('footer')) return false;
+    const marker = [
+      button.getAttribute('aria-label') || '',
+      button.getAttribute('data-testid') || '',
+      button.getAttribute('data-icon') || ''
+    ].join(' ').toLowerCase();
+    if (marker.includes('send') || marker.includes('发送')) return true;
+    return Boolean(button.querySelector('[data-icon*="send"], [data-testid*="send"]'));
   };
 
   const allMessages = () => {
@@ -130,12 +155,34 @@ export const whatsappInjectionScript = String.raw`
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    document.execCommand('insertText', false, text);
+
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, text);
+    } catch (_) {
+      inserted = false;
+    }
+
+    if (!inserted || composerText(composer) !== String(text).trim()) {
+      composer.textContent = text;
+    }
+
     composer.dispatchEvent(new InputEvent('input', {
       bubbles: true,
+      cancelable: false,
       inputType: 'insertText',
       data: text
     }));
+    composer.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const waitForComposer = async (composer, expected) => {
+    const wanted = String(expected || '').trim();
+    for (let i = 0; i < 8; i += 1) {
+      if (composerText(composer) === wanted) return true;
+      await new Promise((resolve) => setTimeout(resolve, 35));
+    }
+    return composerText(composer) === wanted;
   };
 
   const nativeSend = (composer) => {
@@ -155,21 +202,51 @@ export const whatsappInjectionScript = String.raw`
     return true;
   };
 
+  const blockChineseMessage = (api, message) => {
+    api.notifyError?.(message || '检测到中文内容，已阻止发送。');
+  };
+
   const translateAndSend = async (composer) => {
     const api = window.realtimeTranslator;
     if (!api || sending) return false;
-    const original = (composer.innerText || composer.textContent || '').trim();
+    const original = composerText(composer);
     if (!original) return false;
 
     const settings = await api.getRuntimeSettings();
-    if (!settings.sendAutoTranslate) return false;
+    const blockChinese = settings.blockChineseSend !== false;
+
+    if (!settings.sendAutoTranslate) {
+      if (blockChinese && containsChinese(original)) {
+        blockChineseMessage(api, '已开启“禁止发送中文”，请先开启发送自动翻译或改为目标语言。');
+        return true;
+      }
+      return false;
+    }
 
     sending = true;
     composer.setAttribute('data-rt-sending', 'true');
     try {
       const translated = await api.translateOutgoing(original);
-      replaceComposerText(composer, translated || original);
-      await new Promise((resolve) => setTimeout(resolve, 90));
+      const finalText = String(translated || '').trim();
+      if (!finalText) throw new Error('翻译结果为空，已阻止发送。');
+      if (blockChinese && containsChinese(finalText)) {
+        throw new Error('翻译结果仍包含中文，已阻止发送。请检查目标语言或 API 设置。');
+      }
+
+      replaceComposerText(composer, finalText);
+      const updated = await waitForComposer(composer, finalText);
+      if (!updated) {
+        replaceComposerText(composer, finalText);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      const currentText = composerText(composer);
+      if (blockChinese && containsChinese(currentText)) {
+        throw new Error('输入框仍包含中文，已阻止发送，避免原文误发。');
+      }
+      if (!currentText) throw new Error('输入框更新失败，已阻止发送。');
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
       nativeSend(composer);
       return true;
     } catch (error) {
@@ -182,6 +259,21 @@ export const whatsappInjectionScript = String.raw`
     }
   };
 
+  const handleSendIntent = async (event, composer) => {
+    const api = window.realtimeTranslator;
+    if (!api) return;
+    const settings = await api.getRuntimeSettings();
+    const original = composerText(composer);
+    const shouldIntercept = settings.sendAutoTranslate || (settings.blockChineseSend !== false && containsChinese(original));
+    if (!shouldIntercept) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    if (sending) return;
+    await translateAndSend(composer);
+  };
+
   document.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
     const composer = first(selectors.composer);
@@ -192,21 +284,19 @@ export const whatsappInjectionScript = String.raw`
       return;
     }
 
-    const api = window.realtimeTranslator;
-    if (!api) return;
-    const settings = await api.getRuntimeSettings();
-    if (!settings.sendAutoTranslate) return;
+    await handleSendIntent(event, composer);
+  }, true);
 
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    if (sending) return;
-    await translateAndSend(composer);
+  document.addEventListener('beforeinput', async (event) => {
+    if (event.inputType !== 'insertParagraph' || event.isComposing) return;
+    const composer = first(selectors.composer);
+    if (!composer || !composer.contains(event.target)) return;
+    if (allowNativeEnterOnce || sending) return;
+    await handleSendIntent(event, composer);
   }, true);
 
   document.addEventListener('click', async (event) => {
-    const button = findSendButton();
-    if (!button || !(event.target instanceof Node) || !button.contains(event.target)) return;
+    if (!isSendTarget(event.target)) return;
 
     if (allowNativeClickOnce) {
       allowNativeClickOnce = false;
@@ -215,16 +305,7 @@ export const whatsappInjectionScript = String.raw`
 
     const composer = first(selectors.composer);
     if (!composer) return;
-    const api = window.realtimeTranslator;
-    if (!api) return;
-    const settings = await api.getRuntimeSettings();
-    if (!settings.sendAutoTranslate) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    if (sending) return;
-    await translateAndSend(composer);
+    await handleSendIntent(event, composer);
   }, true);
 
   let mutationTimer;
