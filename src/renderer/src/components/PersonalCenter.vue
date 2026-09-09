@@ -25,6 +25,10 @@ function formatDate(value: number) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
 
+function scrollToTopup() {
+  globalThis.document?.getElementById('character-topup')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 async function reload() {
   profile.value = await window.desktopAPI.getProfile()
   username.value = profile.value?.username || ''
@@ -103,7 +107,7 @@ onMounted(reload)
 
         <div class="personal-actions">
           <button class="personal-primary" @click="editing = !editing">账号中心</button>
-          <button class="personal-secondary" @click="document.getElementById('character-topup')?.scrollIntoView({ behavior: 'smooth' })">充值</button>
+          <button class="personal-secondary" @click="scrollToTopup">充值</button>
         </div>
 
         <div v-if="editing" class="account-editor">
