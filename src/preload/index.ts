@@ -4,12 +4,14 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   addAccount: (args: any) => ipcRenderer.invoke('accounts:add', args),
   updateAccount: (id: string, patch: any) => ipcRenderer.invoke('accounts:update', id, patch),
+  setContactLanguage: (accountId: string, conversationId: string, language: string, name?: string) => ipcRenderer.invoke('accounts:set-contact-language', accountId, conversationId, language, name),
   removeAccount: (id: string) => ipcRenderer.invoke('accounts:remove', id),
   focusPlatform: (args: any) => ipcRenderer.invoke('platform:focus', args),
   setOverlayOpen: (open: boolean) => ipcRenderer.invoke('ui:set-overlay-open', open),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (value: any) => ipcRenderer.invoke('settings:save', value),
   getLanguages: () => ipcRenderer.invoke('translator:languages'),
+  getTranslationMetrics: () => ipcRenderer.invoke('translator:metrics'),
   testTranslation: (text: string, target: string) => ipcRenderer.invoke('translator:test', text, target),
   testTranslationConfig: (settings: any, text: string, target: string) => ipcRenderer.invoke('translator:test-config', settings, text, target),
   signalRuntimeStatus: () => ipcRenderer.invoke('signal:runtime-status'),
@@ -33,6 +35,16 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     const fn = (_e: any, msg: any) => callback(msg)
     ipcRenderer.on('signal:message', fn)
     return () => ipcRenderer.removeListener('signal:message', fn)
+  },
+  onWhatsAppConversation: (callback: (info: any) => void) => {
+    const fn = (_e: any, info: any) => callback(info)
+    ipcRenderer.on('whatsapp:conversation', fn)
+    return () => ipcRenderer.removeListener('whatsapp:conversation', fn)
+  },
+  onContactLanguage: (callback: (info: any) => void) => {
+    const fn = (_e: any, info: any) => callback(info)
+    ipcRenderer.on('accounts:contact-language', fn)
+    return () => ipcRenderer.removeListener('accounts:contact-language', fn)
   },
   onTranslatorStatus: (callback: (status: any) => void) => {
     const fn = (_e: any, status: any) => callback(status)
