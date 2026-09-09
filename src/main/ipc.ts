@@ -17,7 +17,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('accounts:update', async (_e, id: string, patch: any) => accounts.update(id, patch))
   ipcMain.handle('accounts:remove', async (_e, id: string) => {
     const all = await accounts.list()
-    const item = all.find((a) => a.id === id)
+    const item = all.find((account) => account.id === id)
     if (item?.platform === 'whatsapp') whatsapp.remove(id)
     await accounts.remove(id)
     return true
@@ -26,6 +26,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('platform:focus', async (_e, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => {
     if (args.platform === 'whatsapp' && args.accountId) await whatsapp.focus(args.accountId)
     else whatsapp.hideAll()
+    return true
+  })
+  ipcMain.handle('ui:set-overlay-open', (_e, open: boolean) => {
+    whatsapp.setOverlayOpen(Boolean(open))
     return true
   })
 
