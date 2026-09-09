@@ -16,7 +16,12 @@ async function bridgeSession(session: any) {
     return
   }
   const username = String(session.user.user_metadata?.username || '')
-  await window.desktopAPI.authSetOnlineSession({ userId: session.user.id, email: session.user.email, username })
+  await window.desktopAPI.authSetOnlineSession({
+    userId: session.user.id,
+    email: session.user.email,
+    username,
+    accessToken: session.access_token
+  })
   authenticated.value = true
 }
 
