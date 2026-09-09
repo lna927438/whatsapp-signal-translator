@@ -21,6 +21,8 @@ interface TranslatePayload {
 
 type OnlineIdentity = { userId: string; email?: string; username?: string; accessToken?: string } | null
 
+const CLOUD_API_BASE = 'https://realtime-translator-api.lna927438.workers.dev'
+
 export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
   const accounts = new AccountManager()
   const settings = new SettingsStore()
@@ -33,6 +35,40 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const state = await auth.status()
     if (!state.authenticated) throw new Error('登录状态已失效，请重新登录。')
     return state
+  }
+
+  const cloudRequest = async (path: string): Promise<any> => {
+    const accessToken = String(onlineIdentity?.accessToken || '').trim()
+    if (!accessToken) throw new Error('在线登录令牌缺失，请重新登录。')
+    const response = await fetch(`${CLOUD_API_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
+    })
+    const payload: any = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(String(payload?.message || `云端 API 请求失败 (${response.status})`))
+    return payload
+  }
+
+  const cloudBackedProfile = async () => {
+    const local = await profile.get()
+    if (!onlineIdentity?.userId) return local
+    const payload = await cloudRequest('/api/me')
+    const wallet = payload?.wallet || {}
+    const remoteProfile = payload?.profile || {}
+    const remaining = Math.max(0, Number(wallet.balance || 0))
+    const used = Math.max(0, Number(wallet.lifetime_debited || 0))
+    const credited = Math.max(0, Number(wallet.lifetime_credited || 0))
+    return {
+      ...local,
+      username: String(remoteProfile.username || onlineIdentity.username || local.username || ''),
+      email: String(payload?.user?.email || remoteProfile.email || onlineIdentity.email || local.email || ''),
+      planName: String(remoteProfile.plan_code || local.planName || 'free'),
+      totalCharacters: Math.max(remaining + used, credited),
+      usedCharacters: used,
+      remainingCharacters: remaining,
+      registeredAt: remoteProfile.created_at ? Date.parse(remoteProfile.created_at) : local.registeredAt,
+      updatedAt: wallet.updated_at ? Date.parse(wallet.updated_at) : Date.now(),
+      ledger: local.ledger
+    }
   }
 
   const accountRuntime = async (accountId?: string, conversationId?: string): Promise<RuntimeSettings> => {
@@ -111,7 +147,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return true
   })
 
-  ipcMain.handle('profile:get', async () => { await requireAuth(); return profile.get() })
+  ipcMain.handle('profile:get', async () => { await requireAuth(); return cloudBackedProfile() })
   ipcMain.handle('profile:update', async (_e, patch: { username?: string; email?: string; planName?: string }) => {
     await requireAuth()
     if (!onlineIdentity && (patch.username !== undefined || patch.email !== undefined)) await auth.updateIdentity({ username: patch.username, email: patch.email })
@@ -131,7 +167,13 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
 
   ipcMain.on('whatsapp:conversation', (_e, accountId: string | undefined, info: { id?: string; name?: string }) => announceConversation(accountId, info?.id, info?.name))
 
-  ipcMain.handle('settings:get', async () => { await requireAuth(); return settings.get() })
+  ipcMain.handle('settings:get', async () => {
+    await requireAuth()
+    const value = await settings.get()
+    return value.provider === 'openai'
+      ? { ...value, openaiApiKey: 'cloud-managed', openaiModel: 'gpt-5.6-luna' }
+      : value
+  })
   ipcMain.handle('settings:save', async (_e, value) => { await requireAuth(); await settings.save(value); return true })
   ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => { await requireAuth(); return accountRuntime(accountId, conversationId) })
   ipcMain.handle('translator:metrics', async () => { await requireAuth(); return translator.metrics() })
