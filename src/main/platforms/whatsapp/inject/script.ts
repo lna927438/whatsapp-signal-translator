@@ -9,6 +9,7 @@ export const whatsappInjectionScript = String.raw`
   let sending = false;
   let nativeBypassUntil = 0;
   let statusTimer;
+  let lastConversationId = '';
 
   const selectors = {
     composer: [
@@ -31,12 +32,11 @@ export const whatsappInjectionScript = String.raw`
       'footer [data-testid="compose-btn-send"]',
       'footer [data-testid*="send"]'
     ],
-    messageText: [
-      '#main [data-testid="msg-container"] span.selectable-text',
-      '#main .message-in span.selectable-text',
-      '#main .message-out span.selectable-text',
-      '#main [data-id] span.selectable-text.copyable-text',
-      '#main span.selectable-text.copyable-text'
+    messageContainer: [
+      '#main [data-testid="msg-container"]',
+      '#main .message-in',
+      '#main .message-out',
+      '#main [data-id]'
     ]
   };
 
@@ -49,10 +49,10 @@ export const whatsappInjectionScript = String.raw`
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const composerText = (composer) => (composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
+  const normalizeMessage = (text) => String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const composerText = (composer) => normalizeMessage(composer?.innerText || composer?.textContent || '');
   const containsChinese = (text) => CHINESE_RE.test(String(text || ''));
   const bypassNative = () => Date.now() < nativeBypassUntil;
-  const normalizeMessage = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
   const reportStatus = (state, message) => {
     window.realtimeTranslator?.reportStatus?.({ state, message, at: Date.now() });
@@ -105,47 +105,115 @@ export const whatsappInjectionScript = String.raw`
     return Boolean(button.querySelector('[data-icon*="send"], [data-testid*="send"]'));
   };
 
-  const allMessages = () => {
-    const seen = new Set();
-    const out = [];
-    for (const selector of selectors.messageText) {
-      document.querySelectorAll(selector).forEach((el) => {
-        if (!seen.has(el)) { seen.add(el); out.push(el); }
-      });
+  const conversationInfo = () => {
+    const header = document.querySelector('#main header');
+    if (!header) return { id: '', name: '' };
+    const titleSelectors = [
+      '[data-testid="conversation-info-header-chat-title"]',
+      'span[title][dir="auto"]',
+      '[title][dir="auto"]',
+      'span[title]'
+    ];
+    let name = '';
+    for (const selector of titleSelectors) {
+      const candidates = Array.from(header.querySelectorAll(selector));
+      const found = candidates.map((el) => normalizeMessage(el.getAttribute('title') || el.textContent || '')).find((value) => value && value.length < 160);
+      if (found) { name = found; break; }
     }
-    return out;
+    if (!name) name = normalizeMessage((header.innerText || '').split('\n')[0] || '');
+    const id = name ? 'wa:' + name.toLowerCase() : '';
+    if (id && id !== lastConversationId) {
+      lastConversationId = id;
+      window.realtimeTranslator?.reportConversation?.({ id, name });
+    }
+    return { id, name };
   };
 
-  const messageContainer = (el) => el.closest('[data-testid="msg-container"], .message-in, .message-out, [data-id]');
-  const isOutgoing = (el) => {
-    const container = messageContainer(el);
+  const messageContainers = () => {
+    const seen = new Set();
+    const out = [];
+    for (const selector of selectors.messageContainer) {
+      document.querySelectorAll(selector).forEach((el) => {
+        if (seen.has(el)) return;
+        if (!el.querySelector?.('span.selectable-text, [data-pre-plain-text]')) return;
+        const parentMessage = el.parentElement?.closest?.('[data-testid="msg-container"], .message-in, .message-out');
+        if (parentMessage && parentMessage !== el) return;
+        seen.add(el);
+        out.push(el);
+      });
+    }
+    return out.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return ar.top - br.top;
+    });
+  };
+
+  const isOutgoingContainer = (container) => {
     if (!container) return false;
     if (container.matches?.('.message-out') || container.closest?.('.message-out')) return true;
     const cls = typeof container.className === 'string' ? container.className : '';
     return /(^|\s)message-out(\s|$)/.test(cls);
   };
+
+  const messageId = (container) => {
+    const direct = container.getAttribute?.('data-id');
+    if (direct) return direct;
+    const nested = container.querySelector?.('[data-id]')?.getAttribute?.('data-id');
+    if (nested) return nested;
+    const pre = container.querySelector?.('[data-pre-plain-text]')?.getAttribute?.('data-pre-plain-text') || '';
+    return pre ? 'pre:' + pre + ':' + normalizeMessage(extractMessageText(container)).slice(0, 80) : '';
+  };
+
+  const isQuotedNode = (node) => Boolean(node.closest?.(
+    '[data-testid*="quoted"], [data-testid*="reply"], [aria-label*="Quoted"], [aria-label*="quoted"], [aria-label*="引用"], [data-rt-ui]'
+  ));
+
+  const textNodesFor = (container) => {
+    const preferred = Array.from(container.querySelectorAll?.('[data-pre-plain-text] span.selectable-text') || []);
+    const all = preferred.length ? preferred : Array.from(container.querySelectorAll?.('span.selectable-text') || []);
+    return all.filter((node) => !isQuotedNode(node));
+  };
+
+  const extractMessageText = (container) => {
+    const parts = [];
+    for (const node of textNodesFor(container)) {
+      const value = normalizeMessage(node.innerText || node.textContent || '');
+      if (value && !parts.includes(value)) parts.push(value);
+    }
+    return parts.join('\n').trim();
+  };
+
+  const messageTextHost = (container) => {
+    const nodes = textNodesFor(container);
+    return nodes[nodes.length - 1] || container.querySelector?.('[data-pre-plain-text]') || container;
+  };
+
   const isVisible = (el) => {
     const rect = el.getBoundingClientRect?.();
     if (!rect) return true;
-    return rect.bottom >= 0 && rect.top <= window.innerHeight && rect.right >= 0 && rect.left <= window.innerWidth;
+    return rect.bottom >= -200 && rect.top <= window.innerHeight + 200 && rect.right >= 0 && rect.left <= window.innerWidth;
   };
+
   const isGroupChat = () => {
     const header = document.querySelector('#main header');
     if (!header) return false;
     if (header.querySelector('[data-icon*="group"], [data-testid*="group"]')) return true;
-    const text = (header.innerText || '').replace(/\s+/g, ' ').trim();
+    const text = normalizeMessage(header.innerText || '');
     return /,\s*[^,]+/.test(text) && text.length > 12;
   };
 
-  const originalMessageText = (el) => {
-    const clone = el.cloneNode(true);
-    clone.querySelectorAll?.('.rt-translation').forEach((node) => node.remove());
-    return (clone.innerText || clone.textContent || '').replace(/\u00a0/g, ' ').trim();
-  };
-
-  const translationHost = (el) => {
-    if (el instanceof HTMLElement) return el;
-    return el.parentElement || el;
+  const contextFor = (container, containers) => {
+    const index = containers.indexOf(container);
+    if (index < 0) return [];
+    const context = [];
+    for (let i = Math.max(0, index - 4); i < index; i += 1) {
+      const item = containers[i];
+      const text = extractMessageText(item);
+      if (!text) continue;
+      context.push({ role: isOutgoingContainer(item) ? 'outgoing' : 'incoming', text });
+    }
+    return context.slice(-4);
   };
 
   const applyTranslationStyle = (settings) => {
@@ -155,9 +223,9 @@ export const whatsappInjectionScript = String.raw`
     });
   };
 
-  const addTranslation = (el, text, settings, kind = 'incoming') => {
+  const addTranslation = (container, text, settings, kind = 'incoming') => {
     if (!text) return;
-    const host = translationHost(el);
+    const host = messageTextHost(container);
     if (host.querySelector?.(':scope > .rt-translation')) return;
     const node = document.createElement('span');
     node.className = 'rt-translation';
@@ -174,55 +242,61 @@ export const whatsappInjectionScript = String.raw`
 
   const cleanupPendingSent = () => {
     const now = Date.now();
-    for (let i = pendingSent.length - 1; i >= 0; i -= 1) {
-      if (pendingSent[i].expires < now) pendingSent.splice(i, 1);
-    }
+    for (let i = pendingSent.length - 1; i >= 0; i -= 1) if (pendingSent[i].expires < now) pendingSent.splice(i, 1);
     while (pendingSent.length > 24) pendingSent.shift();
   };
 
-  const rememberSent = (translated, original) => {
+  const rememberSent = (translated, original, conversationId) => {
     cleanupPendingSent();
-    pendingSent.push({ translated: normalizeMessage(translated), original, expires: Date.now() + 45000 });
+    pendingSent.push({ translated: normalizeMessage(translated), original, conversationId, expires: Date.now() + 45000 });
   };
 
-  const annotateOutgoing = (el, settings) => {
+  const annotateOutgoing = (container, settings, conversationId) => {
     cleanupPendingSent();
-    const text = normalizeMessage(originalMessageText(el));
+    const text = normalizeMessage(extractMessageText(container));
     if (!text) return false;
-    const index = pendingSent.findIndex((item) => item.translated === text);
+    const index = pendingSent.findIndex((item) => item.translated === text && (!item.conversationId || item.conversationId === conversationId));
     if (index < 0) return false;
     const item = pendingSent.splice(index, 1)[0];
-    if (normalizeMessage(item.original) !== text) addTranslation(el, item.original, settings, 'outgoing-original');
-    el.setAttribute(RT_ATTR, 'outgoing-done');
+    if (normalizeMessage(item.original) !== text) addTranslation(container, item.original, settings, 'outgoing-original');
+    container.setAttribute(RT_ATTR, 'outgoing-done');
     return true;
   };
 
   const translateVisible = async () => {
     const api = window.realtimeTranslator;
     if (!api) return;
-    const settings = await api.getRuntimeSettings();
+    const conversation = conversationInfo();
+    const settings = await api.getRuntimeSettings(conversation.id);
     applyTranslationStyle(settings);
     if (!settings.receiveAutoTranslate && pendingSent.length === 0) return;
     if (!settings.groupTranslate && isGroupChat() && pendingSent.length === 0) return;
 
-    for (const el of allMessages()) {
-      if (el.closest('.rt-translation') || !isVisible(el)) continue;
-      if (isOutgoing(el)) {
-        if (!el.getAttribute(RT_ATTR)) annotateOutgoing(el, settings);
+    const containers = messageContainers();
+    for (const container of containers) {
+      if (!isVisible(container)) continue;
+      if (isOutgoingContainer(container)) {
+        if (!container.getAttribute(RT_ATTR)) annotateOutgoing(container, settings, conversation.id);
         continue;
       }
       if (!settings.receiveAutoTranslate) continue;
       if (!settings.groupTranslate && isGroupChat()) continue;
-      if (el.getAttribute(RT_ATTR)) continue;
-      const text = originalMessageText(el);
-      if (!text) { el.setAttribute(RT_ATTR, 'empty'); continue; }
-      el.setAttribute(RT_ATTR, 'working');
+      if (container.getAttribute(RT_ATTR) === 'working' || container.getAttribute(RT_ATTR) === 'done') continue;
+      const text = extractMessageText(container);
+      if (!text) { container.setAttribute(RT_ATTR, 'empty'); continue; }
+      container.setAttribute(RT_ATTR, 'working');
       try {
-        const translated = await api.translateIncoming(text);
-        if (translated && translated.trim() !== text) addTranslation(el, translated, settings, 'incoming');
-        el.setAttribute(RT_ATTR, 'done');
+        const translated = await api.translateIncoming({
+          text,
+          conversationId: conversation.id,
+          conversationName: conversation.name,
+          messageId: messageId(container),
+          context: contextFor(container, containers)
+        });
+        if (translated && normalizeMessage(translated) !== normalizeMessage(text)) addTranslation(container, translated, settings, 'incoming');
+        container.setAttribute(RT_ATTR, 'done');
       } catch (error) {
-        el.removeAttribute(RT_ATTR);
+        container.removeAttribute(RT_ATTR);
         api.notifyError?.(String(error?.message || error));
       }
     }
@@ -237,7 +311,7 @@ export const whatsappInjectionScript = String.raw`
     selection?.addRange(range);
     let inserted = false;
     try { inserted = document.execCommand('insertText', false, text); } catch (_) { inserted = false; }
-    if (!inserted || composerText(composer) !== String(text).trim()) {
+    if (!inserted || composerText(composer) !== normalizeMessage(text)) {
       while (composer.firstChild) composer.removeChild(composer.firstChild);
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
@@ -252,12 +326,12 @@ export const whatsappInjectionScript = String.raw`
     for (let i = 0; i < 36; i += 1) {
       const current = composerText(composer);
       if (!current) return true;
-      if (current === finalText) sawTranslated = true;
-      if (sawTranslated && current !== finalText) return true;
+      if (current === normalizeMessage(finalText)) sawTranslated = true;
+      if (sawTranslated && current !== normalizeMessage(finalText)) return true;
       await sleep(50);
     }
     const current = composerText(composer);
-    return !current || (sawTranslated && current !== finalText && current !== original);
+    return !current || (sawTranslated && current !== normalizeMessage(finalText) && current !== normalizeMessage(original));
   };
 
   const nativeSend = async (composer, api) => {
@@ -282,6 +356,14 @@ export const whatsappInjectionScript = String.raw`
     return nativeSend(composer, api);
   };
 
+  const outgoingContext = () => {
+    const containers = messageContainers();
+    return containers.slice(-4).map((container) => ({
+      role: isOutgoingContainer(container) ? 'outgoing' : 'incoming',
+      text: extractMessageText(container)
+    })).filter((item) => item.text).slice(-4);
+  };
+
   const processSend = async (composer) => {
     const api = window.realtimeTranslator;
     if (!api) {
@@ -290,10 +372,11 @@ export const whatsappInjectionScript = String.raw`
     }
     const original = composerText(composer);
     if (!original) return;
+    const conversation = conversationInfo();
 
     try {
       showSendStatus('正在翻译并准备发送…', 'working', false);
-      const settings = await api.getRuntimeSettings();
+      const settings = await api.getRuntimeSettings(conversation.id);
       const blockChinese = settings.blockChineseSend !== false;
 
       if (!settings.sendAutoTranslate) {
@@ -304,12 +387,17 @@ export const whatsappInjectionScript = String.raw`
         return;
       }
 
-      const translated = await api.translateOutgoing(original);
+      const translated = await api.translateOutgoing({
+        text: original,
+        conversationId: conversation.id,
+        conversationName: conversation.name,
+        context: outgoingContext()
+      });
       const finalText = String(translated || '').trim();
       if (!finalText) throw new Error('翻译结果为空，已阻止发送。');
-      if (blockChinese && containsChinese(finalText)) throw new Error('翻译结果仍包含中文，已阻止发送。请检查目标语言或 API 设置。');
+      if (blockChinese && containsChinese(finalText)) throw new Error('翻译结果仍包含中文，已阻止发送。请检查联系人语言或 API 设置。');
 
-      rememberSent(finalText, original);
+      rememberSent(finalText, original, conversation.id);
       showSendStatus('翻译完成，正在通过 WhatsApp 原生输入发送…', 'working', false);
       if (!await commitTranslatedSend(composer, api, finalText)) throw new Error('无法提交译文到 WhatsApp 输入框。');
 
@@ -370,12 +458,11 @@ export const whatsappInjectionScript = String.raw`
   let mutationTimer;
   const observer = new MutationObserver(() => {
     clearTimeout(mutationTimer);
-    mutationTimer = setTimeout(translateVisible, 160);
+    mutationTimer = setTimeout(() => { conversationInfo(); void translateVisible(); }, 180);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
-
-  reportStatus('ready', '翻译器已就绪');
-  setInterval(translateVisible, 1100);
+  setInterval(() => { conversationInfo(); void translateVisible(); }, 1400);
+  conversationInfo();
   translateVisible();
 })();
 `
