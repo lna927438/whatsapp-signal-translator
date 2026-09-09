@@ -26,6 +26,16 @@ const providerLabel = computed(() => {
   return 'Google Cloud Translation'
 })
 
+function settingsSnapshot(): any {
+  // Vue makes the settings object reactive. Electron IPC cannot clone a Vue
+  // Proxy, so always send a plain serializable object across the bridge.
+  const snapshot = JSON.parse(JSON.stringify(settings.value || {}))
+  if (typeof snapshot.openaiApiKey === 'string') snapshot.openaiApiKey = snapshot.openaiApiKey.trim()
+  if (typeof snapshot.deeplApiKey === 'string') snapshot.deeplApiKey = snapshot.deeplApiKey.trim()
+  if (typeof snapshot.googleApiKey === 'string') snapshot.googleApiKey = snapshot.googleApiKey.trim()
+  return snapshot
+}
+
 onMounted(async () => {
   settings.value = await window.desktopAPI.getSettings()
   languages.value = await window.desktopAPI.getLanguages()
@@ -50,7 +60,8 @@ async function testApi() {
   apiMessage.value = 'Testing API connection and translation…'
   testResult.value = ''
   try {
-    const result = await window.desktopAPI.testTranslationConfig(settings.value, testText.value, settings.value.localLanguage)
+    const current = settingsSnapshot()
+    const result = await window.desktopAPI.testTranslationConfig(current, testText.value, current.localLanguage)
     if (result.ok) {
       apiState.value = 'success'
       apiMessage.value = result.message || 'API connection succeeded.'
@@ -76,8 +87,13 @@ async function save() {
 
   saving.value = true
   try {
-    await window.desktopAPI.saveSettings(settings.value)
+    const current = settingsSnapshot()
+    await window.desktopAPI.saveSettings(current)
+    settings.value = current
     emit('close')
+  } catch (error: any) {
+    apiState.value = 'error'
+    apiMessage.value = error.message || String(error)
   } finally {
     saving.value = false
   }
