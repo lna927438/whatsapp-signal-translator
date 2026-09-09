@@ -11,12 +11,18 @@ export const whatsappInjectionScript = String.raw`
 
   const selectors = {
     composer: [
-      'footer [contenteditable="true"][role="textbox"]',
       '#main footer [contenteditable="true"][role="textbox"]',
+      'footer [contenteditable="true"][role="textbox"]',
+      '#main footer [contenteditable="true"][data-tab]',
+      'footer [contenteditable="true"][data-tab]',
+      '#main footer div[contenteditable="true"]',
       'footer div[contenteditable="true"]',
-      '#main footer [contenteditable="true"]'
+      '#main [contenteditable="true"][role="textbox"][aria-placeholder]',
+      '[contenteditable="true"][role="textbox"][aria-placeholder]'
     ],
     sendButton: [
+      '#main footer button[aria-label="Send"]',
+      '#main footer button[aria-label="发送"]',
       'footer button[aria-label="Send"]',
       'footer button[aria-label="发送"]',
       'footer button[aria-label*="Send"]',
@@ -43,11 +49,18 @@ export const whatsappInjectionScript = String.raw`
   const composerText = (composer) => (composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
   const containsChinese = (text) => CHINESE_RE.test(String(text || ''));
 
+  const getComposer = (target) => {
+    const targetElement = target instanceof Element ? target : target?.parentElement;
+    const direct = targetElement?.closest?.('[contenteditable="true"][role="textbox"], [contenteditable="true"][data-tab]');
+    if (direct && (direct.closest('footer') || direct.closest('#main'))) return direct;
+    return first(selectors.composer);
+  };
+
   const findSendButton = () => {
     const direct = first(selectors.sendButton);
     if (direct) return direct;
     const icon = document.querySelector(
-      'footer span[data-icon="send"], footer [data-icon="send"], footer [data-icon*="send"], footer [data-testid*="send"]'
+      '#main footer span[data-icon="send"], #main footer [data-icon="send"], footer [data-icon*="send"], footer [data-testid*="send"]'
     );
     return icon?.closest('button, [role="button"]') || null;
   };
@@ -98,7 +111,15 @@ export const whatsappInjectionScript = String.raw`
     return rect.bottom >= 0 && rect.top <= window.innerHeight && rect.right >= 0 && rect.left <= window.innerWidth;
   };
 
-  const addTranslation = (el, text) => {
+  const isGroupChat = () => {
+    const header = document.querySelector('#main header');
+    if (!header) return false;
+    if (header.querySelector('[data-icon*="group"], [data-testid*="group"]')) return true;
+    const text = (header.innerText || '').replace(/\s+/g, ' ').trim();
+    return /,\s*[^,]+/.test(text) && text.length > 12;
+  };
+
+  const addTranslation = (el, text, settings) => {
     if (!text) return;
     const container = messageContainer(el) || el.parentElement || el;
     if (container.querySelector?.(':scope > .rt-translation')) return;
@@ -110,9 +131,10 @@ export const whatsappInjectionScript = String.raw`
       marginTop: '4px',
       paddingTop: '4px',
       borderTop: '1px dashed rgba(120,120,120,.35)',
-      fontSize: '12px',
-      lineHeight: '1.35',
-      opacity: '.86',
+      fontSize: String(Number(settings?.fontSize || 13)) + 'px',
+      lineHeight: '1.38',
+      color: settings?.translationColor || '#c8d4e4',
+      opacity: '.94',
       whiteSpace: 'pre-wrap',
       userSelect: 'text'
     });
@@ -124,6 +146,7 @@ export const whatsappInjectionScript = String.raw`
     if (!api) return;
     const settings = await api.getRuntimeSettings();
     if (!settings.receiveAutoTranslate) return;
+    if (!settings.groupTranslate && isGroupChat()) return;
 
     for (const el of allMessages()) {
       if (el.getAttribute(RT_ATTR) || el.closest('.rt-translation') || !isVisible(el)) continue;
@@ -139,7 +162,7 @@ export const whatsappInjectionScript = String.raw`
       el.setAttribute(RT_ATTR, 'working');
       try {
         const translated = await api.translateIncoming(text);
-        if (translated && translated.trim() !== text) addTranslation(el, translated);
+        if (translated && translated.trim() !== text) addTranslation(el, translated, settings);
         el.setAttribute(RT_ATTR, 'done');
       } catch (error) {
         el.removeAttribute(RT_ATTR);
@@ -164,21 +187,24 @@ export const whatsappInjectionScript = String.raw`
     }
 
     if (!inserted || composerText(composer) !== String(text).trim()) {
-      composer.textContent = text;
+      while (composer.firstChild) composer.removeChild(composer.firstChild);
+      const paragraph = document.createElement('p');
+      paragraph.textContent = text;
+      composer.appendChild(paragraph);
     }
 
     composer.dispatchEvent(new InputEvent('input', {
       bubbles: true,
-      cancelable: false,
+      composed: true,
       inputType: 'insertText',
       data: text
     }));
-    composer.dispatchEvent(new Event('change', { bubbles: true }));
+    composer.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
   };
 
   const waitForComposer = async (composer, expected) => {
     const wanted = String(expected || '').trim();
-    for (let i = 0; i < 8; i += 1) {
+    for (let i = 0; i < 12; i += 1) {
       if (composerText(composer) === wanted) return true;
       await new Promise((resolve) => setTimeout(resolve, 35));
     }
@@ -196,36 +222,34 @@ export const whatsappInjectionScript = String.raw`
     composer.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter',
       code: 'Enter',
+      keyCode: 13,
+      which: 13,
       bubbles: true,
-      cancelable: true
+      cancelable: true,
+      composed: true
     }));
     return true;
   };
 
-  const blockChineseMessage = (api, message) => {
-    api.notifyError?.(message || '检测到中文内容，已阻止发送。');
-  };
-
-  const translateAndSend = async (composer) => {
+  const processSend = async (composer) => {
     const api = window.realtimeTranslator;
-    if (!api || sending) return false;
+    if (!api) return;
     const original = composerText(composer);
-    if (!original) return false;
+    if (!original) return;
 
-    const settings = await api.getRuntimeSettings();
-    const blockChinese = settings.blockChineseSend !== false;
-
-    if (!settings.sendAutoTranslate) {
-      if (blockChinese && containsChinese(original)) {
-        blockChineseMessage(api, '已开启“禁止发送中文”，请先开启发送自动翻译或改为目标语言。');
-        return true;
-      }
-      return false;
-    }
-
-    sending = true;
-    composer.setAttribute('data-rt-sending', 'true');
     try {
+      const settings = await api.getRuntimeSettings();
+      const blockChinese = settings.blockChineseSend !== false;
+
+      if (!settings.sendAutoTranslate) {
+        if (blockChinese && containsChinese(original)) {
+          api.notifyError?.('已开启“禁止发送中文”。请开启发送翻译，或直接输入目标语言。');
+          return;
+        }
+        nativeSend(composer);
+        return;
+      }
+
       const translated = await api.translateOutgoing(original);
       const finalText = String(translated || '').trim();
       if (!finalText) throw new Error('翻译结果为空，已阻止发送。');
@@ -235,48 +259,40 @@ export const whatsappInjectionScript = String.raw`
 
       replaceComposerText(composer, finalText);
       const updated = await waitForComposer(composer, finalText);
-      if (!updated) {
-        replaceComposerText(composer, finalText);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      if (!updated) throw new Error('无法把译文写入 WhatsApp 输入框，已阻止发送。');
 
       const currentText = composerText(composer);
       if (blockChinese && containsChinese(currentText)) {
         throw new Error('输入框仍包含中文，已阻止发送，避免原文误发。');
       }
-      if (!currentText) throw new Error('输入框更新失败，已阻止发送。');
 
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       nativeSend(composer);
-      return true;
     } catch (error) {
-      replaceComposerText(composer, original);
+      if (composerText(composer) !== original) replaceComposerText(composer, original);
       api.notifyError?.(String(error?.message || error));
-      return true;
-    } finally {
-      composer.removeAttribute('data-rt-sending');
-      sending = false;
     }
   };
 
-  const handleSendIntent = async (event, composer) => {
-    const api = window.realtimeTranslator;
-    if (!api) return;
-    const settings = await api.getRuntimeSettings();
-    const original = composerText(composer);
-    const shouldIntercept = settings.sendAutoTranslate || (settings.blockChineseSend !== false && containsChinese(original));
-    if (!shouldIntercept) return;
-
+  const interceptSendNow = (event, composer) => {
+    // Critical: prevent WhatsApp's native handler synchronously. Waiting for
+    // an IPC/settings promise before preventDefault lets the original Chinese
+    // message escape before translation finishes.
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
     if (sending) return;
-    await translateAndSend(composer);
+    sending = true;
+    composer.setAttribute('data-rt-sending', 'true');
+    void processSend(composer).finally(() => {
+      composer.removeAttribute('data-rt-sending');
+      sending = false;
+    });
   };
 
-  document.addEventListener('keydown', async (event) => {
+  document.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
-    const composer = first(selectors.composer);
+    const composer = getComposer(event.target);
     if (!composer || !composer.contains(event.target)) return;
 
     if (allowNativeEnterOnce) {
@@ -284,18 +300,18 @@ export const whatsappInjectionScript = String.raw`
       return;
     }
 
-    await handleSendIntent(event, composer);
+    interceptSendNow(event, composer);
   }, true);
 
-  document.addEventListener('beforeinput', async (event) => {
+  document.addEventListener('beforeinput', (event) => {
     if (event.inputType !== 'insertParagraph' || event.isComposing) return;
-    const composer = first(selectors.composer);
+    const composer = getComposer(event.target);
     if (!composer || !composer.contains(event.target)) return;
-    if (allowNativeEnterOnce || sending) return;
-    await handleSendIntent(event, composer);
+    if (allowNativeEnterOnce) return;
+    interceptSendNow(event, composer);
   }, true);
 
-  document.addEventListener('click', async (event) => {
+  document.addEventListener('click', (event) => {
     if (!isSendTarget(event.target)) return;
 
     if (allowNativeClickOnce) {
@@ -303,9 +319,9 @@ export const whatsappInjectionScript = String.raw`
       return;
     }
 
-    const composer = first(selectors.composer);
+    const composer = getComposer(event.target);
     if (!composer) return;
-    await handleSendIntent(event, composer);
+    interceptSendNow(event, composer);
   }, true);
 
   let mutationTimer;
@@ -315,7 +331,7 @@ export const whatsappInjectionScript = String.raw`
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  setInterval(translateVisible, 1600);
+  setInterval(translateVisible, 1400);
   translateVisible();
 })();
 `
