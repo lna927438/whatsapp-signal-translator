@@ -64,7 +64,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); window.removeEventListener
 
 <template>
   <div v-if="loading" class="auth-loading-screen">
-    <div class="auth-loading-mark">译</div>
+    <div class="auth-loading-mark"><img src="/hellodog-icon.webp" alt="HelloDog" /></div>
     <strong>正在连接在线账号…</strong>
   </div>
   <App v-else-if="userId" :key="workspaceKey" :user-id="userId" />

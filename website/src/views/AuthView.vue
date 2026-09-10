@@ -245,9 +245,9 @@ function backToLoginWithRecoveredUsername() {
 <template>
   <main class="auth-page section-grid">
     <section class="auth-pitch">
-      <span class="eyebrow">REALTIME TRANSLATOR CLOUD</span>
+      <span class="eyebrow">YOUR HELLODOG ACCOUNT</span>
       <h1>一个账号，连接你的翻译余额与使用记录。</h1>
-      <p>桌面端和官网使用同一套 Supabase 在线身份。注册邮箱经过验证码确认后与账号绑定，可用于找回账号和重置密码。</p>
+      <p>官网与客户端共用 HelloDog 账号。验证邮箱后，你可以查看余额、使用记录，也能安全找回账号。</p>
       <div class="auth-benefits">
         <div><b>邮箱绑定</b><span>注册必须完成邮箱验证码确认</span></div>
         <div><b>安全找回</b><span>忘记账号或密码都可以通过绑定邮箱恢复</span></div>

@@ -2,9 +2,7 @@ import { BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
 import { whatsappInjectionScript } from './inject/script'
 import { SendNotStartedError, type SendTask } from '../../translation/sendTasks'
-
-const SIDEBAR_WIDTH = 268
-const ACCOUNT_TOOLBAR_HEIGHT = 118
+import { clampViewBounds, type ViewBounds } from './viewBounds'
 
 function chromeUserAgent(): string {
   const chromeVersion = process.versions.chrome || '140.0.0.0'
@@ -18,6 +16,28 @@ export class WhatsAppAdapter {
   private mainWindow?: BrowserWindow
   private overlayOpen = false
   private focusRevision = 0
+  private bounds: ViewBounds = { x: 248, y: 180, width: 1032, height: 640 }
+  private menuHandler?: (accountId: string) => void
+  private readonly preferences = new Map<string, any>()
+
+  setMenuHandler(handler: (accountId: string) => void): void { this.menuHandler = handler }
+  contents(accountId: string) {
+    const contents = this.views.get(accountId)?.webContents
+    return contents && !contents.isDestroyed() ? contents : undefined
+  }
+  setContentBounds(value: ViewBounds): void {
+    if (!this.mainWindow) return
+    const [width, height] = this.mainWindow.getContentSize()
+    const bounds = clampViewBounds(value, width, height, this.mainWindow.webContents.getZoomFactor())
+    if (bounds) { this.bounds = bounds; this.layout() }
+  }
+  async applyPreferences(accountId: string, value: any): Promise<void> {
+    this.preferences.set(accountId, value)
+    const contents = this.contents(accountId)
+    if (!contents) return
+    contents.setZoomFactor(Math.max(0.5, Math.min(1.5, Number(value.zoomFactor) || 1)))
+    await contents.executeJavaScript(`window.__RT_APPLY_SETTINGS__?.(${JSON.stringify({ fontSize: value.fontSize, translationColor: value.translationColor, translationsVisible: value.translationsVisible !== false })})`).catch(() => {})
+  }
 
   attachMainWindow(window: BrowserWindow): void {
     this.mainWindow = window
@@ -161,10 +181,12 @@ export class WhatsAppAdapter {
     view.webContents.on('did-finish-load', async () => {
       try {
         await view.webContents.executeJavaScript(whatsappInjectionScript, true)
+        await this.applyPreferences(accountId, this.preferences.get(accountId) || {})
       } catch (error) {
         console.error('WhatsApp injection failed', error)
       }
     })
+    view.webContents.on('context-menu', () => this.menuHandler?.(accountId))
     return view
   }
 
@@ -173,11 +195,7 @@ export class WhatsAppAdapter {
     const view = this.views.get(this.activeId)
     if (!view || view.webContents.isDestroyed()) return
     const [width, height] = this.mainWindow.getContentSize()
-    view.setBounds({
-      x: SIDEBAR_WIDTH,
-      y: ACCOUNT_TOOLBAR_HEIGHT,
-      width: Math.max(360, width - SIDEBAR_WIDTH),
-      height: Math.max(300, height - ACCOUNT_TOOLBAR_HEIGHT)
-    })
+    const bounds = clampViewBounds(this.bounds, width, height)
+    if (bounds) view.setBounds(bounds)
   }
 }

@@ -137,7 +137,7 @@ jobs:
 
           $sha256 = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
           $size = $installer.Length
-          $versionKey = "windows/v$version/WhatsApp-Signal-Translator-Setup-v$version.exe"
+          $versionKey = "windows/v$version/HelloDog-Setup-v$version.exe"
           $latestKey = 'windows/latest/WhatsApp-Signal-Translator-Setup.exe'
 
           $objects = aws s3api list-objects-v2 --bucket $bucket --prefix $versionKey --endpoint-url $endpoint --region auto --output json | ConvertFrom-Json

@@ -3,4 +3,5 @@ import Root from './Root.vue'
 import './style.css'
 import './auth.css'
 import './auth-recovery.css'
+import './hellodog.css'
 createApp(Root).mount('#app')

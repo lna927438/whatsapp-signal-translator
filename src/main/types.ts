@@ -22,6 +22,8 @@ export interface AccountRecord {
   groupTranslate?: boolean
   fontSize?: number
   translationColor?: string
+  translationsVisible?: boolean
+  zoomFactor?: number
   contactLanguages?: Record<string, ContactLanguagePreference>
   createdAt: number
 }
@@ -36,6 +38,7 @@ export interface RuntimeSettings {
   groupTranslate: boolean
   fontSize: number
   translationColor: string
+  translationsVisible?: boolean
   conversationId?: string
   conversationName?: string
   contactLanguageSource?: 'manual' | 'auto' | 'default'
@@ -49,6 +52,7 @@ export interface ProviderSettings {
 }
 
 export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor' | 'conversationId' | 'conversationName' | 'contactLanguageSource'>, ProviderSettings {
+  cloudRoute?: 'auto' | 'primary' | 'backup'
   groupTranslate?: boolean
   fontSize?: number
   translationColor?: string

@@ -66,6 +66,20 @@ test('WhatsApp repeated Enter becomes one guarded submission and requires a new 
   } finally { h.dom.window.close() }
 })
 
+test('WhatsApp translation display controls update existing messages without replacing or resending them', () => {
+  const h = harness()
+  try {
+    const node = h.win.document.createElement('span')
+    node.className = 'rt-translation'; node.textContent = '保留这条译文'
+    h.win.document.querySelector('.message-in').appendChild(node)
+    h.win.__RT_APPLY_SETTINGS__({ fontSize: 18, translationColor: '#336633', translationsVisible: false })
+    assert.equal(node.style.display, 'none'); assert.equal(node.style.fontSize, '18px')
+    h.win.__RT_APPLY_SETTINGS__({ fontSize: 14, translationColor: '#336633', translationsVisible: true })
+    assert.equal(node.style.display, 'block'); assert.equal(node.textContent, '保留这条译文')
+    assert.equal(h.nativeClicks, 0); assert.equal(h.incoming, 0)
+  } finally { h.dom.window.close() }
+})
+
 test('WhatsApp switching to a same-name chat while translating does not send or overwrite its draft', async () => {
   const h = harness({ delayTranslation: true })
   try {

@@ -244,8 +244,11 @@ export const whatsappInjectionScript = String.raw`
     document.querySelectorAll('.rt-translation').forEach((node) => {
       node.style.fontSize = String(Number(settings?.fontSize || 13)) + 'px';
       node.style.color = settings?.translationColor || '#c8d4e4';
+      node.style.display = settings?.translationsVisible === false ? 'none' : 'block';
     });
   };
+
+  window.__RT_APPLY_SETTINGS__ = applyTranslationStyle;
 
   const addTranslation = (container, text, settings, kind = 'incoming') => {
     if (!text) return;
@@ -257,7 +260,7 @@ export const whatsappInjectionScript = String.raw`
     node.setAttribute('data-rt-ui', 'translation');
     node.setAttribute('data-rt-kind', kind);
     Object.assign(node.style, {
-      display: 'block', marginTop: '5px', paddingTop: '5px', borderTop: '1px dashed rgba(120,120,120,.38)',
+      display: settings?.translationsVisible === false ? 'none' : 'block', marginTop: '5px', paddingTop: '5px', borderTop: '1px dashed rgba(120,120,120,.38)',
       fontSize: String(Number(settings?.fontSize || 13)) + 'px', lineHeight: '1.38', fontWeight: '500',
       color: settings?.translationColor || '#c8d4e4', opacity: '.98', whiteSpace: 'pre-wrap', userSelect: 'text'
     });

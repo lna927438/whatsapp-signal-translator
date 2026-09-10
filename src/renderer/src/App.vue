@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import UiIcon from './components/UiIcon.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SignalView from './components/SignalView.vue'
@@ -21,6 +22,8 @@ type Account = {
   blockChineseSend?: boolean
   groupTranslate?: boolean
   fontSize?: number
+  translationsVisible?: boolean
+  zoomFactor?: number
   translationColor?: string
   contactLanguages?: Record<string, ContactPreference>
 }
@@ -33,6 +36,67 @@ const selected = ref<Account | null>(null)
 const showSettings = ref(false)
 const showProfile = ref(false)
 const error = ref('')
+const collapsed = ref(localStorage.getItem('hellodog:sidebar-collapsed') === 'true')
+const search = ref('')
+const contentArea = ref<HTMLElement | null>(null)
+const filteredAccounts = computed(() => accounts.value.filter(item => item.label.toLowerCase().includes(search.value.toLowerCase())))
+const renaming = ref<Account | null>(null)
+const newLabel = ref('')
+const routes = ref<any[]>([])
+const measuring = ref(false)
+let boundsObserver: ResizeObserver | undefined
+let boundsFrame = 0
+let disposed = false
+const lineLabel = computed(() => {
+  const route = settings.value?.cloudRoute || 'auto'
+  const candidates = routes.value.filter(item => route === 'auto' || item.id === route)
+  const best = candidates.find(item => item.available)
+  return best ? `${best.label} ${best.latencyMs} ms` : measuring.value ? '检测中…' : routes.value.length ? '线路待检查' : '检查连接'
+})
+async function measureRoutes() {
+  if (measuring.value) return
+  measuring.value = true
+  try { routes.value = await window.desktopAPI.measureRoutes() }
+  catch (e: any) { error.value = e?.message || '线路检测失败' }
+  finally { measuring.value = false }
+}
+function updateBounds() {
+  cancelAnimationFrame(boundsFrame)
+  boundsFrame = requestAnimationFrame(() => {
+    if (disposed || !contentArea.value) return
+    const { x, y, width, height } = contentArea.value.getBoundingClientRect()
+    void window.desktopAPI.setContentBounds({ x, y, width, height }).catch(() => {})
+  })
+}
+watch(collapsed, async value => { localStorage.setItem('hellodog:sidebar-collapsed', String(value)); await nextTick(); updateBounds() })
+async function home() {
+  selected.value = null
+  await window.desktopAPI.focusPlatform({ platform: 'signal' })
+}
+function accountMenu(account: Account) { void window.desktopAPI.showAccountMenu(account.id) }
+async function renameAccount(account: Account) {
+  await window.desktopAPI.setOverlayOpen(true)
+  renaming.value = account; newLabel.value = account.label
+}
+async function finishRename(save: boolean) {
+  if (save && renaming.value) {
+    const label = newLabel.value.trim().slice(0, 60)
+    if (!label) return
+    try { await window.desktopAPI.updateAccount(renaming.value.id, { label }); await reload() }
+    catch (e: any) { error.value = e?.message || '名称保存失败'; return }
+  }
+  renaming.value = null
+  await window.desktopAPI.setOverlayOpen(false)
+}
+function onShortcut(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); collapsed.value = !collapsed.value }
+  if (event.key === 'Escape') {
+    if (renaming.value) void finishRename(false)
+    else if (showSettings.value) void closeSettings()
+    else if (showProfile.value) void closeProfile()
+  }
+}
+
 const settings = ref<any>(null)
 const profile = ref<any>(null)
 const profileSynced = ref(false)
@@ -69,7 +133,7 @@ const apiConfigured = computed(() => {
   return false
 })
 const channelName = computed(() => {
-  if (settings.value?.provider === 'openai') return 'GPT-5.6 LUNA'
+  if (settings.value?.provider === 'openai') return 'HelloDog 云端'
   if (settings.value?.provider === 'deepl') return 'DeepL'
   return 'Google Translate'
 })
@@ -83,13 +147,13 @@ const selectedLiveStatus = computed<LiveStatus>(() => {
   if (!apiConfigured.value) return { state: 'error', message: '翻译服务未配置' }
   if (profileSynced.value && Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: '字符额度已用完' }
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
-  return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
+  return { state: 'ready', message: '等待翻译请求' }
 })
 const metricLabel = computed(() => {
-  const delay = Number(metrics.value?.lastLatencyMs || 0)
+  const delay = metrics.value?.lastLatencyMs ? `${metrics.value.lastLatencyMs} ms` : '待测'
   const queue = Number(metrics.value?.queueDepth || 0)
   const hits = Number(metrics.value?.cacheHits || 0) + Number(metrics.value?.dedupHits || 0)
-  return `延迟 ${delay} ms · 队列 ${queue} · 缓存 ${hits}`
+  return `翻译 ${delay} · 队列 ${queue} · 缓存 ${hits}`
 })
 const contactLabel = computed(() => {
   const conversation = selectedConversation.value
@@ -162,8 +226,11 @@ async function addSignalRecord(signalAccount?: string) {
 
 async function select(account: Account) {
   selected.value = account
+  await nextTick()
+  updateBounds()
   controlFeedback.value = { state: 'idle', message: '' }
-  await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id })
+  try { await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id }) }
+  catch (e: any) { error.value = e?.message || '页面加载失败，请使用右键菜单刷新。' }
 }
 
 async function remove(account: Account) {
@@ -258,6 +325,19 @@ function onProfileUpdated(next: any) {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', onShortcut)
+  boundsObserver = new ResizeObserver(updateBounds)
+  if (contentArea.value) boundsObserver.observe(contentArea.value)
+  updateBounds()
+  void measureRoutes()
+  subscriptions.push(window.desktopAPI.onAccountAction(async (event: any) => {
+    const account = accounts.value.find(item => item.id === event.accountId)
+    if (event.action === 'rename' && account) await renameAccount(account)
+    if (event.action === 'updated') await reload()
+    if (event.action === 'removed') { if (selected.value?.id === event.accountId) await home(); await reload() }
+    if (event.action === 'home') await home()
+    if (event.action === 'diagnose') await openSettings()
+  }))
   metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
   walletTimer = setInterval(() => { void reloadProfile() }, 15000)
   subscriptions.push(window.desktopAPI.onWhatsAppConversation((info: any) => {
@@ -286,6 +366,10 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
+  window.removeEventListener('keydown', onShortcut)
+  boundsObserver?.disconnect()
+  cancelAnimationFrame(boundsFrame)
   subscriptions.forEach(unsubscribe => unsubscribe())
   if (metricsTimer) clearInterval(metricsTimer)
   if (walletTimer) clearInterval(walletTimer)
@@ -294,88 +378,47 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'sidebar-collapsed': collapsed }">
     <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">译</div><div><b>实时翻译器</b><small>WhatsApp + Signal</small></div></div>
-      <button class="add wa" @click="addWhatsApp">＋ 添加 WhatsApp</button>
-      <button class="add signal" @click="addSignalRecord()">＋ 添加 Signal</button>
+      <button class="brand" @click="home" title="HelloDog 工作台"><img src="/hellodog-icon.webp" alt="HelloDog" /><span><b>HelloDog</b><small>让每一句，都被听懂。</small></span></button>
+      <div class="sidebar-heading"><span>工作空间</span><button class="icon-button collapse-button" :aria-expanded="!collapsed" :title="collapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'" @click="collapsed = !collapsed"><UiIcon name="panel" /></button></div>
+      <button class="nav-button" :class="{ active: !selected }" @click="home" title="工作台"><UiIcon name="home" /><span>工作台</span></button>
+      <div class="sidebar-heading account-heading"><span>我的账号 <b>{{ accounts.length }}</b></span></div>
+      <label v-if="!collapsed" class="account-search"><UiIcon name="search" /><input v-model="search" placeholder="搜索账号" aria-label="搜索账号" /></label>
       <div class="account-list">
-        <button v-for="account in accounts" :key="account.id" class="account" :class="{ active: selected?.id===account.id }" @click="select(account)">
-          <span class="dot" :class="account.platform"></span><span class="account-label">{{ account.label }}</span><span class="close" title="删除账号" @click.stop="remove(account)">×</span>
-        </button>
+        <div v-for="account in filteredAccounts" :key="account.id" class="account-row" :class="{ active: selected?.id === account.id }" @contextmenu.prevent="accountMenu(account)">
+          <button class="account" :title="account.label" @click="select(account)" @keydown.shift.f10.prevent="accountMenu(account)">
+            <span class="platform-avatar" :class="account.platform">{{ account.platform === 'whatsapp' ? 'W' : 'S' }}</span><span class="account-label"><b>{{ account.label }}</b><small>{{ account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal' }}</small></span>
+          </button><button v-if="!collapsed" class="icon-button account-more" :aria-label="account.label + ' 的更多操作'" @click="accountMenu(account)"><UiIcon name="more" /></button>
+        </div>
+        <p v-if="!filteredAccounts.length && !collapsed" class="sidebar-hint">{{ search ? '没有匹配的账号' : '添加账号，开始对话。' }}</p>
       </div>
+      <div class="add-accounts"><button class="add wa" @click="addWhatsApp" title="添加 WhatsApp"><UiIcon name="plus" /><span>添加 WhatsApp</span></button><button class="add signal" @click="addSignalRecord()" title="添加 Signal"><UiIcon name="plus" /><span>添加 Signal</span></button></div>
       <div class="sidebar-bottom">
-        <button class="profile-btn" @click="openProfile"><span>👤 个人中心</span><small>云端剩余 {{ remainingCharsLabel }} 字符</small></button>
-        <button class="settings-btn" @click="openSettings">⚙ 设置</button>
+        <button class="profile-btn" @click="openProfile" title="个人中心与字符余额"><UiIcon name="user" /><span><b>个人中心</b><small>剩余 {{ remainingCharsLabel }} 字符</small></span></button>
+        <button class="settings-btn" @click="openSettings" title="设置与连接诊断"><UiIcon name="settings" /><span>设置与连接</span></button>
+        <small class="version-label">{{ collapsed ? '0.5.0' : 'HelloDog · v0.5.0' }}</small>
       </div>
     </aside>
-
-    <header v-if="selected" class="account-toolbar">
-      <div class="account-control-row">
-        <label class="check-label" title="开启后自动把对方消息翻译成我的语言">
-          <input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />
-          <span>对方的语言</span>
-        </label>
-        <select :value="targetLanguage" @change="setTargetLanguage">
-          <option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option>
-        </select>
-
-        <span class="control-name">翻译通道</span>
-        <select class="channel-select" disabled><option>{{ channelName }}</option></select>
-
-        <span class="control-name">字号大小</span>
-        <select class="size-select" :value="fontSize" @change="setNumberField('fontSize', $event)">
-          <option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option>
-        </select>
-
-        <span class="control-name">群组翻译</span>
-        <button class="mini-switch" :class="{ on: groupTranslate }" :title="groupTranslate ? '群组消息自动翻译已开启' : '群组消息自动翻译已关闭'" @click="patchSelected({ groupTranslate: !groupTranslate })"><span></span></button>
-
-        <button class="toolbar-settings" @click="openSettings">翻译设置</button>
-      </div>
-
-      <div class="account-control-row second-row">
-        <label class="check-label" title="开启后中文输入会先翻译成对方语言再发送">
-          <input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />
-          <span>自己的语言</span>
-        </label>
-        <select :value="localLanguage" @change="setStringField('localLanguage', $event)">
-          <option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option>
-        </select>
-
-        <span class="control-name">翻译服务器</span>
-        <div class="server-box"><b>{{ serverName }}</b><em :class="{ ready: apiConfigured }">{{ serverStatusLabel }}</em></div>
-
-        <span class="control-name">字体颜色</span>
-        <div class="color-box">
-          <input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" />
-          <code>{{ translationColor }}</code>
+    <div class="workspace">
+      <header class="workspace-header"><div><span class="workspace-kicker">HELLODOG WORKSPACE</span><h1>{{ selected?.label || '你的聊天，世界都听得懂。' }}</h1></div><div class="workspace-header-actions"><button class="connection-button" @click="openSettings" title="查看实测线路与连接诊断"><UiIcon name="signal" />{{ lineLabel }}</button><button v-if="selected" class="icon-button" title="账号操作" @click="accountMenu(selected)"><UiIcon name="more" /></button></div></header>
+      <section v-if="selected" class="account-toolbar">
+        <div class="language-control"><label><span>我使用的语言</span><select :value="localLanguage" @change="setStringField('localLanguage', $event)"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label><span class="language-arrow">⇄</span><label><span>{{ contactLabel || '对方的语言' }}</span><select :value="targetLanguage" @change="setTargetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label></div>
+        <div class="translation-toggles"><label><input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />接收翻译</label><label><input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />发送翻译</label><label><input type="checkbox" :checked="blockChineseSend" @change="patchSelected({ blockChineseSend: !blockChineseSend })" />拦截中文原文</label><label><input type="checkbox" :checked="groupTranslate" @change="patchSelected({ groupTranslate: !groupTranslate })" />群组翻译</label></div>
+        <div class="display-controls"><label>译文字号<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label title="译文颜色">颜色<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? '显示译文' : '隐藏译文' }}</button></div>
+      </section>
+      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ selectedLiveStatus.message }}</span></div><span>{{ channelName }}</span><span class="metric-text">{{ metricLabel }}</span><span class="save-feedback" :class="controlFeedback.state" role="status">{{ controlFeedback.message }}</span><span class="quota-text" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span></div>
+      <main ref="contentArea" class="content" :class="{ 'signal-content': selectedIsSignal }">
+        <SignalView v-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" />
+        <div v-else-if="!selected" class="welcome">
+          <div class="welcome-copy"><span class="eyebrow">SAY HELLO, GO FURTHER.</span><h2>让交流少一点距离。<br /><em>多一点 Hello。</em></h2><p>连接你的聊天账号，用熟悉的语言，聊更远的世界。</p><div class="welcome-actions"><button class="primary" @click="addWhatsApp"><UiIcon name="plus" />添加 WhatsApp</button><button class="secondary" @click="addSignalRecord()">添加 Signal</button></div><small>已有账号？从左侧选择，继续上一次对话。</small></div><img class="welcome-dog" src="/hellodog-icon.webp" alt="HelloDog 小狗" />
+          <div class="welcome-cards"><button @click="openSettings"><UiIcon name="signal" /><b>先检查连接</b><p>检测线路、登录与翻译服务，定位问题。</p><span>打开连接诊断 →</span></button><button @click="openProfile"><UiIcon name="user" /><b>字符余额，一目了然</b><p>剩余 {{ remainingCharsLabel }} 字符，查看真实消费记录。</p><span>打开个人中心 →</span></button><article><UiIcon name="shield" /><b>发送前，多一道确认</b><p>失败保留草稿，发送结果不明确时由你确认。</p><span>账号右键 · 更多实用操作</span></article></div>
         </div>
-
-        <span class="control-name">禁止中文</span>
-        <button class="mini-switch" :class="{ on: blockChineseSend }" :title="blockChineseSend ? '中文原文禁止直接发送' : '允许直接发送中文'" @click="patchSelected({ blockChineseSend: !blockChineseSend })"><span></span></button>
-
-        <div class="live-status" :class="selectedLiveStatus.state" :title="selectedLiveStatus.message"><i></i><span>{{ selectedLiveStatus.message }}</span></div>
-        <span class="quota-badge" :class="{ low: quotaLow }" title="只有新的 API 翻译成功后才扣字符；缓存和历史恢复不扣字符">余 {{ remainingCharsLabel }} 字符</span>
-        <span class="metric-badge" :title="`累计请求 ${metrics.totalRequests || 0}，API 调用 ${metrics.providerCalls || 0}，平均延迟 ${metrics.averageLatencyMs || 0} ms`">{{ metricLabel }}</span>
-        <span v-if="contactLabel" class="contact-badge" :title="selectedConversation?.id">{{ contactLabel }}</span>
-        <span v-if="controlFeedback.message" class="save-feedback" :class="controlFeedback.state">{{ controlFeedback.message }}</span>
-        <span class="precise-badge">精准翻译</span>
-      </div>
-    </header>
-
-    <header v-else class="account-toolbar empty-toolbar">
-      <strong>请选择或添加一个账号</strong>
-      <div class="empty-toolbar-actions"><span class="quota-badge" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span><button class="toolbar-settings" @click="openSettings">翻译设置</button></div>
-    </header>
-
-    <main class="content" :class="{ 'signal-content': selectedIsSignal }">
-      <SignalView v-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" />
-      <div v-else-if="!selected" class="empty"><h2>添加或选择一个账号</h2><p>WhatsApp 使用原生 WhatsApp Web 界面，Signal 使用内置聊天界面。</p></div>
-    </main>
-
+      </main>
+    </div>
     <SettingsPanel v-if="showSettings" @close="closeSettings" />
     <PersonalCenter v-if="showProfile" @close="closeProfile" @updated="onProfileUpdated" />
-    <div v-if="error" class="toast">{{ error }}</div>
+    <div v-if="renaming" class="modal-backdrop" @click.self="finishRename(false)"><form class="panel rename-panel" @submit.prevent="finishRename(true)"><header><h2>给账号取个名字</h2><button type="button" @click="finishRename(false)" aria-label="关闭">×</button></header><label>账号名称<input v-model="newLabel" maxlength="60" required autofocus /></label><footer><button type="button" class="secondary" @click="finishRename(false)">取消</button><button class="primary" type="submit">保存名称</button></footer></form></div>
+    <div v-if="error" class="toast" role="alert">{{ error }}<button @click="error = ''" aria-label="关闭提示">×</button></div>
   </div>
 </template>

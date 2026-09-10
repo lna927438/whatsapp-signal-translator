@@ -12,6 +12,39 @@ const testText = ref('Hello, how are you?')
 const testResult = ref('')
 const apiState = ref<'idle' | 'success' | 'error'>('idle')
 const apiMessage = ref('')
+const checking = ref(false)
+const routeResults = ref<any[]>([])
+const diagnoses = ref<any[]>([])
+const connectionError = ref('')
+async function checkConnection() {
+  if (checking.value) return
+  checking.value = true; connectionError.value = ''
+  try {
+    await syncCloudSession()
+    const [routes, checks] = await Promise.all([window.desktopAPI.measureRoutes(), window.desktopAPI.diagnoseConnection()])
+    routeResults.value = routes; diagnoses.value = checks
+  } catch (error: any) { connectionError.value = error?.message || '连接检查失败，请重试。' }
+  finally { checking.value = false }
+}
+async function selectRoute() {
+  try { await window.desktopAPI.saveCloudRoute(settings.value.cloudRoute); await checkConnection() }
+  catch (error: any) { connectionError.value = error?.message || '线路保存失败。' }
+}
+function diagnosisLabel(item: any) {
+  if (!item.ok) return item.message
+  if (item.id === 'account') return item.data?.active ? `账号可用 · 余额 ${Number(item.data.balance || 0).toLocaleString()} 字符` : '账号已停用，请联系管理员。'
+  const code = item.data?.code
+  const messages: Record<string, string> = {
+    provider_auth: '服务端凭据无效，需要管理员更新。',
+    provider_quota: '翻译服务额度不足，需要管理员处理。',
+    provider_model: '当前模型不可用，需要管理员检查模型权限。',
+    provider_permission: '无法确认模型权限，请进行一次翻译测试。',
+    provider_request: '翻译服务配置需要管理员检查。'
+  }
+  return messages[code] || (item.data?.status === 'available' ? '模型可访问，实际翻译待测试。' : '暂时无法确认模型状态，请重试或测试翻译。')
+}
+function needsAttention(item: any) { return !item.ok || (item.id === 'account' ? !item.data?.active : item.data?.status === 'attention') }
+
 
 const configuredKey = computed(() => {
   if (!settings.value) return ''
@@ -22,7 +55,7 @@ const configuredKey = computed(() => {
 
 const providerLabel = computed(() => {
   if (!settings.value) return ''
-  if (settings.value.provider === 'openai') return 'OpenAI 云端翻译'
+  if (settings.value.provider === 'openai') return 'HelloDog 云端翻译'
   if (settings.value.provider === 'deepl') return 'DeepL'
   return 'Google Cloud Translation'
 })
@@ -60,7 +93,9 @@ onMounted(async () => {
   if (settings.value.blockChineseSend === undefined) settings.value.blockChineseSend = true
   settings.value.openaiModel = 'gpt-5.6-luna'
   settings.value.openaiApiKey = ''
+  settings.value.cloudRoute ||= 'auto'
   languages.value = await window.desktopAPI.getLanguages()
+  void checkConnection()
 })
 
 watch(() => settings.value?.provider, () => {
@@ -79,7 +114,7 @@ async function testApi() {
 
   testing.value = true
   apiState.value = 'idle'
-  apiMessage.value = settings.value.provider === 'openai' ? '正在同步登录令牌并测试 Cloudflare + Supabase + OpenAI 云端翻译链路…' : '正在测试 API 连接和翻译…'
+  apiMessage.value = settings.value.provider === 'openai' ? '正在验证登录并测试翻译，请稍候…' : '正在测试 API 连接和翻译…'
   testResult.value = ''
   try {
     if (settings.value.provider === 'openai') await syncCloudSession()
@@ -128,7 +163,14 @@ async function save() {
     <section v-if="settings" class="panel">
       <header><h2>翻译设置</h2><button title="关闭" @click="emit('close')">×</button></header>
 
-      <div class="mode-lock"><span>翻译模式</span><strong>精准翻译</strong><small>固定</small></div>
+      <div class="connection-detail">
+        <h3>连接诊断</h3>
+        <div class="route-picker"><select v-model="settings.cloudRoute" aria-label="翻译线路" @change="selectRoute"><option value="auto">自动切换线路</option><option value="primary">主线路 · api.hellodog.net</option><option value="backup">备用线路 · workers.dev</option></select><button class="secondary" :disabled="checking" @click="checkConnection">{{ checking ? '检测中…' : '重新检测' }}</button></div>
+        <p class="diagnosis-note">线路选择立即保存。连接检测不发起翻译，不消耗字符。</p>
+        <div class="diagnosis-grid"><div v-for="route in routeResults" :key="route.id" class="diagnosis-row" :class="{ attention: !route.available }"><b>{{ route.label }}</b><span>{{ route.available ? `可访问 · ${route.latencyMs} ms` : '当前网络无法访问' }}</span></div><div v-for="item in diagnoses" :key="item.id" class="diagnosis-row" :class="{ attention: needsAttention(item) }"><b>{{ item.id === 'account' ? '登录与字符余额' : '翻译服务' }}</b><span>{{ diagnosisLabel(item) }}</span></div></div>
+        <p v-if="connectionError" class="api-message error" role="alert">{{ connectionError }}</p>
+        <p v-if="routeResults.length" class="diagnosis-note">以上是本次检测结果。线路延迟不包含翻译耗时；模型可访问不代表翻译已成功。</p>
+      </div>
 
       <label>我的语言
         <select v-model="settings.localLanguage">
@@ -144,7 +186,7 @@ async function save() {
 
       <label>翻译引擎
         <select v-model="settings.provider">
-          <option value="openai">OpenAI 云端</option>
+          <option value="openai">HelloDog 云端</option>
           <option value="deepl">DeepL</option>
           <option value="google">Google Cloud Translation</option>
         </select>
@@ -152,9 +194,9 @@ async function save() {
 
       <div v-if="settings.provider === 'openai'" class="api-section">
         <div class="api-help">
-          <strong>OpenAI 云端翻译</strong>
-          <p>由 Cloudflare Worker 安全调用 GPT-5.6 Luna。OpenAI API Key 已移到服务器端，桌面软件不再保存或显示密钥。</p>
-          <div class="api-links"><span>服务器：realtime-translator-api</span><span>模型：GPT-5.6 Luna</span></div>
+          <strong>HelloDog 云端翻译</strong>
+          <p>登录 HelloDog 账号即可使用。翻译成功后按字符扣费，失败不扣费。</p>
+
         </div>
       </div>
 
@@ -173,9 +215,9 @@ async function save() {
       </div>
 
       <div class="api-test-card">
-        <div class="api-test-head"><div><strong>{{ settings.provider === 'openai' ? '云端连接测试' : 'API 连接测试' }}</strong><small>{{ settings.provider === 'openai' ? '验证登录、Cloudflare、Supabase 钱包与 GPT 翻译。' : '直接使用上面当前填写的内容测试，不需要先保存。' }}</small></div><span class="api-badge" :class="apiState">{{ apiState === 'success' ? '已连接' : apiState === 'error' ? '需要处理' : '未测试' }}</span></div>
+        <div class="api-test-head"><div><strong>{{ settings.provider === 'openai' ? '云端连接测试' : 'API 连接测试' }}</strong><small>{{ settings.provider === 'openai' ? '发起一次真实翻译。成功按字符计费，失败不扣费。' : '直接使用上面当前填写的内容测试，不需要先保存。' }}</small></div><span class="api-badge" :class="apiState">{{ apiState === 'success' ? '已连接' : apiState === 'error' ? '需要处理' : '未测试' }}</span></div>
         <textarea v-model="testText" placeholder="输入测试文本"></textarea>
-        <button class="secondary" :disabled="testing" @click="testApi">{{ testing ? '测试中…' : '测试连接 + 翻译' }}</button>
+        <button class="secondary" :disabled="testing || checking || !testText.trim()" @click="testApi">{{ testing ? '测试中…' : '测试翻译' }}</button>
         <p v-if="apiMessage" class="api-message" :class="apiState">{{ apiMessage }}</p>
         <pre v-if="testResult" class="api-result">{{ testResult }}</pre>
       </div>

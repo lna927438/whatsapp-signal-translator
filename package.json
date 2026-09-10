@@ -1,9 +1,9 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "private": true,
   "author": "lna927438",
-  "description": "Desktop real-time precise translation for WhatsApp and Signal",
+  "description": "HelloDog \u2014 a friendly workspace for cross-language chats",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -30,13 +30,33 @@
   },
   "build": {
     "appId": "com.local.whatsappsignaltranslator",
-    "productName": "WhatsApp Signal Translator",
-    "directories": { "output": "release" },
-    "files": ["out/**/*", "package.json"],
-    "extraResources": [
-      { "from": "resources/signal", "to": "signal", "filter": ["**/*"] }
+    "productName": "HelloDog",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "resources/brand/**/*"
     ],
-    "win": { "target": ["nsis"] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "extraResources": [
+      {
+        "from": "resources/signal",
+        "to": "signal",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/brand/hellodog-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

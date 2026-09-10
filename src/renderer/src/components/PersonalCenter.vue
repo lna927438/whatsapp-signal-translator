@@ -13,6 +13,7 @@ const email = ref('')
 const busy = ref(false)
 const message = ref('')
 const cloudError = ref('')
+const usageError = ref('')
 
 const formatter = new Intl.NumberFormat('zh-CN')
 const remaining = computed(() => Number(cloudState.value?.wallet?.balance || 0))
@@ -36,8 +37,11 @@ async function reload() {
   try {
     localProfile.value = (await window.desktopAPI.authStatus())?.user || localProfile.value
     cloudState.value = await cloudApi.me()
-    const usageResult = await cloudApi.usage().catch(() => ({ usage: [] }))
-    cloudUsage.value = Array.isArray(usageResult?.usage) ? usageResult.usage : []
+    try {
+      const usageResult = await cloudApi.usage()
+      cloudUsage.value = Array.isArray(usageResult?.usage) ? usageResult.usage : []
+      usageError.value = ''
+    } catch { usageError.value = '使用记录暂未同步，请重新同步后查看。' }
     username.value = profile.value?.username || localProfile.value?.username || ''
     email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
   } catch (error: any) {
@@ -93,7 +97,7 @@ onMounted(reload)
   <div class="modal-backdrop personal-center-backdrop" @click.self="emit('close')">
     <section class="personal-center-card">
       <header class="personal-center-header">
-        <div><span class="personal-center-kicker">ONLINE ACCOUNT</span><h2>个人中心</h2><p>在线身份、字符余额和使用记录均来自 Supabase 云端账户。</p></div>
+        <div><span class="personal-center-kicker">HELLODOG ACCOUNT</span><h2>个人中心</h2><p>你的 HelloDog 账号、字符余额和翻译使用记录。</p></div>
         <div style="display:flex;gap:8px;align-items:center"><button class="personal-logout" :disabled="busy" @click="logout">退出登录</button><button class="personal-close" @click="emit('close')">×</button></div>
       </header>
 
@@ -122,10 +126,11 @@ onMounted(reload)
           <label>用户名<input v-model="username" placeholder="请输入用户名" maxlength="80" /></label>
           <label>邮箱<input v-model="email" type="email" placeholder="请输入邮箱" maxlength="160" /></label>
           <div class="account-editor-actions"><button class="secondary" @click="editing = false">取消</button><button class="primary" :disabled="busy" @click="saveAccount">{{ busy ? '保存中…' : '保存资料' }}</button></div>
-          <small>用户名写入 Supabase profiles；邮箱由 Supabase Auth 管理。</small>
+          <small>修改邮箱后，请根据验证邮件完成确认。</small>
         </div>
 
         <div class="usage-history">
+          <p v-if="usageError" class="api-message error">{{ usageError }}</p>
           <div class="section-title"><div><strong>最近云端翻译消耗</strong><small>最近 {{ Math.min(cloudUsage.length, 50) }} 条</small></div></div>
           <div v-if="cloudUsage.length" class="usage-list">
             <div v-for="item in cloudUsage" :key="item.request_id" class="usage-row">
@@ -133,7 +138,7 @@ onMounted(reload)
               <strong class="minus">-{{ formatChars(item.source_characters || 0) }}</strong>
             </div>
           </div>
-          <div v-else class="usage-empty">暂时没有云端翻译使用记录。</div>
+          <div v-else-if="!usageError" class="usage-empty">暂时没有云端翻译使用记录。</div>
         </div>
 
         <button class="personal-logout" :disabled="busy" @click="logout">退出当前账号</button>
