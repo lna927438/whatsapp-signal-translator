@@ -1,6 +1,7 @@
+import { providerConfig, type ProviderEnv } from './providerConfig'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
 
-export interface Env {
+export interface Env extends ProviderEnv {
   SUPABASE_URL: string
   SUPABASE_PUBLISHABLE_KEY: string
   SUPABASE_SECRET_KEY: string
@@ -118,17 +119,19 @@ function translationInstructions(sourceLanguage: string, targetLanguage: string,
   ].filter(Boolean).join('\n')
 }
 
-async function openAITranslate(env: Env, body: TranslateBody, text: string): Promise<{ translation: string; latencyMs: number; model: string }> {
+async function providerTranslate(env: Env, body: TranslateBody, text: string): Promise<{ translation: string; latencyMs: number; model: string }> {
   const started = Date.now()
-  const response = await fetch('https://api.openai.com/v1/responses', {
+  const config = providerConfig(env)
+  if (!config.key) throw new ProviderFailure('provider_auth')
+  const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
     signal: AbortSignal.timeout(45_000),
     headers: {
-      Authorization: `Bearer ${String(env.OPENAI_API_KEY || '').trim()}`,
+      Authorization: `Bearer ${config.key}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: env.OPENAI_MODEL || 'gpt-5.6-luna',
+      model: config.model,
       instructions: translationInstructions(String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context),
       input: text,
       reasoning: { effort: 'none' },
@@ -152,7 +155,7 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
     output = output.trim()
   }
   if (!output) throw new ProviderFailure('provider_empty')
-  return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || env.OPENAI_MODEL || 'gpt-5.6-luna') }
+  return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || config.model) }
 }
 
 type Claim = { state: 'claimed' | 'processing' | 'completed' | 'failed'; response?: unknown; error?: string }
@@ -221,7 +224,8 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   const requestId = body.requestId || request.headers.get('x-request-id') || ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
   const claimToken = crypto.randomUUID()
-  const model = env.OPENAI_MODEL || 'gpt-5.6-luna'
+  const config = providerConfig(env)
+  const model = config.model
   const claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
     p_user_id: user.id,
     p_request_id: requestId,
@@ -229,15 +233,15 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
     p_characters: unicodeLength(body.text),
     p_claim_token: claimToken,
     p_metadata: {
-      account_id: body.accountId || null, conversation_id: body.conversationId || null,
+      provider: config.provider, account_id: body.accountId || null, conversation_id: body.conversationId || null,
       source_language: body.sourceLanguage, target_language: body.targetLanguage
     }
   })
   if (claim.state !== 'claimed') return claimResponse(claim)
 
-  let translated: Awaited<ReturnType<typeof openAITranslate>>
+  let translated: Awaited<ReturnType<typeof providerTranslate>>
   try {
-    translated = await openAITranslate(env, body, body.text)
+    translated = await providerTranslate(env, body, body.text)
   } catch (error: any) {
     const failureCode = error instanceof ProviderFailure ? error.code
       : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'
@@ -277,9 +281,9 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-connection-v2', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-deepseek-v1', model: providerConfig(env).model })
   if (request.method === 'GET' && url.pathname === '/health/translation') {
-    return json({ service: 'realtime-translator-api', release: 'hellodog-connection-v2', provider: await checkProviderReadiness(env) })
+    return json({ service: 'realtime-translator-api', release: 'hellodog-deepseek-v1', provider: await checkProviderReadiness(env) })
   }
 
   const user = await requireUser(request, env)
