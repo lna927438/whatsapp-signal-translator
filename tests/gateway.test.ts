@@ -192,3 +192,15 @@ test('characters count Unicode code points after trimming', async () => {
   assert.equal((await response.json()).sourceCharacters,3)
   assert.equal((await wallet(db)).balance,97)
 })
+
+test('a specific provider failure is safely persisted and replayed without exposing raw errors or debiting characters', async () => {
+  provider = async () => reply({ error: { code: 'insufficient_quota', message: 'secret fragment and private project detail' } }, 429)
+  const first = await request('quota-diagnostic')
+  const body = await first.json()
+  assert.equal(first.status, 502)
+  assert.equal(body.error, 'provider_quota')
+  assert.ok(!JSON.stringify(body).includes('secret fragment'))
+  assert.deepEqual(await (await request('quota-diagnostic')).json(), body)
+  assert.equal(providerCalls, 1)
+  assert.deepEqual(await wallet(db), { balance: 100, reserved_characters: 0, lifetime_debited: 0 })
+})

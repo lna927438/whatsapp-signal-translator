@@ -1,3 +1,5 @@
+import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_PUBLISHABLE_KEY: string
@@ -122,7 +124,7 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
     method: 'POST',
     signal: AbortSignal.timeout(45_000),
     headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${String(env.OPENAI_API_KEY || '').trim()}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -136,8 +138,7 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
 
   const payload: any = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const message = payload?.error?.message || `OpenAI request failed (${response.status})`
-    throw new Error(message)
+    throw classifyProviderFailure(response.status, payload)
   }
 
   let output = String(payload?.output_text || '').trim()
@@ -150,7 +151,7 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
     }
     output = output.trim()
   }
-  if (!output) throw new Error('OpenAI returned an empty translation.')
+  if (!output) throw new ProviderFailure('provider_empty')
   return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || env.OPENAI_MODEL || 'gpt-5.6-luna') }
 }
 
@@ -166,7 +167,8 @@ function failure(code: string): Response {
     translation_outcome_unknown: [409, '上次请求结果未能确认，未扣减字符；该请求不会自动再次调用翻译服务。'],
     settlement_pending: [503, '翻译结果正在确认，请使用同一请求编号重试。']
   }
-  const [status, message] = errors[code] || [500, '服务器处理请求失败。']
+  const providerMessage = providerMessages[code as keyof typeof providerMessages]
+  const [status, message] = providerMessage ? [502, providerMessage] : errors[code] || [500, '服务器处理请求失败。']
   return json({ error: code, message }, status)
 }
 
@@ -236,13 +238,16 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   let translated: Awaited<ReturnType<typeof openAITranslate>>
   try {
     translated = await openAITranslate(env, body, body.text)
-  } catch {
+  } catch (error: any) {
+    const failureCode = error instanceof ProviderFailure ? error.code
+      : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'
+    console.warn(JSON.stringify({ event: 'translation_provider_failure', code: failureCode, status: error instanceof ProviderFailure ? error.upstreamStatus : undefined }))
     // A provider timeout is ambiguous. Store a terminal outcome for this ID,
     // release its reservation, and never automatically call the provider again.
     try {
       const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation', {
         p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
-        p_error_code: 'translation_failed'
+        p_error_code: failureCode
       })
       return claimResponse(failed)
     } catch {
@@ -272,7 +277,10 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'translation-coordination-v1', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-connection-v2', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
+  if (request.method === 'GET' && url.pathname === '/health/translation') {
+    return json({ service: 'realtime-translator-api', release: 'hellodog-connection-v2', provider: await checkProviderReadiness(env) })
+  }
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)
