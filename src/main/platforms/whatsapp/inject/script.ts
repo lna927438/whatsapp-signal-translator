@@ -57,7 +57,7 @@ export const whatsappInjectionScript = String.raw`
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const normalizeMessage = (text) => String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const normalizeMessage = (text) => String(text || '').replace(/\u00a0/g, ' ').replace(/[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
   const composerText = (composer) => String(composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
 
   const reportStatus = (state, message) => {
@@ -66,31 +66,47 @@ export const whatsappInjectionScript = String.raw`
 
   const showSendStatus = (message, type = 'working', autoHide = true, action, secondary) => {
     reportStatus(type, message);
-    let box = document.getElementById('rt-send-status');
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'rt-send-status';
-      box.setAttribute('data-rt-ui', 'send-status');
-      Object.assign(box.style, {
-        position: 'fixed', top: '76px', right: '18px', zIndex: '2147483647', maxWidth: '420px',
-        padding: '14px 16px', borderRadius: '14px', fontSize: '13px', lineHeight: '1.6', color: '#f8fafc', border: '1px solid rgba(255,255,255,.16)',
-        boxShadow: '0 8px 28px rgba(0,0,0,.28)', pointerEvents: 'none', transition: 'opacity .18s ease', opacity: '1'
-      });
-      document.body.appendChild(box);
-    }
     clearTimeout(statusTimer);
-    box.textContent = message;
-    box.style.pointerEvents = action ? 'auto' : 'none';
+    document.getElementById('rt-send-status')?.remove();
+    // Normal progress belongs to the workspace status bar, never a chat overlay.
+    if (type !== 'error' && !action && !secondary) return;
+    const box = document.createElement('details');
+    box.id = 'rt-send-status';
+    box.setAttribute('data-rt-ui', 'send-status');
+    Object.assign(box.style, {
+      position: 'fixed', bottom: '92px', right: '18px', zIndex: '2147483647', maxWidth: 'min(360px, calc(100vw - 36px))',
+      padding: '8px 12px', borderRadius: '10px', fontSize: '12px', lineHeight: '1.6', color: '#e9eef2',
+      background: '#222b32', border: '1px solid #46515a', boxShadow: '0 4px 16px rgba(0,0,0,.18)'
+    });
+    const summary = document.createElement('summary');
+    summary.textContent = /未确认/.test(message) ? '发送待核对 · 查看' : type === 'error' ? '翻译需处理 · 查看' : '有保留草稿 · 查看';
+    summary.style.cursor = 'pointer';
+    box.appendChild(summary);
+    const detail = document.createElement('div');
+    detail.setAttribute('data-rt-status-detail', '');
+    detail.textContent = message;
+    Object.assign(detail.style, { marginTop: '8px', maxWidth: '336px', whiteSpace: 'normal', overflowWrap: 'anywhere' });
+    box.appendChild(detail);
     for (const item of [action, secondary].filter(Boolean)) {
       const button = document.createElement('button');
       button.textContent = item.label;
-      Object.assign(button.style, { display: 'block', marginTop: '8px', cursor: 'pointer', padding: '9px 12px', border: '1px solid rgba(255,255,255,.2)', borderRadius: '8px', background: 'rgba(255,255,255,.1)', color: '#fff', width: '100%', textAlign: 'left' });
-      button.onclick = () => { button.disabled = true; Promise.resolve().then(() => item.run()).catch(error => showSendStatus(String(error?.message || error), 'error', false)); };
+      Object.assign(button.style, { display: 'block', marginTop: '8px', cursor: 'pointer', padding: '8px 10px', border: '1px solid #52616b', borderRadius: '7px', background: '#303d46', color: '#fff', width: '100%', textAlign: 'left' });
+      button.onclick = () => {
+        const buttons = Array.from(box.querySelectorAll('button'));
+        buttons.forEach(el => { el.disabled = true; });
+        Promise.resolve().then(() => item.run()).catch(error => {
+          // Keep the recovery actions available when their IPC request fails.
+          detail.textContent = message + ' ' + String(error?.message || error);
+          reportStatus('error', detail.textContent);
+          buttons.forEach(el => { el.disabled = false; });
+        });
+      };
       box.appendChild(button);
     }
-    box.style.background = type === 'error' ? '#493831' : type === 'success' ? '#214d40' : '#263846';
-    box.style.opacity = '1';
-    if (autoHide) statusTimer = setTimeout(() => { if (box) box.style.opacity = '0'; }, type === 'error' ? 6000 : 2200);
+    box.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); box.open = false; summary.focus(); } });
+    document.body.appendChild(box);
+    // Recovery stays available, but never opens or steals keyboard focus itself.
+    if (autoHide && !action && !secondary) statusTimer = setTimeout(() => box.remove(), 6000);
   };
 
   const getComposer = (target) => {
@@ -138,6 +154,7 @@ export const whatsappInjectionScript = String.raw`
     const id = name ? 'wa:' + name.toLowerCase() : '';
     if (id && id !== lastConversationId) {
       lastConversationId = id;
+      document.getElementById('rt-send-status')?.remove();
       window.realtimeTranslator?.reportConversation?.({ id, name });
     }
     return { id, name };
@@ -157,7 +174,7 @@ export const whatsappInjectionScript = String.raw`
     for (const selector of selectors.messageContainer) {
       document.querySelectorAll(selector).forEach((el) => {
         if (seen.has(el)) return;
-        if (!el.querySelector?.('span.selectable-text, [data-pre-plain-text]')) return;
+        if (!el.querySelector?.('.selectable-text, [data-pre-plain-text]')) return;
         const parentMessage = el.parentElement?.closest?.('[data-testid="msg-container"], .message-in, .message-out');
         if (parentMessage && parentMessage !== el) return;
         seen.add(el);
@@ -193,8 +210,8 @@ export const whatsappInjectionScript = String.raw`
   ));
 
   const textNodesFor = (container) => {
-    const preferred = Array.from(container.querySelectorAll?.('[data-pre-plain-text] span.selectable-text') || []);
-    const all = preferred.length ? preferred : Array.from(container.querySelectorAll?.('span.selectable-text') || []);
+    const preferred = Array.from(container.querySelectorAll?.('[data-pre-plain-text] .selectable-text') || []);
+    const all = preferred.length ? preferred : Array.from(container.querySelectorAll?.('.selectable-text') || []);
     return all.filter((node) => !isQuotedNode(node));
   };
 
@@ -414,8 +431,10 @@ export const whatsappInjectionScript = String.raw`
     for (let i = 0; i < 150; i += 1) {
       // After dispatch React may replace the editor/header. Guard the peer and
       // navigation revision, not DOM identity; never accept a different chat.
-      if (navigationRevision !== snapshot.navigationRevision || conversationInfo().id !== snapshot.conversationId
-        || (targetKey() !== snapshot.targetKey && snapshot.targetKey !== 'title:' + snapshot.conversationId)) return { dispatched: true, confirmed: false };
+      const currentTarget = targetKey();
+      const samePeer = snapshot.targetKey.startsWith('peer:') ? currentTarget === snapshot.targetKey
+        : conversationInfo().id === snapshot.conversationId;
+      if (navigationRevision !== snapshot.navigationRevision || !samePeer) return { dispatched: true, confirmed: false };
       const receipt = messageContainers().find(container => {
         const id = messageId(container);
         return isOutgoingContainer(container) && id && !id.startsWith('pre:') && !snapshot.baseline.has(id)

@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 const { whatsappInjectionScript } = createRequire(import.meta.url)('../src/main/platforms/whatsapp/inject/script.ts') as typeof import('../src/main/platforms/whatsapp/inject/script')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function until(check: () => boolean) { for (let n = 0; n < 200; n++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 2)) }; assert.fail('UI did not settle') }
-function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string } = {}) {
+function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string } = {}) {
   const dom = new JSDOM('<div id="sidebar">other chat</div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header><div class="message-in" data-id="false_peer-a@c.us_old"><span class="selectable-text">hello</span></div><footer><div contenteditable="true" role="textbox">原文</div><button aria-label="Send">send</button></footer></div>', { url: 'https://web.whatsapp.com', runScripts: 'outside-only' })
   const win = dom.window as any
   const composer = win.document.querySelector('[contenteditable]')
@@ -43,10 +43,12 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; delayT
   button.addEventListener('click', () => {
     nativeClicks++
     if (options.emptyComposer !== false) composer.textContent = ''
+    if (options.changedPeer) win.document.querySelector('[data-id]').setAttribute('data-id', 'false_peer-b@c.us_other')
+    if (options.renamedHeader) win.document.querySelector('header span').setAttribute('title', '+123456789')
     if (options.receipt !== false) {
       const el = win.document.createElement('div')
       el.className = 'message-out'; el.setAttribute('data-id', 'true_peer-a@c.us_new-' + nativeClicks)
-      el.innerHTML = '<span class="selectable-text">translation</span>'
+      el.innerHTML = options.directionalText ? '<div class="selectable-text">\u200etranslation\u200f</div>' : '<span class="selectable-text">translation</span>'
       let receipt = el
       if (options.wrappedReceipt) {
         receipt = win.document.createElement('div'); receipt.setAttribute('data-id', el.getAttribute('data-id'))
@@ -152,5 +154,62 @@ test('WhatsApp recognizes IDs on an ancestor and accepts same-peer React rerende
     h.enter()
     await until(() => h.statuses.some(item => item.state === 'success'))
     assert.equal(h.submits, 1); assert.equal(h.nativeClicks, 1)
+  } finally { h.dom.window.close() }
+})
+
+
+test('normal send progress and success never create a chat overlay or steal focus', async () => {
+  const h = harness({ delayTranslation: true })
+  try {
+    h.composer.focus(); h.enter(); await tick()
+    assert.equal(h.win.document.getElementById('rt-send-status'), null)
+    assert.equal(h.win.document.activeElement, h.composer)
+    h.release(); await until(() => h.statuses.some(item => item.state === 'success'))
+    assert.equal(h.win.document.getElementById('rt-send-status'), null)
+  } finally { h.dom.window.close() }
+})
+
+test('uncertain sends keep recovery collapsed without resending and can be expanded explicitly', async () => {
+  const h = harness({ receipt: false })
+  try {
+    h.enter(); await until(() => h.win.document.querySelector('#rt-send-status button'))
+    const box = h.win.document.getElementById('rt-send-status')
+    assert.equal(box.tagName, 'DETAILS'); assert.equal(box.open, false)
+    assert.equal(box.querySelectorAll('button').length, 2)
+    box.querySelector('summary').click(); assert.equal(box.open, true)
+    box.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    assert.equal(box.open, false); assert.equal(h.nativeClicks, 1)
+    assert.ok(!h.statuses.some(item => item.state === 'success'))
+  } finally { h.dom.window.close() }
+})
+
+test('stable peer receipts survive contact title formatting and directional display marks', async () => {
+  const h = harness({ renamedHeader: true, directionalText: true, wrappedReceipt: true })
+  try {
+    h.enter(); await until(() => h.statuses.some(item => item.state === 'success'))
+    assert.equal(h.nativeClicks, 1)
+  } finally { h.dom.window.close() }
+})
+
+
+test('a different peer after dispatch cannot confirm an identical outgoing bubble', async () => {
+  const h = harness({ changedPeer: true })
+  try {
+    h.enter(); await until(() => h.statuses.some(item => item.message.includes('未确认')))
+    assert.equal(h.nativeClicks, 1)
+    assert.ok(!h.statuses.some(item => item.state === 'success'))
+  } finally { h.dom.window.close() }
+})
+
+test('failed recovery actions remain available and never dispatch a second message', async () => {
+  const h = harness({ receipt: false })
+  try {
+    h.win.realtimeTranslator.confirmNotSent = async () => { throw new Error('暂时无法读取任务') }
+    h.enter(); await until(() => h.win.document.querySelector('#rt-send-status button'))
+    const box = h.win.document.getElementById('rt-send-status')
+    box.querySelector('summary').click(); box.querySelector('button').click()
+    await until(() => box.textContent.includes('暂时无法读取任务'))
+    assert.equal(box.querySelectorAll('button:disabled').length, 0)
+    assert.equal(box.open, true); assert.equal(h.nativeClicks, 1)
   } finally { h.dom.window.close() }
 })
