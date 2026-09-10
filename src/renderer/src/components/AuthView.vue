@@ -135,13 +135,16 @@ async function resetPassword() {
             <button :class="{ active: loginType === 'username' }" @click="loginType = 'username'">用户名登录</button>
             <button :class="{ active: loginType === 'email' }" @click="loginType = 'email'">邮箱登录</button>
           </div>
-          <p v-if="loginType === 'username'" class="auth-info">用户名登录需要我们的 Cloudflare API 做安全解析，下一阶段启用。当前请使用邮箱登录。</p>
+          <p v-if="loginType === 'username'" class="auth-local-note">用户名登录需要我们的 Cloudflare API 做安全解析，下一阶段启用。当前请使用邮箱登录。</p>
           <label class="auth-field"><span>{{ loginType === 'username' ? '用户名' : '邮箱' }}</span><input v-model="identifier" :placeholder="loginType === 'username' ? '暂未启用' : '请输入邮箱地址'" autocomplete="username" @keydown.enter="login" /></label>
           <label class="auth-field"><span>密码</span><div class="auth-password-wrap"><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="请输入密码" autocomplete="current-password" @keydown.enter="login" /><button type="button" @click="showPassword = !showPassword">{{ showPassword ? '隐藏' : '显示' }}</button></div></label>
           <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" @keydown.enter="login" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <label class="auth-remember"><input v-model="remember" type="checkbox" />记住登录</label>
-          <button class="auth-primary" :disabled="busy || loginType === 'username'" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
-          <div class="auth-links"><button @click="switchMode('register')">免费注册</button><button @click="switchMode('reset')">忘记密码？</button></div>
+          <div class="auth-options">
+            <label><input v-model="remember" type="checkbox" />记住登录</label>
+            <button @click="switchMode('reset')">忘记密码？</button>
+          </div>
+          <button class="auth-submit" :disabled="busy || loginType === 'username'" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
+          <div class="auth-switch">还没有账号？ <button @click="switchMode('register')">免费注册</button></div>
         </template>
 
         <template v-else-if="mode === 'register'">
@@ -150,15 +153,15 @@ async function resetPassword() {
           <label class="auth-field"><span>密码</span><div class="auth-password-wrap"><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="至少 8 个字符" autocomplete="new-password" /><button type="button" @click="showPassword = !showPassword">{{ showPassword ? '隐藏' : '显示' }}</button></div></label>
           <label class="auth-field"><span>确认密码</span><input v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" /></label>
           <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <button class="auth-primary" :disabled="busy" @click="register">{{ busy ? '创建中…' : '创建账号' }}</button>
-          <div class="auth-links"><button @click="switchMode('login')">已有账号？返回登录</button></div>
+          <button class="auth-submit" :disabled="busy" @click="register">{{ busy ? '创建中…' : '创建账号' }}</button>
+          <div class="auth-switch">已有账号？ <button @click="switchMode('login')">返回登录</button></div>
         </template>
 
         <template v-else>
           <label class="auth-field"><span>注册邮箱</span><input v-model="identifier" type="email" placeholder="请输入注册邮箱" autocomplete="email" /></label>
           <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入验证码" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
-          <button class="auth-primary" :disabled="busy" @click="resetPassword">{{ busy ? '发送中…' : '发送重置邮件' }}</button>
-          <div class="auth-links"><button @click="switchMode('login')">返回登录</button></div>
+          <button class="auth-submit" :disabled="busy" @click="resetPassword">{{ busy ? '发送中…' : '发送重置邮件' }}</button>
+          <div class="auth-switch"><button @click="switchMode('login')">返回登录</button></div>
         </template>
 
         <p v-if="error" class="auth-error">{{ error }}</p>
