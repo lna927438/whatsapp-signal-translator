@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { requireSupabase, supabaseConfigured } from '../lib/supabase'
+import { apiBase, requireSupabase, supabaseConfigured } from '../lib/supabase'
 
 const router = useRouter()
 const loading = ref(true)
 const error = ref('')
-const retrying = ref(false)
-const retryCount = ref(0)
 const user = ref<any>(null)
 const profile = ref<any>(null)
 const wallet = ref<any>(null)
@@ -22,78 +20,64 @@ const remainingPct = computed(() => Math.max(0, Math.min(100, Math.round(balance
 
 function fmt(value: number) { return formatter.format(Math.max(0, Math.floor(value || 0))) }
 function date(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
-function sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)) }
-function isJwtFutureError(value: unknown) {
-  const text = String((value as any)?.message || value || '').toLowerCase()
-  return text.includes('jwt issued at future') || text.includes('pgrst303')
-}
 
-async function readCloudData(uid: string) {
-  const client = requireSupabase()
-  const [profileResult, walletResult, usageResult] = await Promise.all([
-    client.from('profiles').select('*').eq('id', uid).single(),
-    client.from('wallets').select('*').eq('user_id', uid).single(),
-    client.from('translation_usage').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20)
-  ])
-  if (profileResult.error) throw profileResult.error
-  if (walletResult.error) throw walletResult.error
-  if (usageResult.error) throw usageResult.error
-  return {
-    profile: profileResult.data,
-    wallet: walletResult.data,
-    usage: usageResult.data || []
+async function apiGet(path: string, accessToken: string) {
+  const response = await fetch(`${apiBase}${path}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json'
+    },
+    cache: 'no-store'
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const message = String(payload?.message || payload?.error || `云端请求失败 (${response.status})`)
+    throw new Error(message)
   }
+  return payload
 }
 
 async function load() {
   loading.value = true
   error.value = ''
-  retrying.value = false
-  retryCount.value = 0
   try {
     if (!supabaseConfigured) throw new Error('网站尚未配置 Supabase。')
     const client = requireSupabase()
     let { data: sessionData } = await client.auth.getSession()
     if (!sessionData.session) { await router.push('/login'); return }
-    user.value = sessionData.session.user
-    const uid = user.value.id
 
-    const delays = [0, 1500, 3000, 6000]
-    let lastError: any = null
-    for (let attempt = 0; attempt < delays.length; attempt += 1) {
-      if (delays[attempt]) {
-        retrying.value = true
-        retryCount.value = attempt
-        await sleep(delays[attempt])
-      }
-      try {
-        const result = await readCloudData(uid)
-        profile.value = result.profile
-        wallet.value = result.wallet
-        usage.value = result.usage
-        retrying.value = false
-        return
-      } catch (e: any) {
-        lastError = e
-        if (!isJwtFutureError(e)) throw e
-        // Supabase/PostgREST occasionally rejects a freshly issued token because
-        // the service clock is slightly behind Auth. Refresh once, then retry.
-        if (attempt === 1) {
-          const refreshed = await client.auth.refreshSession().catch(() => null)
-          if (refreshed?.data?.session) {
-            sessionData = refreshed.data
-            user.value = refreshed.data.session.user
-          }
-        }
-      }
+    user.value = sessionData.session.user
+    let accessToken = sessionData.session.access_token
+
+    try {
+      const [mePayload, usagePayload] = await Promise.all([
+        apiGet('/api/me', accessToken),
+        apiGet('/api/usage', accessToken)
+      ])
+      profile.value = mePayload.profile
+      wallet.value = mePayload.wallet
+      usage.value = Array.isArray(usagePayload.usage) ? usagePayload.usage : []
+      return
+    } catch (firstError: any) {
+      const text = String(firstError?.message || '').toLowerCase()
+      if (!text.includes('登录状态无效') && !text.includes('unauthorized') && !text.includes('过期')) throw firstError
     }
-    throw lastError || new Error('云端账户暂时无法读取，请稍后重试。')
+
+    const refreshed = await client.auth.refreshSession()
+    if (refreshed.error || !refreshed.data.session) throw refreshed.error || new Error('登录状态已失效，请重新登录。')
+    sessionData = refreshed.data
+    user.value = refreshed.data.session.user
+    accessToken = refreshed.data.session.access_token
+
+    const [mePayload, usagePayload] = await Promise.all([
+      apiGet('/api/me', accessToken),
+      apiGet('/api/usage', accessToken)
+    ])
+    profile.value = mePayload.profile
+    wallet.value = mePayload.wallet
+    usage.value = Array.isArray(usagePayload.usage) ? usagePayload.usage : []
   } catch (e: any) {
-    if (isJwtFutureError(e)) {
-      error.value = 'Supabase 云端时间同步中，刚完成验证的登录令牌暂时被数据库拒绝。请等待 10–30 秒后刷新页面；系统也会自动重试。'
-    } else {
-      error.value = e?.message || String(e)
-    }
+    error.value = e?.message || String(e)
   } finally {
     loading.value = false
   }
@@ -105,11 +89,11 @@ onMounted(load)
 <template>
   <main class="account-page">
     <section class="account-heading">
-      <div><span class="eyebrow">ONLINE ACCOUNT</span><h1>用户中心</h1><p>账号、字符钱包与翻译使用记录都来自 Supabase 云端。</p></div>
+      <div><span class="eyebrow">HELLODOG ACCOUNT</span><h1>用户中心</h1><p>账号、字符钱包与翻译使用记录通过 HelloDog 云端 API 安全读取。</p></div>
       <RouterLink class="ghost-button" to="/download">下载最新版</RouterLink>
     </section>
 
-    <div v-if="loading" class="state-card">{{ retrying ? `云端账户同步中，正在第 ${retryCount + 1} 次重试…` : '正在读取云端账户…' }}</div>
+    <div v-if="loading" class="state-card">正在读取 HelloDog 云端账户…</div>
     <div v-else-if="error" class="state-card error">{{ error }}</div>
 
     <template v-else>
@@ -129,7 +113,7 @@ onMounted(load)
         <article class="info-card"><span>套餐</span><b>{{ profile?.plan_code || 'free' }}</b></article>
         <article class="info-card"><span>账号状态</span><b>{{ profile?.status || 'active' }}</b></article>
         <article class="info-card"><span>注册时间</span><b>{{ date(profile?.created_at) }}</b></article>
-        <article class="info-card"><span>云端服务</span><b class="online-dot">● Cloudflare API 已连接</b></article>
+        <article class="info-card"><span>云端服务</span><b class="online-dot">● HelloDog Cloudflare API 已连接</b></article>
       </section>
 
       <section class="usage-panel">
