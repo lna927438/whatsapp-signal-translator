@@ -3,9 +3,9 @@
 Prepared against commit `586977072d7a2c84c50d4a192bd08f3d1b761ef7`.
 This branch prepares the fix. It does not apply production migrations or publish a Worker/installer.
 
-The website Worker currently builds non-production branches automatically. Keep this
-review commit detached from remote branches until that preview build is intended;
-creating a review branch/PR can trigger Cloudflare even without merging to main.
+The website Worker builds non-production branches automatically. A review branch/PR
+can trigger a website preview even without merging to main. Production API updates
+are triggered by main and must follow database migration verification.
 
 ## Behavior
 
@@ -73,9 +73,19 @@ account isolation, suspension before/during inference, reservation exhaustion/ex
 lost responses, atomic usage failures, legacy collisions and client retry identities.
 The local verification run passed all 25 tests and strict TypeScript checking.
 
-PGlite serializes SQL execution. These tests prove gateway overlap behavior and execute
-the transaction logic, but do not replace a multi-connection PostgreSQL 17 staging test
-or a Windows/Cloudflare runtime smoke test before production rollout.
+PGlite serializes SQL execution. The separate `npm run test:postgres --prefix tests`
+suite uses a native PostgreSQL 17 instance and creates/drops a uniquely named temporary
+database. Set `TRANSLATOR_TEST_PG_URL` to a disposable loopback PostgreSQL instance;
+remote hosts are refused. The GitHub regression workflow provisions PostgreSQL 17.6,
+matching the production major/minor version observed during this review.
+
+Native tests force 20 independent database connections to wait on the same row lock,
+then release them together. They verify one claim, one settlement, quota exhaustion,
+completion/failure races, a suspension committed while completion is blocked, legacy
+debit idempotency, ordinary-role permissions, atomic rollback and gateway/model call
+counts. The model remains mocked; native SQL and transaction locks are real.
+These tests do not replace a Windows/Cloudflare runtime smoke test. `/health` exposes
+`release: translation-coordination-v1` to identify the updated gateway after deployment.
 
 ## Controlled rollout (requires separate production approval)
 

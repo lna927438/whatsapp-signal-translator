@@ -272,7 +272,7 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
+  if (url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'translation-coordination-v1', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)

@@ -4,12 +4,15 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test *.test.ts"
+    "test": "node --import tsx --test *.test.ts",
+    "test:postgres": "node --import tsx --test postgres-concurrency.integration.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
+    "@types/node": "22.15.30",
+    "@types/pg": "8.15.5",
+    "pg": "8.16.3",
     "tsx": "4.20.6",
-    "typescript": "5.9.2",
-    "@types/node": "22.15.30"
+    "typescript": "5.9.2"
   }
 }
