@@ -2,6 +2,12 @@ name: Publish Windows Release to R2
 
 on:
   workflow_dispatch:
+  push:
+    branches: ['release/windows-v*']
+
+concurrency:
+  group: windows-r2-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -9,6 +15,7 @@ permissions:
 jobs:
   publish:
     runs-on: windows-latest
+    timeout-minutes: 25
     env:
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
@@ -47,6 +54,8 @@ jobs:
           $bucket = $env:R2_BUCKET.Trim()
           $env:AWS_ACCESS_KEY_ID = $env:R2_ACCESS_KEY_ID.Trim()
           $env:AWS_SECRET_ACCESS_KEY = $env:R2_SECRET_ACCESS_KEY.Trim()
+          Write-Output "::add-mask::$($env:AWS_ACCESS_KEY_ID)"
+          Write-Output "::add-mask::$($env:AWS_SECRET_ACCESS_KEY)"
 
           if ($endpointUri.Scheme -ne 'https') { throw 'R2_ENDPOINT must use https.' }
           if ($endpointUri.Host -notmatch '\.r2\.cloudflarestorage\.com$') { throw 'R2_ENDPOINT host is not a Cloudflare R2 S3 endpoint.' }
@@ -66,6 +75,30 @@ jobs:
           "R2_BUCKET_NORMALIZED=$bucket" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Check release version before building
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = [string](Get-Content package.json | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Expected a stable three-part release version.' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_NAME -ne "release/windows-v$version") {
+            throw 'Release branch must match the package version.'
+          }
+          $objects = aws s3api list-objects-v2 --bucket $env:R2_BUCKET_NORMALIZED --prefix 'metadata/version.json' --endpoint-url $env:R2_ENDPOINT_NORMALIZED --region auto --output json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the current release.' }
+          if ($objects.Contents | Where-Object { $_.Key -eq 'metadata/version.json' }) {
+            $currentPath = Join-Path $env:RUNNER_TEMP 'previous-version.json'
+            aws s3api get-object --bucket $env:R2_BUCKET_NORMALIZED --key 'metadata/version.json' --endpoint-url $env:R2_ENDPOINT_NORMALIZED --region auto $currentPath | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not read the current release metadata.' }
+            $current = Get-Content $currentPath -Raw | ConvertFrom-Json
+            if ([string]$current.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Current release metadata has an invalid version.' }
+            if ([Version]$current.version -gt [Version]$version) { throw 'Refusing to downgrade the published release.' }
+            if ([Version]$current.version -eq [Version]$version -and $current.sourceCommit -ne $env:GITHUB_SHA) {
+              throw 'This version was already published from a different or unknown commit. Bump the package version.'
+            }
+            Write-Host "Current public release: $($current.version); publishing: $version"
+          }
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -107,7 +140,17 @@ jobs:
           $versionKey = "windows/v$version/WhatsApp-Signal-Translator-Setup-v$version.exe"
           $latestKey = 'windows/latest/WhatsApp-Signal-Translator-Setup.exe'
 
-          Invoke-AwsUpload $installer.FullName "s3://$bucket/$versionKey" 'application/vnd.microsoft.portable-executable' 'public,max-age=31536000,immutable'
+          $objects = aws s3api list-objects-v2 --bucket $bucket --prefix $versionKey --endpoint-url $endpoint --region auto --output json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the immutable installer key.' }
+          if ($objects.Contents | Where-Object { $_.Key -eq $versionKey }) {
+            $existingPath = Join-Path $env:RUNNER_TEMP 'existing-version-installer.exe'
+            aws s3api get-object --bucket $bucket --key $versionKey --endpoint-url $endpoint --region auto $existingPath | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not verify the existing versioned installer.' }
+            $existingHash = (Get-FileHash -Algorithm SHA256 $existingPath).Hash.ToLowerInvariant()
+            if ($existingHash -ne $sha256) { throw 'Refusing to overwrite an immutable installer with different bytes.' }
+          } else {
+            Invoke-AwsUpload $installer.FullName "s3://$bucket/$versionKey" 'application/vnd.microsoft.portable-executable' 'public,max-age=31536000,immutable'
+          }
           Invoke-AwsUpload $installer.FullName "s3://$bucket/$latestKey" 'application/vnd.microsoft.portable-executable' 'no-cache'
 
           $metadata = [ordered]@{
@@ -117,11 +160,9 @@ jobs:
             latestKey = $latestKey
             sha256 = $sha256
             size = $size
+            sourceCommit = $env:GITHUB_SHA
             releasedAt = (Get-Date).ToUniversalTime().ToString('o')
           } | ConvertTo-Json -Depth 4
-
-          $metadata | Set-Content -Path version.json -Encoding utf8
-          Invoke-AwsUpload 'version.json' "s3://$bucket/metadata/version.json" 'application/json; charset=utf-8' 'no-cache'
 
           Get-ChildItem -Path release -Recurse -File |
             Where-Object { $_.Extension -in '.yml', '.blockmap' } |
@@ -131,9 +172,17 @@ jobs:
               Invoke-AwsUpload $_.FullName "s3://$bucket/$key" $contentType 'no-cache'
             }
 
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'version.json'), $metadata, [System.Text.UTF8Encoding]::new($false))
+          Invoke-AwsUpload 'version.json' "s3://$bucket/metadata/version.json" 'application/json; charset=utf-8' 'no-cache'
+
           Write-Host "Published v$version to R2 bucket $bucket"
           Write-Host "Installer: $versionKey"
           Write-Host "Latest:    $latestKey"
+          Write-Host "SHA256:    $sha256"
+          Write-Host "Size:      $size"
+
+      - name: Verify public website and installer checksums
+        run: python scripts/verify-windows-release.py version.json
 
       - name: Upload CI artifact as fallback
         if: always()
