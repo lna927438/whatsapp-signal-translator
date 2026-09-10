@@ -6,6 +6,8 @@ import { requireSupabase, supabaseConfigured } from '../lib/supabase'
 const router = useRouter()
 const loading = ref(true)
 const error = ref('')
+const retrying = ref(false)
+const retryCount = ref(0)
 const user = ref<any>(null)
 const profile = ref<any>(null)
 const wallet = ref<any>(null)
@@ -20,30 +22,78 @@ const remainingPct = computed(() => Math.max(0, Math.min(100, Math.round(balance
 
 function fmt(value: number) { return formatter.format(Math.max(0, Math.floor(value || 0))) }
 function date(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
+function sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)) }
+function isJwtFutureError(value: unknown) {
+  const text = String((value as any)?.message || value || '').toLowerCase()
+  return text.includes('jwt issued at future') || text.includes('pgrst303')
+}
+
+async function readCloudData(uid: string) {
+  const client = requireSupabase()
+  const [profileResult, walletResult, usageResult] = await Promise.all([
+    client.from('profiles').select('*').eq('id', uid).single(),
+    client.from('wallets').select('*').eq('user_id', uid).single(),
+    client.from('translation_usage').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20)
+  ])
+  if (profileResult.error) throw profileResult.error
+  if (walletResult.error) throw walletResult.error
+  if (usageResult.error) throw usageResult.error
+  return {
+    profile: profileResult.data,
+    wallet: walletResult.data,
+    usage: usageResult.data || []
+  }
+}
 
 async function load() {
   loading.value = true
   error.value = ''
+  retrying.value = false
+  retryCount.value = 0
   try {
     if (!supabaseConfigured) throw new Error('网站尚未配置 Supabase。')
     const client = requireSupabase()
-    const { data: sessionData } = await client.auth.getSession()
+    let { data: sessionData } = await client.auth.getSession()
     if (!sessionData.session) { await router.push('/login'); return }
     user.value = sessionData.session.user
     const uid = user.value.id
-    const [profileResult, walletResult, usageResult] = await Promise.all([
-      client.from('profiles').select('*').eq('id', uid).single(),
-      client.from('wallets').select('*').eq('user_id', uid).single(),
-      client.from('translation_usage').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20)
-    ])
-    if (profileResult.error) throw profileResult.error
-    if (walletResult.error) throw walletResult.error
-    if (usageResult.error) throw usageResult.error
-    profile.value = profileResult.data
-    wallet.value = walletResult.data
-    usage.value = usageResult.data || []
+
+    const delays = [0, 1500, 3000, 6000]
+    let lastError: any = null
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      if (delays[attempt]) {
+        retrying.value = true
+        retryCount.value = attempt
+        await sleep(delays[attempt])
+      }
+      try {
+        const result = await readCloudData(uid)
+        profile.value = result.profile
+        wallet.value = result.wallet
+        usage.value = result.usage
+        retrying.value = false
+        return
+      } catch (e: any) {
+        lastError = e
+        if (!isJwtFutureError(e)) throw e
+        // Supabase/PostgREST occasionally rejects a freshly issued token because
+        // the service clock is slightly behind Auth. Refresh once, then retry.
+        if (attempt === 1) {
+          const refreshed = await client.auth.refreshSession().catch(() => null)
+          if (refreshed?.data?.session) {
+            sessionData = refreshed.data
+            user.value = refreshed.data.session.user
+          }
+        }
+      }
+    }
+    throw lastError || new Error('云端账户暂时无法读取，请稍后重试。')
   } catch (e: any) {
-    error.value = e?.message || String(e)
+    if (isJwtFutureError(e)) {
+      error.value = 'Supabase 云端时间同步中，刚完成验证的登录令牌暂时被数据库拒绝。请等待 10–30 秒后刷新页面；系统也会自动重试。'
+    } else {
+      error.value = e?.message || String(e)
+    }
   } finally {
     loading.value = false
   }
@@ -59,7 +109,7 @@ onMounted(load)
       <RouterLink class="ghost-button" to="/download">下载最新版</RouterLink>
     </section>
 
-    <div v-if="loading" class="state-card">正在读取云端账户…</div>
+    <div v-if="loading" class="state-card">{{ retrying ? `云端账户同步中，正在第 ${retryCount + 1} 次重试…` : '正在读取云端账户…' }}</div>
     <div v-else-if="error" class="state-card error">{{ error }}</div>
 
     <template v-else>
