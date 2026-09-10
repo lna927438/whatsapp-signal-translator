@@ -17,4 +17,10 @@ export function requireSupabase() {
   return supabase
 }
 
-export const downloadBase = String(import.meta.env.VITE_DOWNLOAD_BASE_URL || 'https://pub-7bc571c7ff594db39de0109887d148f1.r2.dev').replace(/\/$/, '')
+export const apiBase = String(
+  import.meta.env.VITE_API_BASE_URL || 'https://realtime-translator-api.lna927438.workers.dev'
+).replace(/\/$/, '')
+
+export const downloadBase = String(
+  import.meta.env.VITE_DOWNLOAD_BASE_URL || 'https://pub-7bc571c7ff594db39de0109887d148f1.r2.dev'
+).replace(/\/$/, '')
