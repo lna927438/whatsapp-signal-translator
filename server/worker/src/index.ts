@@ -1,4 +1,4 @@
-interface Env {
+export interface Env {
   SUPABASE_URL: string
   SUPABASE_PUBLISHABLE_KEY: string
   SUPABASE_SECRET_KEY: string
@@ -56,7 +56,7 @@ async function requireUser(request: Request, env: Env): Promise<User> {
     }
   })
   if (!response.ok) throw new Response(JSON.stringify({ error: 'unauthorized', message: '登录状态无效或已过期。' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
-  return response.json<User>()
+  return response.json() as Promise<User>
 }
 
 async function adminGet<T>(env: Env, path: string): Promise<T> {
@@ -64,7 +64,7 @@ async function adminGet<T>(env: Env, path: string): Promise<T> {
     headers: { apikey: env.SUPABASE_SECRET_KEY, Accept: 'application/json' }
   })
   if (!response.ok) throw new Error(`Supabase GET failed: ${response.status} ${await response.text()}`)
-  return response.json<T>()
+  return response.json() as Promise<T>
 }
 
 async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: string): Promise<T> {
@@ -78,7 +78,11 @@ async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: stri
     },
     body: JSON.stringify(body)
   })
-  if (!response.ok) throw new Error(`Supabase POST failed: ${response.status} ${await response.text()}`)
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({})) as { message?: string }
+    const allowed = ['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request', 'request_not_found']
+    throw new Error(allowed.includes(String(error.message)) ? error.message : 'database_error')
+  }
   const text = await response.text()
   return (text ? JSON.parse(text) : null) as T
 }
@@ -86,7 +90,7 @@ async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: stri
 async function getWallet(env: Env, userId: string) {
   const rows = await adminGet<Array<{ balance: number; lifetime_credited: number; lifetime_debited: number; updated_at: string }>>(
     env,
-    `/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}&select=balance,lifetime_credited,lifetime_debited,updated_at&limit=1`
+    `/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}&select=balance,reserved_characters,lifetime_credited,lifetime_debited,updated_at&limit=1`
   )
   return rows[0] || { balance: 0, lifetime_credited: 0, lifetime_debited: 0, updated_at: null }
 }
@@ -116,6 +120,7 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
   const started = Date.now()
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
+    signal: AbortSignal.timeout(45_000),
     headers: {
       Authorization: `Bearer ${env.OPENAI_API_KEY}`,
       'Content-Type': 'application/json'
@@ -149,90 +154,141 @@ async function openAITranslate(env: Env, body: TranslateBody, text: string): Pro
   return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || env.OPENAI_MODEL || 'gpt-5.6-luna') }
 }
 
-async function recordUsage(env: Env, userId: string, body: TranslateBody, requestId: string, chars: number, model: string, latencyMs: number) {
-  try {
-    await adminPost(env, '/rest/v1/translation_usage', {
-      user_id: userId,
-      request_id: requestId,
-      account_id: safeId(body.accountId) || null,
-      conversation_id: safeId(body.conversationId) || null,
-      provider: 'openai',
-      model,
-      source_language: safeId(body.sourceLanguage) || null,
-      target_language: safeId(body.targetLanguage) || null,
-      source_characters: chars,
-      cache_hit: false,
-      latency_ms: latencyMs
-    }, 'return=minimal')
-  } catch (error) {
-    console.error('usage record failed', error)
+type Claim = { state: 'claimed' | 'processing' | 'completed' | 'failed'; response?: unknown; error?: string }
+
+function failure(code: string): Response {
+  const errors: Record<string, [number, string]> = {
+    account_disabled: [403, '账号已停用，无法使用在线服务。'],
+    insufficient_characters: [402, '可用字符余额不足。'],
+    request_id_conflict: [409, '此请求编号已经用于不同的翻译，请勿重复使用。'],
+    invalid_request: [400, '翻译请求格式无效。'],
+    translation_failed: [502, '本次翻译失败，未扣减字符。'],
+    translation_outcome_unknown: [409, '上次请求结果未能确认，未扣减字符；该请求不会自动再次调用翻译服务。'],
+    settlement_pending: [503, '翻译结果正在确认，请使用同一请求编号重试。']
   }
+  const [status, message] = errors[code] || [500, '服务器处理请求失败。']
+  return json({ error: code, message }, status)
+}
+
+function claimResponse(claim: Claim): Response {
+  if (claim.state === 'completed') return json(claim.response)
+  if (claim.state === 'processing') {
+    const response = json({ error: 'translation_processing', message: '此翻译正在处理中。' }, 202)
+    response.headers.set('Retry-After', '1')
+    return response
+  }
+  return failure(claim.error || 'translation_failed')
+}
+
+function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId'>> & { requestId?: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_request')
+  const b = raw as TranslateBody
+  if (typeof b.text !== 'string' || typeof b.targetLanguage !== 'string') throw new Error('invalid_request')
+  for (const value of [b.sourceLanguage, b.requestId, b.accountId, b.conversationId]) {
+    if (value !== undefined && typeof value !== 'string') throw new Error('invalid_request')
+  }
+  const text = b.text.trim()
+  const targetLanguage = b.targetLanguage.trim()
+  if (!text || unicodeLength(text) > 10000 || !targetLanguage || targetLanguage.length > 160) throw new Error('invalid_request')
+  if (b.context !== undefined && !Array.isArray(b.context)) throw new Error('invalid_request')
+  const context = (b.context || []).slice(-4).map((item) => {
+    if (!item || typeof item.text !== 'string' || !['incoming', 'outgoing'].includes(String(item.role))) throw new Error('invalid_request')
+    return { role: item.role, text: item.text.slice(0, 500) }
+  })
+  return {
+    text, targetLanguage, sourceLanguage: safeId(b.sourceLanguage) || 'auto',
+    accountId: safeId(b.accountId), conversationId: safeId(b.conversationId), context,
+    requestId: b.requestId
+  }
+}
+
+async function requestHash(body: TranslateBody, model: string): Promise<string> {
+  // This canonical input includes everything that can change translation meaning.
+  // Never include the request ID or access token in the content fingerprint.
+  const input = JSON.stringify([
+    'translation-v1', model, body.text, body.sourceLanguage, body.targetLanguage,
+    body.accountId, body.conversationId, body.context
+  ])
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function translate(request: Request, env: Env, user: User): Promise<Response> {
+  const body = normalizeBody(await request.json().catch(() => null))
+  // Old 0.4.3 clients sent different header/body IDs. Keep the body authoritative.
+  const requestId = body.requestId || request.headers.get('x-request-id') || ''
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
+  const claimToken = crypto.randomUUID()
+  const model = env.OPENAI_MODEL || 'gpt-5.6-luna'
+  const claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
+    p_user_id: user.id,
+    p_request_id: requestId,
+    p_payload_hash: await requestHash(body, model),
+    p_characters: unicodeLength(body.text),
+    p_claim_token: claimToken,
+    p_metadata: {
+      account_id: body.accountId || null, conversation_id: body.conversationId || null,
+      source_language: body.sourceLanguage, target_language: body.targetLanguage
+    }
+  })
+  if (claim.state !== 'claimed') return claimResponse(claim)
+
+  let translated: Awaited<ReturnType<typeof openAITranslate>>
+  try {
+    translated = await openAITranslate(env, body, body.text)
+  } catch {
+    // A provider timeout is ambiguous. Store a terminal outcome for this ID,
+    // release its reservation, and never automatically call the provider again.
+    try {
+      const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation', {
+        p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
+        p_error_code: 'translation_failed'
+      })
+      return claimResponse(failed)
+    } catch {
+      return failure('settlement_pending')
+    }
+  }
+
+  // Retrying the database completion is safe: it stores the result, debits the
+  // wallet and writes usage in ONE transaction, guarded by the claim token.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const completed = await adminPost<Claim>(env, '/rest/v1/rpc/complete_translation', {
+        p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
+        p_translation: translated.translation, p_model: translated.model,
+        p_latency_ms: translated.latencyMs
+      })
+      return claimResponse(completed)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'account_disabled') return failure('account_disabled')
+    }
+  }
+  // Leave the reservation/request pending on an uncertain commit. A retry must
+  // look it up; it must never launch a second provider call.
+  return failure('settlement_pending')
 }
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
+  if (url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'translation-coordination-v1', model: env.OPENAI_MODEL || 'gpt-5.6-luna' })
 
   const user = await requireUser(request, env)
+  const profile = await getProfile(env, user.id)
+  if (!profile || profile.status !== 'active') return failure('account_disabled')
 
   if (request.method === 'GET' && url.pathname === '/api/me') {
-    const [profile, wallet] = await Promise.all([getProfile(env, user.id), getWallet(env, user.id)])
-    return json({ user: { id: user.id, email: user.email || null }, profile, wallet })
+    return json({ user: { id: user.id, email: user.email || null }, profile, wallet: await getWallet(env, user.id) })
   }
-
   if (request.method === 'GET' && url.pathname === '/api/wallet') {
     return json({ wallet: await getWallet(env, user.id) })
   }
-
   if (request.method === 'GET' && url.pathname === '/api/usage') {
     const rows = await adminGet<any[]>(env, `/rest/v1/translation_usage?user_id=eq.${encodeURIComponent(user.id)}&select=request_id,source_characters,provider,model,latency_ms,created_at&order=created_at.desc&limit=50`)
     return json({ usage: rows })
   }
-
-  if (request.method === 'POST' && url.pathname === '/api/translate') {
-    const body = await request.json<TranslateBody>().catch(() => ({}))
-    const text = String(body.text || '').trim()
-    if (!text) return json({ error: 'invalid_request', message: '翻译文本不能为空。' }, 400)
-    if (unicodeLength(text) > 10000) return json({ error: 'text_too_long', message: '单次翻译最多 10,000 个字符。' }, 413)
-
-    const requestId = safeId(body.requestId) || crypto.randomUUID()
-    const chars = unicodeLength(text)
-    const wallet = await getWallet(env, user.id)
-    if (Number(wallet.balance || 0) < chars) return json({ error: 'insufficient_characters', message: '字符余额不足。', required: chars, balance: Number(wallet.balance || 0) }, 402)
-
-    const translated = await openAITranslate(env, body, text)
-
-    let balanceAfter: number
-    try {
-      balanceAfter = await adminPost<number>(env, '/rest/v1/rpc/consume_characters', {
-        p_user_id: user.id,
-        p_amount: chars,
-        p_idempotency_key: requestId,
-        p_source: 'cloudflare-translate',
-        p_note: '实时翻译',
-        p_metadata: {
-          model: translated.model,
-          account_id: safeId(body.accountId) || null,
-          conversation_id: safeId(body.conversationId) || null
-        }
-      })
-    } catch (error: any) {
-      if (String(error?.message || '').includes('insufficient_characters')) return json({ error: 'insufficient_characters', message: '字符余额不足。' }, 402)
-      throw error
-    }
-
-    await recordUsage(env, user.id, body, requestId, chars, translated.model, translated.latencyMs)
-    return json({
-      requestId,
-      translation: translated.translation,
-      sourceCharacters: chars,
-      balanceAfter: Number(balanceAfter || 0),
-      latencyMs: translated.latencyMs,
-      model: translated.model
-    })
-  }
-
+  if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user)
   return json({ error: 'not_found', message: 'API route not found.' }, 404)
 }
 
@@ -242,8 +298,11 @@ export default {
       return await route(request, env)
     } catch (error) {
       if (error instanceof Response) return error
-      console.error(error)
-      return json({ error: 'internal_error', message: '服务器处理请求失败。' }, 500)
+      const code = error instanceof Error ? error.message : 'internal_error'
+      if (['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request'].includes(code)) return failure(code)
+      // Do not log provider responses, bearer tokens, source text or secret values.
+      console.error('translation_gateway_error')
+      return failure('internal_error')
     }
   }
 }

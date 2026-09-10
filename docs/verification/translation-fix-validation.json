@@ -1,0 +1,21 @@
+{
+  "validated_commit": "9551cee37badba6dd8a393bc17066c73ca2c3220",
+  "postgres_version": "17.6 (Debian 17.6-2.pgdg13+1)",
+  "regression_tests": {
+    "passed": 25,
+    "failed": 0
+  },
+  "native_postgres_tests": {
+    "passed": 9,
+    "failed": 0,
+    "max_simultaneous_connections": 20
+  },
+  "strict_typecheck": "passed",
+  "windows_typecheck_and_build": "passed",
+  "windows_installer": "not packaged in pull_request run; packaged by existing main push workflow",
+  "model_service": "strictly mocked; no paid model call",
+  "workflow_run": "https://github.com/lna927438/whatsapp-signal-translator/actions/runs/34493119569",
+  "windows_build_run": "https://github.com/lna927438/whatsapp-signal-translator/actions/runs/34493119422",
+  "production_migrations": "applied; effective grants and request RPC access verified",
+  "production_deployment": "pending"
+}

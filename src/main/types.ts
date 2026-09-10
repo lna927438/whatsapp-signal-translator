@@ -60,6 +60,8 @@ export interface TranslationContextItem {
 }
 
 export interface TranslationRequest {
+  /** Keep this ID when retrying one logical translation. */
+  requestId?: string
   text: string
   targetLanguage: string
   sourceLanguage?: string
