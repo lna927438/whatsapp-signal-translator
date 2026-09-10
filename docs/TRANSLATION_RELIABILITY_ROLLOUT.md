@@ -94,8 +94,8 @@ These tests do not replace a Windows/Cloudflare runtime smoke test. `/health` ex
    do NOT blindly run the full migration directory with `db push`.
 2. Rehearse only the two new migrations on an isolated PostgreSQL 17/Supabase staging
    database, including concurrent transactions and a real PostgREST service-role call.
-3. Apply `20260910144003_harden_translation_permissions.sql`, then
-   `20260910144139_coordinate_translation_requests.sql`, each atomically. Check grants,
+3. Apply `20260910150800_harden_translation_permissions.sql`, then
+   `20260910150850_coordinate_translation_requests.sql`, each atomically. Check grants,
    RLS, RPC exposure and advisors. No application account or balance is removed.
 4. Deploy the API Worker at the reviewed commit. Both API domains target this Worker;
    an old Worker does not have the new replay protection, so avoid leaving mixed
@@ -112,3 +112,17 @@ privileges, or clear reservations while workers are active. Prefer a forward fix
 the API must be rolled back, stop new translations, allow/resolve in-flight claims and
 check reservations first. Rolling back to the old Worker restores its known duplicate
 model-call behavior even though legacy balance writes still respect reservations.
+
+## Execution record
+
+On 2026-09-10 the two new migrations were applied and their effective grants verified.
+Their filenames now match the versions recorded by the Supabase migration API; the
+SQL contents are unchanged from the PostgreSQL 17.6 validation run. The three historical
+baseline files still require baseline-history reconciliation before using `db push`.
+
+The native CI run passed 9 integration cases alongside 25 regression tests. Windows
+typechecking and build also passed. See `verification/translation-fix-validation.json`.
+The production verification workflow runs after a successful main CI build and checks
+the gateway release marker, unauthenticated rejection and CORS on both API hostnames.
+It supplies no credentials and performs no paid translation. Authenticated gateway
+flows still need an application test account for a full live end-to-end smoke test.
