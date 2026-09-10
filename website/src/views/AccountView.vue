@@ -27,7 +27,8 @@ async function apiGet(path: string, accessToken: string) {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json'
     },
-    cache: 'no-store'
+    cache: 'no-store',
+    signal: AbortSignal.timeout(15000)
   })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -89,12 +90,12 @@ onMounted(load)
 <template>
   <main class="account-page">
     <section class="account-heading">
-      <div><span class="eyebrow">HELLODOG ACCOUNT</span><h1>用户中心</h1><p>账号、字符钱包与翻译使用记录通过 HelloDog 云端 API 安全读取。</p></div>
+      <div><span class="eyebrow">HELLODOG ACCOUNT</span><h1>用户中心</h1><p>管理你的 HelloDog 账号、字符余额与翻译使用记录。</p></div>
       <RouterLink class="ghost-button" to="/download">下载最新版</RouterLink>
     </section>
 
     <div v-if="loading" class="state-card">正在读取 HelloDog 云端账户…</div>
-    <div v-else-if="error" class="state-card error">{{ error }}</div>
+    <div v-else-if="error" class="state-card error">{{ error }} <button class="ghost-button" @click="load">重新加载</button></div>
 
     <template v-else>
       <section class="wallet-card glass-card">
@@ -113,7 +114,7 @@ onMounted(load)
         <article class="info-card"><span>套餐</span><b>{{ profile?.plan_code || 'free' }}</b></article>
         <article class="info-card"><span>账号状态</span><b>{{ profile?.status || 'active' }}</b></article>
         <article class="info-card"><span>注册时间</span><b>{{ date(profile?.created_at) }}</b></article>
-        <article class="info-card"><span>云端服务</span><b class="online-dot">● HelloDog Cloudflare API 已连接</b></article>
+        <article class="info-card"><span>云端服务</span><b class="online-dot">● 本次数据已同步</b></article>
       </section>
 
       <section class="usage-panel">

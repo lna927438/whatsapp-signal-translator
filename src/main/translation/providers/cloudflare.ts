@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from 'crypto'
 import type { TranslationRequest } from '../../types'
 import type { TranslationProvider } from './provider'
-
-const DEFAULT_API_BASE = 'https://realtime-translator-api.lna927438.workers.dev'
+import { cloudBases } from '../../network/cloudConnection'
 
 export class CloudflareProvider implements TranslationProvider {
-  constructor(private readonly accessToken: string | (() => string), private readonly apiBase = DEFAULT_API_BASE) {}
+  constructor(private readonly accessToken: string | (() => string), private readonly apiBase?: string) {}
 
   async translate(request: TranslationRequest): Promise<string> {
 
@@ -24,6 +23,8 @@ export class CloudflareProvider implements TranslationProvider {
       : randomUUID())
     const encoded = JSON.stringify({ ...body, requestId })
     const deadline = Date.now() + 75_000
+    const bases = this.apiBase ? [this.apiBase.replace(/\/$/, '')] : cloudBases()
+    let routeIndex = 0
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       if (Date.now() >= deadline) throw new Error('云端响应未确认，原任务已保留，请稍后重试同一条消息。')
@@ -32,7 +33,7 @@ export class CloudflareProvider implements TranslationProvider {
       let response: Response
       let payload: any
       try {
-        response = await fetch(`${this.apiBase.replace(/\/$/, '')}/api/translate`, {
+        response = await fetch(`${bases[routeIndex]}/api/translate`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -40,10 +41,11 @@ export class CloudflareProvider implements TranslationProvider {
             'x-request-id': requestId
           },
           body: encoded,
-          signal: AbortSignal.timeout(Math.max(1, Math.min(65_000, deadline - Date.now())))
+          signal: AbortSignal.timeout(Math.max(1, Math.min(attempt === 0 && bases.length > 1 ? 15000 : 30000, deadline - Date.now())))
         })
         payload = await response.json()
       } catch {
+        routeIndex = (routeIndex + 1) % bases.length
         if (attempt === 4) throw new Error('云端响应未确认，请稍后重试同一条消息。')
         await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
         continue

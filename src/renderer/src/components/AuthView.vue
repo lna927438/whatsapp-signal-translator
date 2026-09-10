@@ -252,11 +252,11 @@ function backToLoginWithRecoveredUsername() {
 <template>
   <div class="auth-screen">
     <section class="auth-brand-panel">
-      <div class="auth-brand-wordmark"><span>RT</span><b>Realtime Translator</b></div>
-      <div class="auth-visual-mark">译</div>
+      <div class="auth-brand-wordmark"><img src="/hellodog-icon.webp" alt="" /><b>HelloDog</b></div>
+      <div class="auth-visual-mark"><img src="/hellodog-icon.webp" alt="HelloDog 小狗" /></div>
       <div class="auth-brand-copy">
-        <h1>WhatsApp + Signal<br />实时精准翻译</h1>
-        <p>注册邮箱经过验证码确认后与账号绑定。忘记账号或密码时，可通过绑定邮箱安全恢复。</p>
+        <h1>熟悉的语言。<br />更广阔的世界。</h1>
+        <p>连接 WhatsApp 与 Signal，让翻译融入每一次对话。用 HelloDog，轻松说 Hello。</p>
         <div class="auth-feature-row"><span>邮箱验证</span><span>云端账号</span><span>安全找回</span><span>字符钱包</span></div>
       </div>
     </section>
@@ -264,7 +264,7 @@ function backToLoginWithRecoveredUsername() {
     <section class="auth-form-panel">
       <div class="auth-card">
         <div class="auth-card-head">
-          <span class="auth-kicker">REALTIME TRANSLATOR CLOUD</span>
+          <span class="auth-kicker">SAY HELLO, GO FURTHER.</span>
           <h2>{{ title }}</h2>
           <p v-if="mode === 'login'">使用在线账号进入 WhatsApp / Signal 翻译工作台</p>
           <p v-else-if="mode === 'register'">创建账号并通过邮箱验证码完成绑定</p>

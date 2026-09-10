@@ -33,6 +33,7 @@ let offDiagnostic: undefined | (() => void)
 const runtimeReady = computed(() => runtime.value?.state === 'ready')
 const runtimeBusy = computed(() => ['checking', 'downloading-signal', 'downloading-java', 'installing'].includes(runtime.value?.state))
 const translatedStyle = computed(() => ({
+  display: props.accountRecord.translationsVisible === false ? 'none' : undefined,
   fontSize: `${Number(props.accountRecord.fontSize || 13)}px`,
   color: props.accountRecord.translationColor || '#c8d4e4'
 }))

@@ -1,11 +1,17 @@
 import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
+import { existsSync } from 'fs'
+import { legacyUserDataPath } from './storage/userDataPath'
 import { registerIpc } from './ipc'
 import { TranslationEngine } from './translation/translationEngine'
 import { WhatsAppAdapter } from './platforms/whatsapp/whatsAppAdapter'
 import { SignalAdapter } from './platforms/signal/signalAdapter'
 
 let mainWindow: BrowserWindow | null = null
+const userData = legacyUserDataPath(app.getPath('appData'), app.getPath('userData'), existsSync)
+app.setName('HelloDog')
+app.setPath('userData', userData)
+app.setAppLogsPath()
 const translator = new TranslationEngine()
 const whatsapp = new WhatsAppAdapter()
 const signal = new SignalAdapter(translator)
@@ -58,13 +64,14 @@ function installChineseMenu(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    title: 'WhatsApp Signal 实时翻译器',
+    title: 'HelloDog · 跨语言聊天工作台',
     width: 1280,
     height: 820,
     minWidth: 960,
     minHeight: 620,
     show: false,
-    backgroundColor: '#10151d',
+    backgroundColor: '#f5f4ed',
+    icon: join(__dirname, '../../resources/brand/hellodog-icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
