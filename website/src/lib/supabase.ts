@@ -18,9 +18,9 @@ export function requireSupabase() {
 }
 
 export const apiBase = String(
-  import.meta.env.VITE_API_BASE_URL || 'https://realtime-translator-api.lna927438.workers.dev'
+  import.meta.env.VITE_API_BASE_URL || 'https://api.hellodog.net'
 ).replace(/\/$/, '')
 
 export const downloadBase = String(
-  import.meta.env.VITE_DOWNLOAD_BASE_URL || 'https://pub-7bc571c7ff594db39de0109887d148f1.r2.dev'
+  import.meta.env.VITE_DOWNLOAD_BASE_URL || 'https://download.hellodog.net'
 ).replace(/\/$/, '')
