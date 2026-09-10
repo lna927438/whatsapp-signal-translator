@@ -28,8 +28,8 @@ onUnmounted(() => previousFocus?.focus())
 function parse() {
   try {
     const url = new URL(paste.value.trim())
-    if (!['http:', 'https:', 'socks5:'].includes(url.protocol) || !url.hostname || !url.port) throw new Error()
-    Object.assign(draft.proxy, { enabled: true, protocol: url.protocol.slice(0, -1), host: url.hostname, port: Number(url.port), username: decodeURIComponent(url.username), password: decodeURIComponent(url.password), clearPassword: !url.password, hasPassword: false })
+    if (!['http:', 'https:', 'socks5:'].includes(url.protocol) || !url.hostname) throw new Error()
+    Object.assign(draft.proxy, { enabled: true, protocol: url.protocol.slice(0, -1), host: url.hostname, port: Number(url.port || (url.protocol === 'https:' ? 443 : url.protocol === 'socks5:' ? 1080 : 80)), username: decodeURIComponent(url.username), password: decodeURIComponent(url.password), clearPassword: !url.password, hasPassword: false })
     paste.value = ''; proxyResult.value = ''; message.value = ''
   } catch { message.value = '使用 协议://账号:密码@主机:端口 格式；没有认证时可省略账号和密码。' }
 }

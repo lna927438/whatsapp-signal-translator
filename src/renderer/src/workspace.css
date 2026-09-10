@@ -69,3 +69,13 @@
 @media(prefers-reduced-motion:reduce){.app-shell *,.account-setup *{transition:none!important;animation:none!important}}
 
 .account-setup .setup-body{border:0;min-width:0;margin:0}
+
+.app-shell .personal-center-card,.app-shell .personal-center-header{background:var(--surface);border-color:var(--border);color:var(--text)}
+.app-shell .personal-center-header h2,.app-shell .quota-hero strong,.app-shell .profile-row b,.app-shell .usage-history h3{color:var(--text)}
+.app-shell .personal-center-kicker,.app-shell .personal-center-header p,.app-shell .profile-row span,.app-shell .quota-progress-labels,.app-shell .personal-loading,.app-shell .personal-logout-note{color:var(--muted)}
+.app-shell .quota-hero,.app-shell .profile-grid,.app-shell .profile-row,.app-shell .account-editor,.app-shell .usage-history{background:transparent;border-color:var(--border)}
+.app-shell .quota-hero,.app-shell .quota-ring b,.app-shell .quota-ring small{color:var(--accent)}
+.app-shell .personal-primary{background:var(--accent);color:#10231e}.app-shell .personal-secondary,.app-shell .personal-close{background:var(--raised);color:var(--text);border-color:var(--border)}
+.app-shell .personal-logout{background:#382c29;color:#f2b39b;border-color:#715247}.app-shell .personal-logout:hover{background:#49362e}
+.app-shell .personal-message{background:var(--accent-soft);color:var(--accent)}.app-shell .account-editor input{background:var(--field);color:var(--text);border-color:var(--border)}
+.app-shell .usage-history th,.app-shell .usage-history td{border-color:var(--border);color:var(--muted)}
