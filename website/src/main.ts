@@ -6,6 +6,7 @@ import AuthView from './views/AuthView.vue'
 import AccountView from './views/AccountView.vue'
 import DownloadView from './views/DownloadView.vue'
 import './style.css'
+import './auth-recovery.css'
 
 const router = createRouter({
   history: createWebHistory(),
