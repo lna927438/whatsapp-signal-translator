@@ -1,0 +1,32 @@
+name: Translation regression
+
+on:
+  pull_request:
+    paths:
+      - 'server/worker/**'
+      - 'supabase/migrations/**'
+      - 'src/main/translation/**'
+      - 'src/main/types.ts'
+      - 'tests/**'
+      - '.github/workflows/translation-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
