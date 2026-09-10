@@ -3,16 +3,31 @@
 import json
 import re
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 BASE = "https://download.hellodog.net/"
 SAMPLE_SIZE = 1024 * 1024
 
 
+def open_public(url, headers, timeout):
+    headers = {"User-Agent": "translator-release-verification", **headers}
+    try:
+        return urlopen(Request(url, headers=headers), timeout=timeout)
+    except HTTPError as error:
+        # Do not log cookies or request/account credentials.
+        print(json.dumps({"http_error": error.code, "path": url.removeprefix(BASE),
+                          "server": error.headers.get("Server"),
+                          "cf_mitigated": error.headers.get("CF-Mitigated"),
+                          "cf_ray": error.headers.get("CF-Ray"),
+                          "content_type": error.headers.get("Content-Type")}), flush=True)
+        raise
+
+
 def sample(key, label, offset, total_size, attempt):
     start = time.monotonic()
     headers = {"Range": f"bytes={offset}-{offset + SAMPLE_SIZE - 1}", "Accept-Encoding": "identity"}
-    with urlopen(Request(BASE + key, headers=headers), timeout=30) as response:
+    with open_public(BASE + key, headers, timeout=30) as response:
         first_byte_ms = round((time.monotonic() - start) * 1000, 1)
         if response.status != 206:
             raise ValueError(f"{label}: server did not honor the byte range")
@@ -41,8 +56,7 @@ def sample(key, label, offset, total_size, attempt):
 
 
 def main():
-    request = Request(BASE + "metadata/version.json", headers={"Origin": "https://hellodog.net"})
-    with urlopen(request, timeout=20) as response:
+    with open_public(BASE + "metadata/version.json", {"Origin": "https://hellodog.net"}, timeout=20) as response:
         metadata = json.loads(response.read(65536).decode("utf-8-sig"))
         if response.headers.get("Access-Control-Allow-Origin") not in ("*", "https://hellodog.net"):
             raise ValueError("Metadata does not allow the website origin")
