@@ -16,8 +16,16 @@ before(async () => {
   db = await database()
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input))
-    if (url.origin === 'https://api.openai.com' && url.pathname === '/v1/responses') {
+    if ((url.origin === 'https://api.openai.com' && url.pathname === '/v1/responses') || (url.origin === 'https://api.deepseek.com' && url.pathname === '/responses')) {
       providerCalls += 1
+      if (env.TRANSLATION_PROVIDER === 'deepseek') {
+        assert.equal(url.origin, 'https://api.deepseek.com')
+        assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-deepseek')
+        const body = JSON.parse(String(init?.body))
+        assert.equal(body.model, 'deepseek-flash')
+        assert.equal(body.reasoning.effort, 'none')
+        assert.equal(body.store, false)
+      }
       return provider()
     }
     // Deliberately prohibit all real network access in these tests.
@@ -50,6 +58,8 @@ before(async () => {
 beforeEach(async () => {
   await reset(db)
   providerCalls = 0
+  delete env.TRANSLATION_PROVIDER
+  delete env.DEEPSEEK_API_KEY
   loseCompletionResponse = false
   provider = async () => reply({ output_text: '译文', model: 'test-model' })
 })
@@ -202,5 +212,31 @@ test('a specific provider failure is safely persisted and replayed without expos
   assert.ok(!JSON.stringify(body).includes('secret fragment'))
   assert.deepEqual(await (await request('quota-diagnostic')).json(), body)
   assert.equal(providerCalls, 1)
+  assert.deepEqual(await wallet(db), { balance: 100, reserved_characters: 0, lifetime_debited: 0 })
+})
+
+
+test('DeepSeek translation uses isolated key, non-thinking Responses, and correct usage provider with one debit on replay', async () => {
+  env.TRANSLATION_PROVIDER = 'deepseek'; env.DEEPSEEK_API_KEY = 'test-deepseek'
+  provider = async () => reply({ output: [{ type: 'message', content: [{ type: 'output_text', text: '你好' }] }], model: 'deepseek-flash' })
+  const first = await request()
+  assert.equal(first.status, 200)
+  assert.equal((await first.json()).translation, '你好')
+  assert.equal((await request()).status, 200)
+  assert.equal(providerCalls, 1)
+  assert.deepEqual(await counts(), { debits: 1, usages: 1 })
+  const usage = await db.query('select provider, model from public.translation_usage')
+  assert.deepEqual(usage.rows, [{ provider: 'deepseek', model: 'deepseek-flash' }])
+})
+
+test('DeepSeek insufficient balance is terminal and releases characters without repeated upstream calls', async () => {
+  env.TRANSLATION_PROVIDER = 'deepseek'; env.DEEPSEEK_API_KEY = 'test-deepseek'
+  provider = async () => reply({ error: { message: 'secret should never escape' } }, 402)
+  const first = await request()
+  assert.equal(first.status, 502)
+  assert.equal((await first.json()).error, 'provider_quota')
+  assert.equal((await request()).status, 502)
+  assert.equal(providerCalls, 1)
+  assert.deepEqual(await counts(), { debits: 0, usages: 0 })
   assert.deepEqual(await wallet(db), { balance: 100, reserved_characters: 0, lifetime_debited: 0 })
 })

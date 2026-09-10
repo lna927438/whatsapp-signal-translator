@@ -48,3 +48,20 @@ test('public readiness detects missing or invalid credentials but returns no cre
   globalThis.fetch = async () => { assert.fail('missing key must not call upstream') }
   assert.equal((await checkProviderReadiness({ ...env(), OPENAI_API_KEY: '' })).code, 'provider_auth')
 })
+
+
+test('DeepSeek readiness lists models with its own credential and never uses the OpenAI key', async () => {
+  const settings = { ...env(), TRANSLATION_PROVIDER: 'deepseek', DEEPSEEK_API_KEY: 'test-deepseek' }
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), 'https://api.deepseek.com/models')
+    assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-deepseek')
+    assert.equal(init?.body, undefined)
+    return new Response(JSON.stringify({ data: [{ id: 'deepseek-flash' }] }))
+  }
+  const result = await checkProviderReadiness(settings)
+  assert.equal(result.status, 'available'); assert.equal(result.provider, 'deepseek')
+  assert.equal(result.model, 'deepseek-flash'); assert.equal(result.inferenceTested, false)
+  assert.ok(!JSON.stringify(result).includes('test-deepseek'))
+  globalThis.fetch = async () => { assert.fail('must not fall back to the old OpenAI credential') }
+  assert.equal((await checkProviderReadiness({ ...settings, DEEPSEEK_API_KEY: '' })).code, 'provider_auth')
+})
