@@ -21,3 +21,14 @@ export function requireSupabase(): SupabaseClient {
   }
   return supabase
 }
+
+export function createTransientSupabase(): SupabaseClient {
+  if (!supabaseConfigured) throw new Error('在线登录尚未配置。')
+  return createClient(supabaseUrl, supabasePublishableKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    }
+  })
+}
