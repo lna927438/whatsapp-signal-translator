@@ -44,8 +44,8 @@ onMounted(loadMetadata)
         <h1>下载 Realtime Translator</h1>
         <p>Windows 桌面版，支持 WhatsApp 与 Signal。安装包通过 Cloudflare R2 分发。</p>
         <div class="hero-actions">
-          <a class="primary-button" :href="latestUrl">下载最新版</a>
-          <a class="ghost-button" :href="versionUrl">下载 {{ version }}</a>
+          <a class="primary-button" :href="versionUrl">下载最新版</a>
+          <a class="ghost-button" :href="latestUrl">备用下载</a>
         </div>
         <p v-if="error" class="form-message error">{{ error }}</p>
       </div>
