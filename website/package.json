@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
@@ -17,6 +18,7 @@
     "@vitejs/plugin-vue": "latest",
     "typescript": "5.9.2",
     "vite": "latest",
-    "vue-tsc": "3.3.11"
+    "vue-tsc": "3.3.11",
+    "wrangler": "latest"
   }
 }
