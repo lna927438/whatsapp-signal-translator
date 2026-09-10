@@ -8,8 +8,13 @@ contextBridge.exposeInMainWorld('realtimeTranslator', {
   translateIncoming: (payload: any) => ipcRenderer.invoke('translator:translate-incoming', accountId, payload),
   translateOutgoing: (payload: any) => ipcRenderer.invoke('translator:translate-outgoing', accountId, payload),
   reportConversation: (info: any) => ipcRenderer.send('whatsapp:conversation', accountId, info),
-  sendNativeEnter: () => ipcRenderer.invoke('whatsapp:send-native-enter', accountId),
-  commitTranslatedSend: (text: string) => ipcRenderer.invoke('whatsapp:commit-translated-send', accountId, text),
+  prepareSend: (payload: any) => ipcRenderer.invoke('send:prepare', { ...payload, platform: 'whatsapp', accountId }),
+  translateSend: (id: string) => ipcRenderer.invoke('send:translate', id),
+  submitSend: (id: string) => ipcRenderer.invoke('send:submit', id),
+  pendingSend: (conversationId: string, targetKey: string) => ipcRenderer.invoke('send:pending', accountId, conversationId, targetKey),
+  confirmNotSent: (id: string) => ipcRenderer.invoke('send:confirm-not-sent', id),
+  cancelSend: (id: string) => ipcRenderer.invoke('send:cancel', id),
+  confirmSent: (id: string) => ipcRenderer.invoke('send:confirm-sent', id),
   reportStatus: (status: any) => ipcRenderer.send('translator:status', accountId, status),
   notifyError: (message: string) => ipcRenderer.send('translator:error', message)
 })

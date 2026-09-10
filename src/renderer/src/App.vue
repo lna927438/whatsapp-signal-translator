@@ -4,6 +4,9 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SignalView from './components/SignalView.vue'
 import { cloudApi } from './lib/cloudApi'
+import { RemoteSnapshot } from './lib/remoteSnapshot'
+
+const props = defineProps<{ userId: string }>()
 
 type ContactPreference = { language: string; name?: string; updatedAt: number; source?: 'manual'|'auto' }
 type Account = {
@@ -32,6 +35,9 @@ const showProfile = ref(false)
 const error = ref('')
 const settings = ref<any>(null)
 const profile = ref<any>(null)
+const profileSynced = ref(false)
+const profileSync = new RemoteSnapshot<any>((value, synced) => { profile.value = value; profileSynced.value = synced })
+const subscriptions: Array<() => void> = []
 const languages = ref<any[]>([])
 const liveStatuses = ref<Record<string, LiveStatus>>({})
 const conversations = ref<Record<string, ConversationInfo>>({})
@@ -75,7 +81,7 @@ const serverName = computed(() => {
 const serverStatusLabel = computed(() => settings.value?.provider === 'openai' ? '云端已配置' : (apiConfigured.value ? '密钥已配置' : '未配置'))
 const selectedLiveStatus = computed<LiveStatus>(() => {
   if (!apiConfigured.value) return { state: 'error', message: '翻译服务未配置' }
-  if (Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: '字符额度已用完' }
+  if (profileSynced.value && Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: '字符额度已用完' }
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
   return { state: 'ready', message: selected.value?.platform === 'signal' ? 'Signal 翻译就绪' : '翻译器就绪' }
 })
@@ -91,7 +97,9 @@ const contactLabel = computed(() => {
   const source = contactPreference.value?.source === 'manual' ? '手动' : contactPreference.value?.source === 'auto' ? '自动识别' : '账号默认'
   return `${conversation.name || '当前联系人'} · ${source}`
 })
-const remainingCharsLabel = computed(() => new Intl.NumberFormat('zh-CN').format(Math.max(0, Number(profile.value?.remainingCharacters || 0))))
+const remainingCharsLabel = computed(() => profile.value
+  ? `${new Intl.NumberFormat('zh-CN').format(Math.max(0, Number(profile.value.remainingCharacters || 0)))}${profileSynced.value ? '' : '（待同步）'}`
+  : '未同步')
 const quotaLow = computed(() => {
   const total = Number(profile.value?.totalCharacters || 0)
   const remaining = Number(profile.value?.remainingCharacters || 0)
@@ -99,7 +107,8 @@ const quotaLow = computed(() => {
 })
 
 function cloudProfileFromState(state: any) {
-  const wallet = state?.wallet || {}
+  if (!state?.wallet || !Number.isFinite(Number(state.wallet.balance))) throw new Error('余额尚未同步。')
+  const wallet = state.wallet
   const cloudProfile = state?.profile || {}
   const user = state?.user || {}
   const remaining = Number(wallet.balance || 0)
@@ -132,13 +141,7 @@ async function reloadSettings() {
 }
 
 async function reloadProfile() {
-  try {
-    profile.value = cloudProfileFromState(await cloudApi.me())
-  } catch {
-    if (!profile.value) {
-      profile.value = { totalCharacters: 0, usedCharacters: 0, remainingCharacters: 0, planName: 'free', cloud: true }
-    }
-  }
+  return profileSync.refresh(async () => cloudProfileFromState(await cloudApi.me()))
 }
 
 async function reloadMetrics() {
@@ -232,37 +235,37 @@ async function openSettings() {
 
 async function closeSettings() {
   showSettings.value = false
-  await Promise.all([reloadSettings(), reloadProfile()])
   await window.desktopAPI.setOverlayOpen(false)
+  void reloadSettings()
+  void reloadProfile()
 }
 
 async function openProfile() {
   await window.desktopAPI.setOverlayOpen(true)
-  await reloadProfile()
   showProfile.value = true
+  void reloadProfile()
 }
 
 async function closeProfile() {
   showProfile.value = false
-  await reloadProfile()
   await window.desktopAPI.setOverlayOpen(false)
+  void reloadProfile()
 }
 
 function onProfileUpdated(next: any) {
-  if (next?.wallet || next?.profile || next?.user) profile.value = cloudProfileFromState(next)
+  if (next?.wallet) profileSync.accept(cloudProfileFromState(next))
   else void reloadProfile()
 }
 
 onMounted(async () => {
-  await Promise.all([reload(), reloadSettings(), reloadMetrics(), reloadProfile()])
   metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
   walletTimer = setInterval(() => { void reloadProfile() }, 15000)
-  window.desktopAPI.onWhatsAppConversation((info: any) => {
+  subscriptions.push(window.desktopAPI.onWhatsAppConversation((info: any) => {
     if (!info?.accountId || !info?.conversationId) return
     conversations.value = { ...conversations.value, [info.accountId]: { id: info.conversationId, name: info.conversationName } }
-  })
-  window.desktopAPI.onContactLanguage(() => { void reload() })
-  window.desktopAPI.onTranslatorStatus((status: any) => {
+  }))
+  subscriptions.push(window.desktopAPI.onContactLanguage(() => { void reload() }))
+  subscriptions.push(window.desktopAPI.onTranslatorStatus((status: any) => {
     if (!status?.accountId) return
     liveStatuses.value = {
       ...liveStatuses.value,
@@ -272,15 +275,18 @@ onMounted(async () => {
         at: status.at || Date.now()
       }
     }
-    if (status?.state === 'success') void reloadProfile()
-  })
-  window.desktopAPI.onTranslatorError((message: string) => {
+    if (status?.state === 'success' || status?.settled) void reloadProfile()
+  }))
+  subscriptions.push(window.desktopAPI.onTranslatorError((message: string) => {
     error.value = message
     setTimeout(() => error.value = '', 6500)
-  })
+  }))
+  void reloadProfile()
+  await Promise.allSettled([reload(), reloadSettings(), reloadMetrics()])
 })
 
 onUnmounted(() => {
+  subscriptions.forEach(unsubscribe => unsubscribe())
   if (metricsTimer) clearInterval(metricsTimer)
   if (walletTimer) clearInterval(walletTimer)
   if (feedbackTimer) clearTimeout(feedbackTimer)
@@ -364,7 +370,7 @@ onUnmounted(() => {
     </header>
 
     <main class="content" :class="{ 'signal-content': selectedIsSignal }">
-      <SignalView v-if="selectedIsSignal" :account-record="selected!" @linked="reload" />
+      <SignalView v-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" />
       <div v-else-if="!selected" class="empty"><h2>添加或选择一个账号</h2><p>WhatsApp 使用原生 WhatsApp Web 界面，Signal 使用内置聊天界面。</p></div>
     </main>
 

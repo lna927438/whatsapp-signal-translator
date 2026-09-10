@@ -7,9 +7,10 @@ import { detectContactLanguage } from '../../translation/languageDetection'
 import { SettingsStore } from '../../storage/settingsStore'
 import { AccountManager } from '../../accounts/accountManager'
 
-const CHINESE_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/
+import { SendNotStartedError, type SendTask } from '../../translation/sendTasks'
 
 export interface SignalMessage {
+  taskId?: string
   account: string
   peer: string
   fromMe: boolean
@@ -25,6 +26,8 @@ export class SignalAdapter {
   private readonly accounts = new AccountManager()
   private readonly recent = new Map<string, TranslationContextItem[]>()
   private mainWindow?: BrowserWindow
+  private onlineUser = ''
+  private identityRevision = 0
 
   constructor(translator: TranslationEngine) {
     this.translator = translator
@@ -34,7 +37,22 @@ export class SignalAdapter {
   }
 
   attachMainWindow(window: BrowserWindow): void { this.mainWindow = window }
-  async start(): Promise<void> { await this.cli.start() }
+  setOnlineUser(userId: string): void {
+    if (userId === this.onlineUser) return
+    this.onlineUser = userId
+    this.identityRevision += 1
+    this.cli.stop()
+    this.recent.clear()
+  }
+  async start(): Promise<void> {
+    const revision = this.identityRevision
+    if (!this.onlineUser) throw new Error('请先登录在线账号。')
+    await this.cli.start()
+    if (!this.onlineUser || revision !== this.identityRevision) {
+      this.cli.stop()
+      throw new Error('登录状态已变化。')
+    }
+  }
   stop(): void { this.cli.stop() }
 
   async runtimeStatus(): Promise<SignalRuntimeStatus> { return this.cli.runtimeStatus() }
@@ -63,41 +81,25 @@ export class SignalAdapter {
     return Array.isArray(result) ? result : []
   }
 
-  async send(recordId: string, account: string, recipient: string, original: string): Promise<SignalMessage> {
-    await this.start()
-    const conversationId = `signal:${recipient}`
-    const runtime = await this.runtimeForRecord(recordId, conversationId)
-    if (!runtime.sendAutoTranslate && runtime.blockChineseSend && CHINESE_RE.test(original)) {
-      throw new Error('已开启“禁止发送中文”，请先开启发送翻译或改为目标语言。')
-    }
+  contextForTask(recordId: string, peer: string): TranslationContextItem[] { return this.context(recordId, peer) }
 
-    const context = this.context(recordId, recipient)
-    const translated = runtime.sendAutoTranslate
-      ? await this.translator.translate({
-          text: original,
-          sourceLanguage: runtime.localLanguage,
-          targetLanguage: runtime.targetLanguage,
-          accountId: recordId,
-          conversationId,
-          context
-        })
-      : original
+  async submitTask(task: SendTask, authorized: () => boolean): Promise<SignalMessage> {
+    try {
+      await this.start()
+      const record = (await this.accounts.list()).find(item => item.id === task.accountId)
+      if (!authorized() || !record || record.signalAccount !== task.signalAccount || !task.recipient
+        || task.conversationId !== `signal:${task.recipient}`) throw new Error('登录账号或 Signal 发送账号已变化，已阻止发送。')
+    } catch (error: any) { throw new SendNotStartedError(String(error?.message || error)) }
 
-    if (runtime.blockChineseSend && CHINESE_RE.test(translated)) {
-      throw new Error('翻译结果仍包含中文，已阻止发送。请检查联系人语言或 API 设置。')
+    // Dispatch exactly once. RPC timeout/connection loss is an unknown result,
+    // not evidence that the recipient did not receive it.
+    const result = await this.cli.call('send', { account: task.signalAccount, recipients: [task.recipient!], message: task.translated })
+    const msg: SignalMessage = { taskId: task.id, account: task.signalAccount!, peer: task.recipient!, fromMe: true,
+      original: task.request.text, translated: task.translated, timestamp: Number(result?.timestamp || Date.now()) }
+    if (authorized()) {
+      this.remember(task.accountId, task.recipient!, { role: 'outgoing', text: task.translated! })
+      this.mainWindow?.webContents.send('signal:message', msg)
     }
-
-    const result = await this.cli.call('send', { account, recipients: [recipient], message: translated })
-    this.remember(recordId, recipient, { role: 'outgoing', text: translated })
-    const msg: SignalMessage = {
-      account,
-      peer: recipient,
-      fromMe: true,
-      original,
-      translated,
-      timestamp: Number(result?.timestamp || Date.now())
-    }
-    this.mainWindow?.webContents.send('signal:message', msg)
     return msg
   }
 
@@ -142,6 +144,9 @@ export class SignalAdapter {
   }
 
   private async onReceive(params: any): Promise<void> {
+    const revision = this.identityRevision
+    if (!this.onlineUser) return
+    const stillCurrent = () => Boolean(this.onlineUser) && revision === this.identityRevision
     const envelope = params?.envelope || params?.result?.envelope
     if (!envelope) return
     const account = params?.account || params?.result?.account || ''
@@ -150,6 +155,7 @@ export class SignalAdapter {
     if (!text) return
     const source = envelope.sourceNumber || envelope.source || data.destinationNumber || data.destination || ''
     const record = await this.recordForSignalAccount(account)
+    if (!stillCurrent()) return
     const recordId = record?.id || ''
     const conversationId = `signal:${source}`
 
@@ -172,6 +178,7 @@ export class SignalAdapter {
 
     const runtime = await this.runtimeForRecord(recordId, conversationId)
     const context = recordId ? this.context(recordId, source) : []
+    if (!stillCurrent()) return
     const translated = runtime.receiveAutoTranslate
       ? await this.translator.translate({
           text,
@@ -184,6 +191,7 @@ export class SignalAdapter {
         }).catch(() => undefined)
       : undefined
 
+    if (!stillCurrent()) return
     if (recordId) this.remember(recordId, source, { role: envelope.syncMessage?.sentMessage ? 'outgoing' : 'incoming', text })
     const msg: SignalMessage = {
       account,

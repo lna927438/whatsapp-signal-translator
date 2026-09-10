@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { requireSupabase, supabaseConfigured } from '../lib/supabase'
+import { requireSupabase, signOutThisDevice, supabaseConfigured } from '../lib/supabase'
 import { cloudApi } from '../lib/cloudApi'
 
 const emit = defineEmits(['close', 'updated'])
@@ -30,10 +30,11 @@ function formatDate(value: string | number | undefined) {
 }
 
 async function reload() {
+  if (busy.value) return
   busy.value = true
   cloudError.value = ''
   try {
-    localProfile.value = await window.desktopAPI.getProfile()
+    localProfile.value = (await window.desktopAPI.authStatus())?.user || localProfile.value
     cloudState.value = await cloudApi.me()
     const usageResult = await cloudApi.usage().catch(() => ({ usage: [] }))
     cloudUsage.value = Array.isArray(usageResult?.usage) ? usageResult.usage : []
@@ -41,7 +42,6 @@ async function reload() {
     email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
   } catch (error: any) {
     cloudError.value = error?.message || String(error)
-    localProfile.value = await window.desktopAPI.getProfile().catch(() => null)
     username.value = localProfile.value?.username || ''
     email.value = localProfile.value?.email || ''
   } finally {
@@ -68,6 +68,7 @@ async function saveAccount() {
     await window.desktopAPI.updateProfile({ username: username.value, email: email.value })
     editing.value = false
     message.value = '账号信息已保存。'
+    busy.value = false
     await reload()
     emit('updated', cloudState.value)
   } catch (error: any) { message.value = error?.message || String(error) }
@@ -78,9 +79,7 @@ async function logout() {
   if (busy.value) return
   busy.value = true; message.value = ''
   try {
-    if (supabaseConfigured) await requireSupabase().auth.signOut()
-    await window.desktopAPI.authSetOnlineSession(null)
-    globalThis.location.reload()
+    await signOutThisDevice()
   } catch (error: any) {
     message.value = error?.message || String(error)
     busy.value = false
@@ -98,23 +97,23 @@ onMounted(reload)
         <div style="display:flex;gap:8px;align-items:center"><button class="personal-logout" :disabled="busy" @click="logout">退出登录</button><button class="personal-close" @click="emit('close')">×</button></div>
       </header>
 
-      <div v-if="cloudState || localProfile" class="personal-center-body">
-        <div v-if="cloudError" class="api-message error">云端账户读取失败：{{ cloudError }}</div>
+      <div v-if="cloudState || localProfile || cloudError" class="personal-center-body">
+        <div v-if="cloudError" class="api-message error">账户暂未同步：{{ cloudError }} <button :disabled="busy" @click="reload">重新同步</button></div>
 
         <div class="quota-hero">
-          <div><small>云端剩余字符数</small><strong>{{ formatChars(remaining) }}</strong><span>{{ profile?.plan_code || 'free' }}</span></div>
-          <div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ total > 0 ? 100 - usedPercent : 0 }}%</b><small>剩余</small></div>
+          <div><small>{{ cloudError ? '上次同步的剩余字符数' : '云端剩余字符数' }}</small><strong>{{ cloudState ? formatChars(remaining) : '未同步' }}</strong><span>{{ profile?.plan_code || '—' }}</span></div>
+          <div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ cloudState ? (total > 0 ? 100 - usedPercent : 0) + '%' : '—' }}</b><small>剩余</small></div>
         </div>
         <div class="quota-progress"><i :style="{ width: usedPercent + '%' }"></i></div>
-        <div class="quota-progress-labels"><span>累计使用 {{ formatChars(used) }}</span><span>累计入账 {{ formatChars(credited) }}</span></div>
+        <div class="quota-progress-labels"><span>累计使用 {{ cloudState ? formatChars(used) : '未同步' }}</span><span>累计入账 {{ cloudState ? formatChars(credited) : '未同步' }}</span></div>
 
         <div class="profile-grid">
           <div class="profile-row"><span>用户名</span><b>{{ profile?.username || localProfile?.username || '未设置' }}</b></div>
           <div class="profile-row"><span>邮箱</span><b>{{ user?.email || profile?.email || localProfile?.email || '未设置' }}</b></div>
-          <div class="profile-row"><span>套餐类型</span><b>{{ profile?.plan_code || 'free' }}</b></div>
-          <div class="profile-row"><span>账号状态</span><b>{{ profile?.status || 'active' }}</b></div>
+          <div class="profile-row"><span>套餐类型</span><b>{{ profile?.plan_code || '未同步' }}</b></div>
+          <div class="profile-row"><span>账号状态</span><b>{{ profile?.status || '未同步' }}</b></div>
           <div class="profile-row"><span>注册时间</span><b>{{ formatDate(profile?.created_at) }}</b></div>
-          <div class="profile-row"><span>云端服务</span><b>Cloudflare API 已连接</b></div>
+          <div class="profile-row"><span>云端服务</span><b>{{ cloudError ? '等待重新连接' : cloudState ? '已同步' : '同步中' }}</b></div>
         </div>
 
         <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">账号中心</button><button class="personal-secondary" disabled title="支付系统接入后开放">充值即将开放</button></div>

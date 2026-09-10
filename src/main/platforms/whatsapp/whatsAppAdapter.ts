@@ -1,6 +1,7 @@
 import { BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
 import { whatsappInjectionScript } from './inject/script'
+import { SendNotStartedError, type SendTask } from '../../translation/sendTasks'
 
 const SIDEBAR_WIDTH = 268
 const ACCOUNT_TOOLBAR_HEIGHT = 118
@@ -10,13 +11,13 @@ function chromeUserAgent(): string {
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 export class WhatsAppAdapter {
   private readonly views = new Map<string, WebContentsView>()
   private activeId?: string
   private mainWindow?: BrowserWindow
   private overlayOpen = false
+  private focusRevision = 0
 
   attachMainWindow(window: BrowserWindow): void {
     this.mainWindow = window
@@ -26,6 +27,7 @@ export class WhatsAppAdapter {
   async focus(accountId: string): Promise<void> {
     if (!this.mainWindow) throw new Error('Main window is not attached')
     this.hideAll()
+    const revision = this.focusRevision
     let view = this.views.get(accountId)
     if (!view || view.webContents.isDestroyed()) {
       view = this.createView(accountId)
@@ -35,15 +37,16 @@ export class WhatsAppAdapter {
       const userAgent = chromeUserAgent()
       view.webContents.setUserAgent(userAgent)
       view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
-      await view.webContents.session.clearCache()
       await view.webContents.loadURL('https://web.whatsapp.com/', { userAgent })
     }
+    if (revision !== this.focusRevision || view.webContents.isDestroyed()) return
     this.activeId = accountId
     view.setVisible(!this.overlayOpen)
     this.layout()
   }
 
   hideAll(): void {
+    this.focusRevision += 1
     for (const view of this.views.values()) {
       if (!view.webContents.isDestroyed()) view.setVisible(false)
     }
@@ -59,38 +62,56 @@ export class WhatsAppAdapter {
     if (!open) this.layout()
   }
 
-  sendNativeEnter(accountId?: string): boolean {
-    const id = accountId || this.activeId
-    if (!id) return false
-    const view = this.views.get(id)
-    if (!view || view.webContents.isDestroyed()) return false
-    view.webContents.focus()
-    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' })
-    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' })
-    return true
+  ownsSender(accountId: string, senderId: number): boolean {
+    const view = this.views.get(accountId)
+    return Boolean(view && !view.webContents.isDestroyed() && view.webContents.id === senderId)
   }
 
-  async commitTranslatedSend(accountId: string | undefined, translatedText: string): Promise<boolean> {
-    const id = accountId || this.activeId
-    const text = String(translatedText || '').trim()
-    if (!id || !text) return false
-    const view = this.views.get(id)
-    if (!view || view.webContents.isDestroyed()) return false
+  resetViews(): void {
+    this.hideAll()
+    for (const id of [...this.views.keys()]) this.remove(id)
+    this.overlayOpen = false
+  }
 
-    // The composer is focused by the injected page before this IPC call.
-    // Select the original text, insert the translated text through Chromium's
-    // native editing path, and press Enter through Chromium's input pipeline.
-    // This keeps WhatsApp's internal editor state in sync and avoids synthetic
-    // DOM events that current WhatsApp Web may ignore.
-    view.webContents.focus()
-    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['control'] })
-    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['control'] })
-    await sleep(25)
-    await view.webContents.insertText(text)
-    await sleep(45)
-    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' })
-    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' })
-    return true
+  resumeTranslations(): void {
+    for (const view of this.views.values()) {
+      if (!view.webContents.isDestroyed()) void view.webContents.executeJavaScript('window.__RT_RESUME_TRANSLATIONS__?.()').catch(() => {})
+    }
+  }
+
+  async submitTask(task: SendTask, authorized: () => boolean): Promise<{ queued: true }> {
+    const view = this.views.get(task.accountId)
+    const canSend = () => authorized() && this.activeId === task.accountId && !this.overlayOpen
+      && Boolean(this.mainWindow?.isFocused()) && view && !view.webContents.isDestroyed()
+    if (!canSend() || !view) throw new SendNotStartedError('发送窗口已切换，原对话草稿已保留。')
+    const args = JSON.stringify({ id: task.id, conversationId: task.conversationId,
+      targetKey: task.targetKey, original: task.request.text, translated: task.translated })
+    let dispatched = false
+    try {
+      // Page guard selects only the snapshotted editor. Input is briefly locked
+      // during native insertion; the final guard and button click share one JS turn.
+      const selected = await view.webContents.executeJavaScript(`window.__RT_SEND_SELECT__?.(${args})`, true)
+      if (!selected || !canSend()) throw new SendNotStartedError('对话或草稿已变化，译文已保存，请回原对话重试。')
+      await view.webContents.insertText(task.translated!)
+      if (!canSend()) throw new SendNotStartedError('发送窗口已切换，译文已保存。')
+      // If the renderer disappears during this call we cannot prove whether it
+      // clicked Send. Persist uncertainty, never retry Enter/button automatically.
+      dispatched = true
+      const result = await view.webContents.executeJavaScript(`window.__RT_SEND_COMMIT__?.(${args})`, true)
+      if (result?.dispatched === false) {
+        dispatched = false
+        throw new SendNotStartedError(result.message || '发送目标已变化，已阻止发送。')
+      }
+      if (!result?.confirmed) throw new Error('未收到 WhatsApp 对话中的发送确认。')
+      return { queued: true }
+    } catch (error: any) {
+      if (!dispatched) throw new SendNotStartedError(String(error?.message || error))
+      throw error
+    } finally {
+      if (!view.webContents.isDestroyed()) {
+        await view.webContents.executeJavaScript(`window.__RT_SEND_RELEASE__?.(${JSON.stringify(task.id)}, ${!dispatched})`).catch(() => {})
+      }
+    }
   }
 
   remove(accountId: string): void {
