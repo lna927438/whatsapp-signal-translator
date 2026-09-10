@@ -3,12 +3,10 @@ import { computed, ref } from 'vue'
 import { authStorage, createTransientSupabase, requireSupabase, supabaseConfigured } from '../lib/supabase'
 
 type Mode = 'login' | 'register' | 'verify-signup' | 'recover-request' | 'recover-verify' | 'recover-password' | 'recovered-username'
-type LoginType = 'username' | 'email'
 type RecoveryIntent = 'password' | 'username'
 
 const emit = defineEmits(['authenticated'])
 const mode = ref<Mode>('login')
-const loginType = ref<LoginType>('email')
 const recoveryIntent = ref<RecoveryIntent>('password')
 const identifier = ref('')
 const username = ref('')
@@ -74,7 +72,6 @@ async function login() {
   try {
     validateCaptcha()
     if (!supabaseConfigured) throw new Error('在线账号配置尚未注入当前构建，请检查 GitHub Variables 后重新构建。')
-    if (loginType.value === 'username') throw new Error('用户名登录正在接入。当前请先使用绑定邮箱登录。')
     const clean = cleanEmail(identifier.value)
     validateEmail(clean)
     const client = requireSupabase()
@@ -152,7 +149,7 @@ async function resendSignup() {
 
 function startRecovery(intent: RecoveryIntent) {
   recoveryIntent.value = intent
-  pendingEmail.value = loginType.value === 'email' ? cleanEmail(identifier.value) : ''
+  pendingEmail.value = cleanEmail(identifier.value)
   recoveryClient = null
   go('recover-request')
 }
@@ -276,19 +273,14 @@ function backToLoginWithRecoveredUsername() {
         </div>
 
         <template v-if="mode === 'login'">
-          <div class="auth-tabs">
-            <button :class="{ active: loginType === 'username' }" @click="loginType = 'username'">用户名登录</button>
-            <button :class="{ active: loginType === 'email' }" @click="loginType = 'email'">邮箱登录</button>
-          </div>
-          <p v-if="loginType === 'username'" class="auth-local-note">用户名登录正在接入。当前请使用绑定邮箱登录；忘记邮箱对应的用户名可点击“忘记账号”。</p>
-          <label class="auth-field"><span>{{ loginType === 'username' ? '用户名' : '绑定邮箱' }}</span><input v-model="identifier" :placeholder="loginType === 'username' ? '暂未启用' : '请输入绑定邮箱'" autocomplete="username" @keydown.enter="login" /></label>
+          <label class="auth-field"><span>绑定邮箱</span><input v-model="identifier" type="email" placeholder="请输入绑定邮箱" autocomplete="username" @keydown.enter="login" /></label>
           <label class="auth-field"><span>密码</span><div class="auth-password-wrap"><input v-model="password" :type="showPassword ? 'text' : 'password'" placeholder="请输入密码" autocomplete="current-password" @keydown.enter="login" /><button type="button" @click="showPassword = !showPassword">{{ showPassword ? '隐藏' : '显示' }}</button></div></label>
           <div class="auth-captcha-row"><input v-model="captchaInput" maxlength="4" placeholder="请输入图形验证码" @keydown.enter="login" /><button class="auth-captcha" title="点击刷新验证码" @click="refreshCaptcha">{{ captcha }}</button></div>
           <div class="auth-options">
             <label><input v-model="remember" type="checkbox" />记住登录</label>
             <div class="auth-recovery-links"><button @click="startRecovery('password')">忘记密码？</button><button @click="startRecovery('username')">忘记账号？</button></div>
           </div>
-          <button class="auth-submit" :disabled="busy || loginType === 'username'" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
+          <button class="auth-submit" :disabled="busy" @click="login">{{ busy ? '登录中…' : '登录' }}</button>
           <div class="auth-switch">还没有账号？ <button @click="go('register')">免费注册</button></div>
         </template>
 

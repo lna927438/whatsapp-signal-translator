@@ -22,6 +22,7 @@ test('collapsed sidebar enlarges native chat bounds and smaller windows cannot o
 test('HelloDog rename preserves installed legacy user data and uses one stable path for new installs', () => {
   assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/WhatsApp Signal Translator/accounts.json'), '/appdata/WhatsApp Signal Translator')
   assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/whatsapp-signal-translator/outgoing-tasks-v1.json'), '/appdata/whatsapp-signal-translator')
+  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/WhatsApp Signal Translator/Local Storage' || path === '/appdata/whatsapp-signal-translator/accounts.json'), '/appdata/whatsapp-signal-translator')
   assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', () => false), '/appdata/whatsapp-signal-translator')
 })
 
