@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 const { whatsappInjectionScript } = createRequire(import.meta.url)('../src/main/platforms/whatsapp/inject/script.ts') as typeof import('../src/main/platforms/whatsapp/inject/script')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function until(check: () => boolean) { for (let n = 0; n < 200; n++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 2)) }; assert.fail('UI did not settle') }
-function harness(options: { delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string } = {}) {
+function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string } = {}) {
   const dom = new JSDOM('<div id="sidebar">other chat</div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header><div class="message-in" data-id="false_peer-a@c.us_old"><span class="selectable-text">hello</span></div><footer><div contenteditable="true" role="textbox">原文</div><button aria-label="Send">send</button></footer></div>', { url: 'https://web.whatsapp.com', runScripts: 'outside-only' })
   const win = dom.window as any
   const composer = win.document.querySelector('[contenteditable]')
@@ -47,7 +47,16 @@ function harness(options: { delayTranslation?: boolean; receipt?: boolean; empty
       const el = win.document.createElement('div')
       el.className = 'message-out'; el.setAttribute('data-id', 'true_peer-a@c.us_new-' + nativeClicks)
       el.innerHTML = '<span class="selectable-text">translation</span>'
-      win.document.querySelector('#main').insertBefore(el, win.document.querySelector('footer'))
+      let receipt = el
+      if (options.wrappedReceipt) {
+        receipt = win.document.createElement('div'); receipt.setAttribute('data-id', el.getAttribute('data-id'))
+        el.removeAttribute('data-id'); receipt.appendChild(el)
+      }
+      win.document.querySelector('#main').insertBefore(receipt, win.document.querySelector('footer'))
+      if (options.rerender) {
+        const header = win.document.querySelector('#main header'); header.replaceWith(header.cloneNode(true))
+        composer.replaceWith(composer.cloneNode(true))
+      }
     }
   })
   win.eval(whatsappInjectionScript)
@@ -133,5 +142,15 @@ test('WhatsApp account-disabled errors pause automatic incoming translation inst
     await tick()
     for (let n = 0; n < 5; n++) { h.intervals.forEach(fn => fn()); await tick() }
     assert.equal(h.incoming, 1)
+  } finally { h.dom.window.close() }
+})
+
+
+test('WhatsApp recognizes IDs on an ancestor and accepts same-peer React rerenders after dispatch', async () => {
+  const h = harness({ wrappedReceipt: true, rerender: true })
+  try {
+    h.enter()
+    await until(() => h.statuses.some(item => item.state === 'success'))
+    assert.equal(h.submits, 1); assert.equal(h.nativeClicks, 1)
   } finally { h.dom.window.close() }
 })

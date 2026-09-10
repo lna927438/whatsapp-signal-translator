@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import AccountSetup from './components/AccountSetup.vue'
 import UiIcon from './components/UiIcon.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import PersonalCenter from './components/PersonalCenter.vue'
 import SignalView from './components/SignalView.vue'
 import { cloudApi } from './lib/cloudApi'
+import { AccountWrites } from './lib/accountWrites'
 import { RemoteSnapshot } from './lib/remoteSnapshot'
 
 const props = defineProps<{ userId: string }>()
@@ -23,6 +25,8 @@ type Account = {
   groupTranslate?: boolean
   fontSize?: number
   translationsVisible?: boolean
+  proxy?: any
+  toolbarCollapsed?: boolean
   zoomFactor?: number
   translationColor?: string
   contactLanguages?: Record<string, ContactPreference>
@@ -33,6 +37,7 @@ type ConversationInfo = { id: string; name?: string }
 
 const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
+const setup = ref<{ platform: 'whatsapp' | 'signal'; account?: Account } | null>(null)
 const showSettings = ref(false)
 const showProfile = ref(false)
 const error = ref('')
@@ -212,17 +217,14 @@ async function reloadMetrics() {
   try { metrics.value = await window.desktopAPI.getTranslationMetrics() } catch { /* ignore transient UI metric errors */ }
 }
 
-async function addWhatsApp() {
-  const account = await window.desktopAPI.addAccount({ platform: 'whatsapp' })
-  await reload()
-  await select(account)
+async function openSetup(platform: 'whatsapp' | 'signal', account?: Account) {
+  await window.desktopAPI.setOverlayOpen(true)
+  setup.value = { platform, account }
 }
-
-async function addSignalRecord(signalAccount?: string) {
-  const account = await window.desktopAPI.addAccount({ platform: 'signal', signalAccount })
-  await reload()
-  await select(account)
-}
+async function closeSetup() { setup.value = null; await window.desktopAPI.setOverlayOpen(false) }
+async function setupSaved(account: Account) { await closeSetup(); await reload(); await select(account) }
+async function addWhatsApp() { await openSetup('whatsapp') }
+async function addSignalRecord() { await openSetup('signal') }
 
 async function select(account: Account) {
   selected.value = account
@@ -230,7 +232,7 @@ async function select(account: Account) {
   updateBounds()
   controlFeedback.value = { state: 'idle', message: '' }
   try { await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id }) }
-  catch (e: any) { error.value = e?.message || '页面加载失败，请使用右键菜单刷新。' }
+  catch (e: any) { if (selected.value?.id === account.id) error.value = e?.message || '页面加载失败，请重新打开此账号。' }
 }
 
 async function remove(account: Account) {
@@ -248,19 +250,34 @@ function setFeedback(state: 'idle'|'saving'|'saved'|'error', message: string) {
   if (state === 'saved') feedbackTimer = setTimeout(() => { controlFeedback.value = { state: 'idle', message: '' } }, 1800)
 }
 
+const accountWrites = new AccountWrites()
+function mergeAccountFields(id: string, fields: Record<string, unknown>) {
+  if (selected.value?.id === id) selected.value = { ...selected.value, ...fields }
+  const index = accounts.value.findIndex(item => item.id === id)
+  if (index >= 0) accounts.value[index] = { ...accounts.value[index], ...fields }
+}
 async function patchSelected(patch: Record<string, unknown>) {
-  if (!selected.value) return
+  const account = selected.value
+  if (!account) return
+  const id = account.id
+  const currentFields = accountWrites.begin(id, patch)
+  mergeAccountFields(id, patch)
   setFeedback('saving', '正在保存…')
   try {
-    const updated = await window.desktopAPI.updateAccount(selected.value.id, patch)
+    const updated = await accountWrites.enqueue(() => window.desktopAPI.updateAccount(id, patch))
     if (!updated) throw new Error('保存失败')
-    selected.value = updated
-    const index = accounts.value.findIndex((item) => item.id === updated.id)
-    if (index >= 0) accounts.value[index] = updated
-    setFeedback('saved', '设置已保存')
+    const fields = currentFields(updated)
+    mergeAccountFields(id, fields)
+    if (selected.value?.id === id && Object.keys(fields).length) setFeedback('saved', '设置已保存')
   } catch (e: any) {
-    setFeedback('error', e?.message || '设置保存失败')
+    // Read persisted state on failure; the optimistic previous value may itself have failed.
+    try {
+      const persisted = (await window.desktopAPI.listAccounts()).find((item: Account) => item.id === id)
+      if (persisted) mergeAccountFields(id, currentFields(persisted))
+    } catch { /* Leave the error visible if local storage cannot be read. */ }
+    if (selected.value?.id === id && Object.keys(currentFields(patch)).length) setFeedback('error', e?.message || '设置保存失败')
   }
+  await nextTick(); updateBounds()
 }
 
 function setStringField(field: string, event: Event) {
@@ -278,17 +295,18 @@ async function setTargetLanguage(event: Event) {
   const account = selected.value
   const conversation = selectedConversation.value
   if (account?.platform === 'whatsapp' && conversation?.id) {
+    const current = accountWrites.begin(account.id, { [`contact:${conversation.id}`]: value })
+    const isCurrent = () => Object.keys(current({})).length > 0
     setFeedback('saving', '正在保存联系人语言…')
     try {
-      const updated = await window.desktopAPI.setContactLanguage(account.id, conversation.id, value, conversation.name)
-      if (updated) {
-        selected.value = updated
-        const index = accounts.value.findIndex((item) => item.id === updated.id)
-        if (index >= 0) accounts.value[index] = updated
+      const updated: any = await accountWrites.enqueue(() => window.desktopAPI.setContactLanguage(account.id, conversation.id, value, conversation.name))
+      if (updated && isCurrent()) {
+        const stored = accounts.value.find(item => item.id === account.id)
+        mergeAccountFields(account.id, { contactLanguages: { ...stored?.contactLanguages, [conversation.id]: updated.contactLanguages[conversation.id] } })
       }
-      setFeedback('saved', '联系人语言已保存')
+      if (selected.value?.id === account.id && isCurrent()) setFeedback('saved', '联系人语言已保存')
     } catch (e: any) {
-      setFeedback('error', e?.message || '联系人语言保存失败')
+      if (selected.value?.id === account.id && isCurrent()) setFeedback('error', e?.message || '联系人语言保存失败')
     }
     return
   }
@@ -332,6 +350,7 @@ onMounted(async () => {
   void measureRoutes()
   subscriptions.push(window.desktopAPI.onAccountAction(async (event: any) => {
     const account = accounts.value.find(item => item.id === event.accountId)
+    if (event.action === 'configure' && account) await openSetup(account.platform, account)
     if (event.action === 'rename' && account) await renameAccount(account)
     if (event.action === 'updated') await reload()
     if (event.action === 'removed') { if (selected.value?.id === event.accountId) await home(); await reload() }
@@ -344,7 +363,10 @@ onMounted(async () => {
     if (!info?.accountId || !info?.conversationId) return
     conversations.value = { ...conversations.value, [info.accountId]: { id: info.conversationId, name: info.conversationName } }
   }))
-  subscriptions.push(window.desktopAPI.onContactLanguage(() => { void reload() }))
+  subscriptions.push(window.desktopAPI.onContactLanguage((event: any) => {
+    const account = accounts.value.find(item => item.id === event.accountId)
+    if (account && event.conversationId) mergeAccountFields(account.id, { contactLanguages: { ...account.contactLanguages, [event.conversationId]: { language: event.language, name: event.name, source: event.source, updatedAt: Date.now() } } })
+  }))
   subscriptions.push(window.desktopAPI.onTranslatorStatus((status: any) => {
     if (!status?.accountId) return
     liveStatuses.value = {
@@ -378,7 +400,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'sidebar-collapsed': collapsed }">
+  <div class="app-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-platform="selected?.platform || 'whatsapp'">
     <aside class="sidebar">
       <button class="brand" @click="home" title="HelloDog 工作台"><img src="/hellodog-icon.webp" alt="HelloDog" /><span><b>HelloDog</b><small>让每一句，都被听懂。</small></span></button>
       <div class="sidebar-heading"><span>工作空间</span><button class="icon-button collapse-button" :aria-expanded="!collapsed" :title="collapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'" @click="collapsed = !collapsed"><UiIcon name="panel" /></button></div>
@@ -388,7 +410,7 @@ onUnmounted(() => {
       <div class="account-list">
         <div v-for="account in filteredAccounts" :key="account.id" class="account-row" :class="{ active: selected?.id === account.id }" @contextmenu.prevent="accountMenu(account)">
           <button class="account" :title="account.label" @click="select(account)" @keydown.shift.f10.prevent="accountMenu(account)">
-            <span class="platform-avatar" :class="account.platform">{{ account.platform === 'whatsapp' ? 'W' : 'S' }}</span><span class="account-label"><b>{{ account.label }}</b><small>{{ account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal' }}</small></span>
+            <span class="platform-avatar" :class="account.platform"><img :src="`./${account.platform}.svg`" :alt="account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" /></span><span class="account-label"><b>{{ account.label }}</b><small>{{ account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal' }}</small></span>
           </button><button v-if="!collapsed" class="icon-button account-more" :aria-label="account.label + ' 的更多操作'" @click="accountMenu(account)"><UiIcon name="more" /></button>
         </div>
         <p v-if="!filteredAccounts.length && !collapsed" class="sidebar-hint">{{ search ? '没有匹配的账号' : '添加账号，开始对话。' }}</p>
@@ -397,17 +419,17 @@ onUnmounted(() => {
       <div class="sidebar-bottom">
         <button class="profile-btn" @click="openProfile" title="个人中心与字符余额"><UiIcon name="user" /><span><b>个人中心</b><small>剩余 {{ remainingCharsLabel }} 字符</small></span></button>
         <button class="settings-btn" @click="openSettings" title="设置与连接诊断"><UiIcon name="settings" /><span>设置与连接</span></button>
-        <small class="version-label">{{ collapsed ? '0.5.0' : 'HelloDog · v0.5.0' }}</small>
+        <small class="version-label">{{ collapsed ? '0.5.1' : 'HelloDog · v0.5.1' }}</small>
       </div>
     </aside>
     <div class="workspace">
-      <header class="workspace-header"><div><span class="workspace-kicker">HELLODOG WORKSPACE</span><h1>{{ selected?.label || '你的聊天，世界都听得懂。' }}</h1></div><div class="workspace-header-actions"><button class="connection-button" @click="openSettings" title="查看实测线路与连接诊断"><UiIcon name="signal" />{{ lineLabel }}</button><button v-if="selected" class="icon-button" title="账号操作" @click="accountMenu(selected)"><UiIcon name="more" /></button></div></header>
-      <section v-if="selected" class="account-toolbar">
+      <header class="workspace-header"><div><span class="workspace-kicker">HELLODOG WORKSPACE</span><h1>{{ selected?.label || '你的聊天，世界都听得懂。' }}</h1></div><div class="workspace-header-actions"><button class="connection-button" @click="openSettings" title="查看实测线路与连接诊断"><UiIcon name="signal" />{{ lineLabel }}</button><button v-if="selected" class="toolbar-collapse" :aria-expanded="!selected.toolbarCollapsed" @click="patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })">{{ selected.toolbarCollapsed ? '展开翻译面板' : '收起面板' }} <span>{{ selected.toolbarCollapsed ? '⌄' : '⌃' }}</span></button><button v-if="selected" class="icon-button" title="账号操作" @click="accountMenu(selected)"><UiIcon name="more" /></button></div></header>
+      <section v-if="selected" class="account-toolbar" :class="{ 'toolbar-compact': selected.toolbarCollapsed }" :inert="selected.toolbarCollapsed">
         <div class="language-control"><label><span>我使用的语言</span><select :value="localLanguage" @change="setStringField('localLanguage', $event)"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label><span class="language-arrow">⇄</span><label><span>{{ contactLabel || '对方的语言' }}</span><select :value="targetLanguage" @change="setTargetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label></div>
         <div class="translation-toggles"><label><input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />接收翻译</label><label><input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />发送翻译</label><label><input type="checkbox" :checked="blockChineseSend" @change="patchSelected({ blockChineseSend: !blockChineseSend })" />拦截中文原文</label><label><input type="checkbox" :checked="groupTranslate" @change="patchSelected({ groupTranslate: !groupTranslate })" />群组翻译</label></div>
         <div class="display-controls"><label>译文字号<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label title="译文颜色">颜色<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? '显示译文' : '隐藏译文' }}</button></div>
       </section>
-      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ selectedLiveStatus.message }}</span></div><span>{{ channelName }}</span><span class="metric-text">{{ metricLabel }}</span><span class="save-feedback" :class="controlFeedback.state" role="status">{{ controlFeedback.message }}</span><span class="quota-text" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span></div>
+      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ selectedLiveStatus.message }}</span></div><span>{{ channelName }}</span><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" title="查看代理设置">独立代理已配置</button><span class="metric-text">{{ metricLabel }}</span><span class="save-feedback" :class="controlFeedback.state" role="status">{{ controlFeedback.message }}</span><span class="quota-text" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span></div>
       <main ref="contentArea" class="content" :class="{ 'signal-content': selectedIsSignal }">
         <SignalView v-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" />
         <div v-else-if="!selected" class="welcome">
@@ -416,6 +438,7 @@ onUnmounted(() => {
         </div>
       </main>
     </div>
+    <AccountSetup v-if="setup" :platform="setup.platform" :account="setup.account" :languages="languages" @close="closeSetup" @saved="setupSaved" />
     <SettingsPanel v-if="showSettings" @close="closeSettings" />
     <PersonalCenter v-if="showProfile" @close="closeProfile" @updated="onProfileUpdated" />
     <div v-if="renaming" class="modal-backdrop" @click.self="finishRename(false)"><form class="panel rename-panel" @submit.prevent="finishRename(true)"><header><h2>给账号取个名字</h2><button type="button" @click="finishRename(false)" aria-label="关闭">×</button></header><label>账号名称<input v-model="newLabel" maxlength="60" required autofocus /></label><footer><button type="button" class="secondary" @click="finishRename(false)">取消</button><button class="primary" type="submit">保存名称</button></footer></form></div>

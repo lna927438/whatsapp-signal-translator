@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   authLogin: (input: any) => ipcRenderer.invoke('auth:login', input),
   authLogout: () => ipcRenderer.invoke('auth:logout'),
   authResetPassword: (input: any) => ipcRenderer.invoke('auth:reset-password', input),
+  testAccountProxy: (input: any, id?: string) => ipcRenderer.invoke('accounts:test-proxy', input, id),
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   addAccount: (args: any) => ipcRenderer.invoke('accounts:add', args),
   updateAccount: (id: string, patch: any) => ipcRenderer.invoke('accounts:update', id, patch),

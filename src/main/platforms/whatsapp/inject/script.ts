@@ -73,7 +73,7 @@ export const whatsappInjectionScript = String.raw`
       box.setAttribute('data-rt-ui', 'send-status');
       Object.assign(box.style, {
         position: 'fixed', top: '76px', right: '18px', zIndex: '2147483647', maxWidth: '420px',
-        padding: '10px 14px', borderRadius: '10px', fontSize: '13px', lineHeight: '1.45', color: '#fff',
+        padding: '14px 16px', borderRadius: '14px', fontSize: '13px', lineHeight: '1.6', color: '#f8fafc', border: '1px solid rgba(255,255,255,.16)',
         boxShadow: '0 8px 28px rgba(0,0,0,.28)', pointerEvents: 'none', transition: 'opacity .18s ease', opacity: '1'
       });
       document.body.appendChild(box);
@@ -84,11 +84,11 @@ export const whatsappInjectionScript = String.raw`
     for (const item of [action, secondary].filter(Boolean)) {
       const button = document.createElement('button');
       button.textContent = item.label;
-      Object.assign(button.style, { display: 'block', marginTop: '8px', cursor: 'pointer', padding: '5px 8px' });
+      Object.assign(button.style, { display: 'block', marginTop: '8px', cursor: 'pointer', padding: '9px 12px', border: '1px solid rgba(255,255,255,.2)', borderRadius: '8px', background: 'rgba(255,255,255,.1)', color: '#fff', width: '100%', textAlign: 'left' });
       button.onclick = () => { button.disabled = true; Promise.resolve().then(() => item.run()).catch(error => showSendStatus(String(error?.message || error), 'error', false)); };
       box.appendChild(button);
     }
-    box.style.background = type === 'error' ? '#a72b3a' : type === 'success' ? '#176b4d' : '#2456a6';
+    box.style.background = type === 'error' ? '#493831' : type === 'success' ? '#214d40' : '#263846';
     box.style.opacity = '1';
     if (autoHide) statusTimer = setTimeout(() => { if (box) box.style.opacity = '0'; }, type === 'error' ? 6000 : 2200);
   };
@@ -173,13 +173,14 @@ export const whatsappInjectionScript = String.raw`
 
   const isOutgoingContainer = (container) => {
     if (!container) return false;
-    if (container.matches?.('.message-out') || container.closest?.('.message-out')) return true;
+    if (container.matches?.('.message-out') || container.closest?.('.message-out') || container.querySelector?.('.message-out')) return true;
+    if (/^true_/.test(messageId(container))) return true;
     const cls = typeof container.className === 'string' ? container.className : '';
     return /(^|\s)message-out(\s|$)/.test(cls);
   };
 
   const messageId = (container) => {
-    const direct = container.getAttribute?.('data-id');
+    const direct = container.getAttribute?.('data-id') || container.closest?.('[data-id]')?.getAttribute('data-id');
     if (direct) return direct;
     const nested = container.querySelector?.('[data-id]')?.getAttribute?.('data-id');
     if (nested) return nested;
@@ -410,8 +411,11 @@ export const whatsappInjectionScript = String.raw`
       nativeClick = button;
       button.click();
     } finally { nativeClick = null; editorLocked = false; }
-    for (let i = 0; i < 50; i += 1) {
-      if (!matchesSnapshot(snapshot)) return { dispatched: true, confirmed: false };
+    for (let i = 0; i < 150; i += 1) {
+      // After dispatch React may replace the editor/header. Guard the peer and
+      // navigation revision, not DOM identity; never accept a different chat.
+      if (navigationRevision !== snapshot.navigationRevision || conversationInfo().id !== snapshot.conversationId
+        || (targetKey() !== snapshot.targetKey && snapshot.targetKey !== 'title:' + snapshot.conversationId)) return { dispatched: true, confirmed: false };
       const receipt = messageContainers().find(container => {
         const id = messageId(container);
         return isOutgoingContainer(container) && id && !id.startsWith('pre:') && !snapshot.baseline.has(id)

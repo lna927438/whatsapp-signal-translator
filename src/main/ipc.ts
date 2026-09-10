@@ -160,10 +160,24 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('auth:reset-password', (_e, input: { identifier: string; recoveryCode: string; newPassword: string }) => auth.resetPassword(input))
 
   ipcMain.handle('accounts:list', async () => { await requireAuth(); return accounts.list() })
-  ipcMain.handle('accounts:add', async (_e, args: { platform: 'whatsapp' | 'signal'; label?: string; signalAccount?: string }) => { await requireAuth(); return accounts.add(args.platform, args.label, args.signalAccount) })
+  whatsapp.setPasswordReader(id => accounts.proxyPassword(id))
+  ipcMain.handle('accounts:add', async (event, args: any) => {
+    requireMain(event); await requireAuth()
+    if (!['whatsapp', 'signal'].includes(args.platform)) throw new Error('不支持的应用类型。')
+    if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
+    return accounts.add(args.platform, args.label, args.signalAccount, args.options)
+  })
+  ipcMain.handle('accounts:test-proxy', async (event, input: any, id?: string) => {
+    requireMain(event); await requireAuth()
+    const password = input.password || (id && !input.clearPassword ? await accounts.proxyPassword(id) : '')
+    return whatsapp.testProxy(input, password)
+  })
   ipcMain.handle('accounts:update', async (event, id: string, patch: any) => {
     requireMain(event); await requireAuth()
+    const existing = (await accounts.list()).find(item => item.id === id)
+    if (existing?.platform === 'signal' && patch.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     const updated = await accounts.update(id, patch)
+    if (patch.proxy !== undefined) whatsapp.remove(id)
     if (updated?.platform === 'whatsapp') await whatsapp.applyPreferences(id, updated)
     return updated
   })
@@ -240,14 +254,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     }
     const safe = (task: () => Promise<unknown>) => () => { void task().catch(() => mainWindow.webContents.send('translator:error', '操作未完成，请重试。')) }
     Menu.buildFromTemplate([
-      { label: '后退', enabled: contents?.navigationHistory.canGoBack() || false, click: () => contents?.navigationHistory.goBack() },
-      { label: '前进', enabled: contents?.navigationHistory.canGoForward() || false, click: () => contents?.navigationHistory.goForward() },
       { label: '刷新页面', enabled: Boolean(contents), click: () => contents?.reload() },
       { type: 'separator' },
-      { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' },
-      { label: '复制当前页面地址', enabled: Boolean(contents), click: () => { const url = contents?.getURL(); if (url && /^https?:\/\//.test(url)) clipboard.writeText(url) } },
-      { type: 'separator' },
-      { label: '编辑账号名称', click: () => notify('rename') },
+      { label: '账号设置与代理', click: () => notify('configure') },
+      { label: '重命名', click: () => notify('rename') },
       { label: '显示译文', type: 'checkbox', checked: account.translationsVisible !== false, click: safe(() => update({ translationsVisible: account.translationsVisible === false })) },
       { label: `页面缩放 ${Math.round((account.zoomFactor || 1) * 100)}%`, enabled: Boolean(contents), submenu: [
         { label: '放大', click: safe(() => update({ zoomFactor: Math.min(1.5, (account.zoomFactor || 1) + 0.1) })) },
@@ -255,8 +265,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
         { label: '重置为 100%', click: safe(() => update({ zoomFactor: 1 })) }
       ] },
       { type: 'separator' },
-      { label: '检查连接', click: () => notify('diagnose') },
-      { label: '打开日志目录', click: safe(async () => { const error = await shell.openPath(app.getPath('logs')); if (error) throw new Error(error) }) },
+      { label: '更多操作', submenu: [
+        { label: '后退', enabled: contents?.navigationHistory.canGoBack() || false, click: () => contents?.navigationHistory.goBack() },
+        { label: '前进', enabled: contents?.navigationHistory.canGoForward() || false, click: () => contents?.navigationHistory.goForward() },
+        { label: '复制当前页面地址', enabled: Boolean(contents), click: () => { const url = contents?.getURL(); if (url && /^https?:\/\//.test(url)) clipboard.writeText(url) } },
+        { type: 'separator' },
+        { label: '检查连接', click: () => notify('diagnose') },
+        { label: '诊断日志', click: safe(async () => { const error = await shell.openPath(app.getPath('logs')); if (error) throw new Error(error) }) }
+      ] },
       { label: '回到工作台', click: () => notify('home') },
       { label: '关闭此页面', click: () => { whatsapp.remove(id); notify('home') } },
       { type: 'separator' },
