@@ -97,14 +97,16 @@ export class SignalCli extends EventEmitter {
     this.child = child
 
     const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', (line) => this.onLine(line))
+    rl.on('line', (line) => { if (this.child === child) this.onLine(line) })
     child.stderr.on('data', (data: Buffer) => this.appendDiagnostic(data.toString('utf8')))
     child.on('error', (error) => {
+      if (this.child !== child) return
       this.appendDiagnostic(error.message)
       this.rejectPending(new Error(this.exitMessage('signal-cli process error')))
       if (this.child === child) this.child = undefined
     })
     child.on('exit', (code) => {
+      if (this.child !== child) return
       this.rejectPending(new Error(this.exitMessage(`signal-cli exited (${code})`)))
       if (this.child === child) this.child = undefined
       this.emit('exit', code)
@@ -123,6 +125,7 @@ export class SignalCli extends EventEmitter {
   stop(): void {
     const child = this.child
     this.child = undefined
+    this.rejectPending(new Error('Signal core stopped; any in-flight send result must be checked.'))
     if (child && !child.killed) child.kill()
   }
 

@@ -1,14 +1,18 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { AuthStorage } from './authStorage'
 
 const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim()
 const supabasePublishableKey = String(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
 
 export const supabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey)
+export const authStorage = new AuthStorage(localStorage, sessionStorage)
+export let signingOut = false
 
 export const supabase: SupabaseClient | null = supabaseConfigured
   ? createClient(supabaseUrl, supabasePublishableKey, {
       auth: {
         persistSession: true,
+        storage: authStorage,
         autoRefreshToken: true,
         detectSessionInUrl: false
       }
@@ -31,4 +35,21 @@ export function createTransientSupabase(): SupabaseClient {
       detectSessionInUrl: false
     }
   })
+}
+
+export async function signOutThisDevice(): Promise<void> {
+  signingOut = true
+  window.dispatchEvent(new Event('translator:signout'))
+  try {
+    await window.desktopAPI.authSetOnlineSession(null)
+    if (supabase) {
+      void supabase.auth.stopAutoRefresh().catch(() => {})
+      await Promise.race([
+        supabase.auth.signOut({ scope: 'local' }),
+        new Promise(resolve => setTimeout(resolve, 5000))
+      ])
+    }
+  } finally {
+    try { authStorage.clearSession() } finally { globalThis.location.reload() }
+  }
 }

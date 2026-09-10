@@ -1,19 +1,29 @@
 <script setup lang="ts">
 import QRCode from 'qrcode'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { readDraft, saveDraft, clearSentDraft, upsertMessage, type DraftScope } from '../lib/signalState'
 
-const props = defineProps<{ accountRecord: any }>()
+const props = defineProps<{ accountRecord: any; userId: string }>()
 const emit = defineEmits(['linked', 'conversation'])
 const signalAccounts = ref<string[]>([])
 const activeAccount = ref(props.accountRecord.signalAccount || '')
-const recipient = ref('')
-const input = ref('')
+const peerKey = 'translator-signal-peer:' + JSON.stringify([props.userId, props.accountRecord.id])
+const recipient = ref(localStorage.getItem(peerKey) || '')
+const scope = (): DraftScope => ({ userId: props.userId, recordId: props.accountRecord.id, account: activeAccount.value, peer: recipient.value.trim() })
+const input = ref(readDraft(localStorage, scope()))
 const messages = ref<any[]>([])
 const linkUri = ref('')
 const qr = ref('')
 const status = ref('')
 const diagnostic = ref('')
 const linking = ref(false)
+const sending = ref(false)
+const pendingTask = ref<any>(null)
+const uncertain = computed(() => ['uncertain', 'submitting'].includes(pendingTask.value?.state))
+const visibleMessages = computed(() => messages.value.filter(message => message.account === activeAccount.value && message.peer === recipient.value.trim()))
+let disposed = false
+let recoverySequence = 0
+let accountSave: Promise<any> = Promise.resolve()
 const runtime = ref<any>({ state: 'checking', message: '正在检查 Signal 核心…' })
 let linkAttempt = 0
 let offMessage: undefined | (() => void)
@@ -116,39 +126,112 @@ async function completeLink(finishPromise: Promise<any>, attempt: number) {
   } finally { if (attempt === linkAttempt) linking.value = false }
 }
 
+async function recoverPending() {
+  const sequence = ++recoverySequence
+  const current = scope()
+  pendingTask.value = null
+  if (!current.account || !current.peer) return
+  try {
+    const task = await window.desktopAPI.pendingSend(current.recordId, `signal:${current.peer}`)
+    if (disposed || sequence !== recoverySequence || task?.signalAccount !== current.account) return
+    pendingTask.value = task
+    if (task && !input.value && !['uncertain', 'submitting'].includes(task.state)) input.value = task.request.text
+  } catch (error: any) { if (!disposed && sequence === recoverySequence) status.value = error.message || String(error) }
+}
+
+async function resolvePending(sent: boolean) {
+  const task = pendingTask.value
+  if (!task || sending.value) return
+  const current = scope()
+  try {
+    if (sent) {
+      await window.desktopAPI.confirmSent(task.id)
+      if (clearSentDraft(localStorage, current, task.request.text) && current.account === activeAccount.value && current.peer === recipient.value.trim() && input.value.trim() === task.request.text.trim()) input.value = ''
+      status.value = '已记录核对结果，不会重复发送。'
+    } else {
+      await window.desktopAPI.confirmNotSent(task.id)
+      status.value = '原任务可重试，已保存的译文会继续使用。请核对收件人后点击发送。'
+    }
+    await recoverPending()
+  } catch (error: any) { status.value = error.message || String(error) }
+}
+
+async function cancelPending() {
+  if (!pendingTask.value || sending.value) return
+  try {
+    await window.desktopAPI.cancelSend(pendingTask.value.id)
+    status.value = '任务已取消。下次发送将使用当前翻译设置。'
+    await recoverPending()
+  } catch (error: any) { status.value = error.message || String(error) }
+}
+
 async function send() {
   const text = input.value.trim()
-  if (!text || !activeAccount.value || !recipient.value.trim()) return
-  input.value = ''
+  const current = scope()
+  if (sending.value || uncertain.value || !text || !current.account || !current.peer) return
+  sending.value = true
   try {
-    const message = await window.desktopAPI.signalSend(props.accountRecord.id, activeAccount.value, recipient.value.trim(), text)
-    messages.value.push(message)
+    // Keep the editor and its newer draft intact throughout every await.
+    saveDraft(localStorage, current, input.value)
+    await accountSave
+    if (disposed || current.account !== activeAccount.value || current.peer !== recipient.value.trim()) throw new Error('对话已切换，草稿已保留。')
+    status.value = '正在保存任务并确认译文…'
+    let task = await window.desktopAPI.prepareSignalSend(current.recordId, current.account, current.peer, text)
+    pendingTask.value = task
+    if (['uncertain', 'submitting'].includes(task.state)) { status.value = '请先核对上一次发送的结果。'; return }
+    task = await window.desktopAPI.translateSend(task.id)
+    if (disposed || current.account !== activeAccount.value || current.peer !== recipient.value.trim() || input.value.trim() !== text) throw new Error('对话或草稿已变化，译文已保存，没有发送。')
+    status.value = '译文已确认，正在等待 Signal 发送确认…'
+    const sent = await window.desktopAPI.submitSend(task.id)
+    if (disposed) return
+    if (sent.result?.account) messages.value = upsertMessage(messages.value, sent.result)
+    const cleared = clearSentDraft(localStorage, current, text)
+    if (cleared && current.account === activeAccount.value && current.peer === recipient.value.trim() && input.value.trim() === text) input.value = ''
+    status.value = 'Signal 已确认提交发送。'
   } catch (error: any) {
-    input.value = text
-    status.value = error.message || String(error)
+    if (!disposed) status.value = (error.message || String(error)) + ' 原任务和草稿已保留。'
+  } finally {
+    sending.value = false
+    if (!disposed) await recoverPending()
   }
 }
 
-watch(activeAccount, async (value) => {
-  if (value) await window.desktopAPI.updateAccount(props.accountRecord.id, { signalAccount: value })
+watch(input, value => {
+  try { saveDraft(localStorage, scope(), value) }
+  catch { status.value = '本地草稿保存失败，请先复制输入内容。'; }
+}, { flush: 'sync' })
+watch([activeAccount, recipient], () => {
+  input.value = readDraft(localStorage, scope())
+  localStorage.setItem(peerKey, recipient.value)
+  void recoverPending()
+}, { flush: 'sync' })
+watch(activeAccount, value => {
+  if (value) {
+    accountSave = accountSave.catch(() => {}).then(() => window.desktopAPI.updateAccount(props.accountRecord.id, { signalAccount: value }))
+    void accountSave.catch(error => { if (!disposed) status.value = error.message || String(error) })
+  }
 })
-watch(recipient, (value) => {
+watch(recipient, value => {
   const peer = value.trim()
   if (peer) emit('conversation', { id: `signal:${peer}`, name: peer })
-})
+}, { immediate: true })
 
 onMounted(async () => {
   await window.desktopAPI.focusPlatform({ platform: 'signal' })
+  if (disposed) return
   offRuntime = window.desktopAPI.onSignalRuntime((next: any) => { runtime.value = next })
   offDiagnostic = window.desktopAPI.onSignalDiagnostic((message: string) => { diagnostic.value = message.trim() })
   offMessage = window.desktopAPI.onSignalMessage((message: any) => {
-    if (!activeAccount.value || message.account === activeAccount.value) messages.value.push(message)
+    if (!disposed && message.account === activeAccount.value) messages.value = upsertMessage(messages.value, message)
   })
   await refreshRuntime()
   if (runtimeReady.value) await refreshAccounts()
+  await recoverPending()
 })
 
 onUnmounted(() => {
+  disposed = true
+  recoverySequence += 1
   linkAttempt += 1
   offMessage?.()
   offRuntime?.()
@@ -178,9 +261,15 @@ onUnmounted(() => {
     <template v-if="runtimeReady">
       <div class="signal-recipient"><label>对方手机号<input v-model="recipient" placeholder="例如 +1…" /></label></div>
       <div class="messages">
-        <div v-for="message in messages" :key="message.timestamp + ':' + message.peer" class="msg" :class="{ mine: message.fromMe }"><div class="bubble"><div>{{ message.original }}</div><div v-if="message.translated && message.translated !== message.original" class="translated" :style="translatedStyle">{{ message.translated }}</div></div></div>
+        <div v-for="message in visibleMessages" :key="message.taskId || message.timestamp + ':' + message.peer + ':' + message.fromMe" class="msg" :class="{ mine: message.fromMe }"><div class="bubble"><div>{{ message.original }}</div><div v-if="message.translated && message.translated !== message.original" class="translated" :style="translatedStyle">{{ message.translated }}</div></div></div>
       </div>
-      <div class="composer"><textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="输入中文，发送前自动翻译…"></textarea><button class="primary" @click="send">翻译并发送</button></div>
+      <div v-if="uncertain" class="runtime-card" role="status">
+        <p>上次发送结果未确认。请先在手机 Signal 的原对话中核对，避免重复发送。</p>
+        <button :disabled="sending" @click="resolvePending(true)">已确认发送成功</button>
+        <button :disabled="sending" @click="resolvePending(false)">已核对未发送，允许重试</button>
+      </div>
+      <p v-else-if="pendingTask" class="status">原任务已保留；重试沿用原目标语言和已确认的译文。 <button :disabled="sending" @click="cancelPending">取消此待发送任务</button></p>
+      <div class="composer"><textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="输入中文，发送前自动翻译…"></textarea><button class="primary" :disabled="sending || uncertain || !input.trim() || !recipient.trim()" @click="send">{{ sending ? '处理中…' : '翻译并发送' }}</button></div>
     </template>
   </div>
 </template>

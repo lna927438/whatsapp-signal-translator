@@ -37,3 +37,26 @@ test('account suspension is not retried', async()=>{
   await assert.rejects(new CloudflareProvider('test-user').translate(req),/账号已停用/)
   assert.equal(count,1)
 })
+
+test('an in-flight transport retry uses a rotated session token without changing the translation request', async () => {
+  let token = 'initial-test-token'
+  const calls: Array<{ token: string | null; body: string }> = []
+  globalThis.fetch = async (_url, init) => {
+    calls.push({ token: new Headers(init?.headers).get('authorization'), body: String(init?.body) })
+    if (calls.length === 1) { token = 'rotated-test-token'; throw new TypeError('lost response') }
+    return new Response(JSON.stringify({ translation: '你好' }))
+  }
+  await new CloudflareProvider(() => token).translate(req)
+  assert.notEqual(calls[0].token, calls[1].token)
+  assert.equal(calls[0].body, calls[1].body)
+})
+
+test('a user change between provider retries prevents any request under the next user token', async () => {
+  let changed = false, calls = 0
+  globalThis.fetch = async () => { calls++; changed = true; throw new TypeError('lost response') }
+  await assert.rejects(new CloudflareProvider(() => {
+    if (changed) throw new Error('登录状态已变化')
+    return 'initial-test-token'
+  }).translate(req), /登录状态已变化/)
+  assert.equal(calls, 1)
+})

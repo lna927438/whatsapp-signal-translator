@@ -29,6 +29,8 @@ export class TranslationEngine {
   private latencyTotal = 0
   private latencySamples = 0
   private onlineAccessToken = ''
+  private onlineUserId = ''
+  private sessionRevision = 0
   private metricsState: TranslationMetrics = {
     totalRequests: 0,
     providerCalls: 0,
@@ -46,8 +48,17 @@ export class TranslationEngine {
     this.onlineAccessToken = String(token || '').trim()
   }
 
+  setOnlineSession(userId?: string | null, token?: string | null): void {
+    const next = userId || ''
+    if (this.onlineUserId !== next) this.sessionRevision += 1
+    this.onlineUserId = next
+    this.setOnlineAccessToken(token)
+  }
+
   async translate(request: TranslationRequest): Promise<string> {
+    const revision = this.sessionRevision
     const settings = await this.settings.get()
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
     return this.translateWithSettings(request, settings, true)
   }
 
@@ -67,11 +78,13 @@ export class TranslationEngine {
     const context = (request.context || []).slice(-4).map((item) => `${item.role}:${item.text}`).join('\u241e')
     return createHash('sha256').update([
       provider,
+      this.onlineUserId,
       request.sourceLanguage || 'auto',
       request.targetLanguage,
       request.accountId || '',
       request.conversationId || '',
       request.messageId || '',
+      request.requestId || '',
       request.text,
       context
     ].join('\u241f')).digest('hex')
@@ -91,6 +104,7 @@ export class TranslationEngine {
   }
 
   private async translateWithSettings(request: TranslationRequest, settings: AppSettings, useCache: boolean): Promise<string> {
+    const revision = this.sessionRevision
     const text = request.text.trim()
     if (!text) return request.text
     const normalized: TranslationRequest = {
@@ -134,6 +148,7 @@ export class TranslationEngine {
       const cloudManaged = settings.provider === 'openai'
       let reserved = false
       try {
+        if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
         if (!cloudManaged) {
           await this.profile.ensureAvailable(charge, this.reservedCharacters)
           this.reservedCharacters += charge
@@ -141,7 +156,7 @@ export class TranslationEngine {
         }
 
         this.metricsState.providerCalls += 1
-        const provider = this.createProvider(settings)
+        const provider = this.createProvider(settings, revision)
         const translated = await provider.translate(normalized)
         const latency = Date.now() - started
         this.recordLatency(latency)
@@ -223,10 +238,13 @@ export class TranslationEngine {
     }
   }
 
-  private createProvider(settings: AppSettings): TranslationProvider {
+  private createProvider(settings: AppSettings, revision = this.sessionRevision): TranslationProvider {
     if (settings.provider === 'openai') {
       if (!this.onlineAccessToken) throw new Error('在线登录令牌缺失，请重新登录。')
-      return new CloudflareProvider(this.onlineAccessToken)
+      return new CloudflareProvider(() => {
+        if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+        return this.onlineAccessToken
+      })
     }
 
     if (settings.provider === 'deepl') {

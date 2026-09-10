@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { createTransientSupabase, requireSupabase, supabaseConfigured } from '../lib/supabase'
+import { authStorage, createTransientSupabase, requireSupabase, supabaseConfigured } from '../lib/supabase'
 
 type Mode = 'login' | 'register' | 'verify-signup' | 'recover-request' | 'recover-verify' | 'recover-password' | 'recovered-username'
 type LoginType = 'username' | 'email'
@@ -65,16 +65,11 @@ function go(next: Mode) {
 
 async function finishSession(session: any) {
   if (!session?.user?.id || !session?.access_token) throw new Error('没有获得有效登录会话，请重试。')
-  await window.desktopAPI.authSetOnlineSession({
-    userId: session.user.id,
-    email: session.user.email,
-    username: String(session.user.user_metadata?.username || ''),
-    accessToken: session.access_token
-  })
-  emit('authenticated', { authenticated: true, source: 'supabase', user: session.user })
+  emit('authenticated', session)
 }
 
 async function login() {
+  if (busy.value) return
   busy.value = true; clearStatus()
   try {
     validateCaptcha()
@@ -83,6 +78,7 @@ async function login() {
     const clean = cleanEmail(identifier.value)
     validateEmail(clean)
     const client = requireSupabase()
+    authStorage.setRemember(remember.value)
     const { data, error: authError } = await client.auth.signInWithPassword({ email: clean, password: password.value })
     if (authError) throw authError
     await finishSession(data.session)
@@ -92,6 +88,7 @@ async function login() {
 }
 
 async function register() {
+  if (busy.value) return
   busy.value = true; clearStatus()
   try {
     validateCaptcha()
@@ -103,6 +100,7 @@ async function register() {
     if (password.value.length < 8) throw new Error('密码至少 8 个字符。')
     if (password.value !== confirmPassword.value) throw new Error('两次输入的密码不一致。')
     const client = requireSupabase()
+    authStorage.setRemember(remember.value)
     const { data, error: authError } = await client.auth.signUp({
       email: clean,
       password: password.value,
