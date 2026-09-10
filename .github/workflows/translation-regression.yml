@@ -6,6 +6,8 @@ on:
       - 'server/worker/**'
       - 'supabase/migrations/**'
       - 'src/main/translation/**'
+      - 'src/main/accounts/**'
+      - 'src/main/network/**'
       - 'src/main/platforms/**'
       - 'src/main/storage/**'
       - 'src/main/ipc.ts'

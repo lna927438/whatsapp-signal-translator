@@ -1,3 +1,4 @@
+import type { AccountProxy } from './network/accountProxy'
 export type Platform = 'whatsapp' | 'signal'
 
 export type TranslationProviderName = 'openai' | 'deepl' | 'google'
@@ -14,6 +15,8 @@ export interface AccountRecord {
   platform: Platform
   label: string
   signalAccount?: string
+  proxy?: AccountProxy
+  toolbarCollapsed?: boolean
   localLanguage?: string
   targetLanguage?: string
   receiveAutoTranslate?: boolean

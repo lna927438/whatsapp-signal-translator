@@ -1,4 +1,5 @@
-import { BrowserWindow, WebContentsView } from 'electron'
+import { configureProxySession, normalizeProxy, proxyAuthMatches } from '../../network/accountProxy'
+import { app, net, session, Menu, BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
 import { whatsappInjectionScript } from './inject/script'
 import { SendNotStartedError, type SendTask } from '../../translation/sendTasks'
@@ -11,6 +12,49 @@ function chromeUserAgent(): string {
 
 
 export class WhatsAppAdapter {
+  private passwordReader: (id: string) => Promise<string> = async () => ''
+  constructor() {
+    app.on('login', (event, contents, _details, authInfo, callback) => {
+      const entry = [...this.views.entries()].find(([, view]) => view.webContents === contents)
+      if (!entry) return
+      const proxy = this.preferences.get(entry[0])?.proxy
+      if (!proxy || !proxyAuthMatches(proxy, authInfo)) return
+      event.preventDefault()
+      void this.passwordReader(entry[0]).then(password => callback(proxy.username || '', password)).catch(() => callback())
+    })
+  }
+  setPasswordReader(reader: (id: string) => Promise<string>) { this.passwordReader = reader }
+  async testProxy(input: any, password: string): Promise<{ ip: string; latencyMs: number }> {
+    const proxy = normalizeProxy(input)
+    if (!proxy.enabled) throw new Error('请先启用并填写代理。')
+    const ses = session.fromPartition(`proxy-test:${Date.now()}:${Math.random()}`, { cache: false })
+    const started = Date.now()
+    await configureProxySession(ses, proxy)
+    try {
+      return await new Promise((resolve, reject) => {
+        const request = net.request({ url: 'https://api.ipify.org?format=json', session: ses })
+        const timer = setTimeout(() => { request.abort(); reject(new Error('代理检测超时，请检查主机、端口和认证。')) }, 12000)
+        const fail = () => { clearTimeout(timer); reject(new Error('代理连接失败，请检查地址、端口或账号密码。')) }
+        request.on('login', (info, callback) => proxyAuthMatches(proxy, info) ? callback(proxy.username || '', password) : callback())
+        request.on('error', fail)
+        request.on('response', response => {
+          let body = ''
+          response.on('data', chunk => { body += chunk.toString(); if (body.length > 4096) { request.abort(); fail() } })
+          response.on('error', fail)
+          response.on('end', () => {
+            clearTimeout(timer)
+            try {
+              const ip = JSON.parse(body).ip
+              if (response.statusCode !== 200 || typeof ip !== 'string' || !/^[0-9a-fA-F:.]+$/.test(ip)) throw new Error()
+              resolve({ ip, latencyMs: Date.now() - started })
+            } catch { fail() }
+          })
+        })
+        request.end()
+      })
+    } finally { await ses.closeAllConnections() }
+  }
+
   private readonly views = new Map<string, WebContentsView>()
   private activeId?: string
   private mainWindow?: BrowserWindow
@@ -57,7 +101,17 @@ export class WhatsAppAdapter {
       const userAgent = chromeUserAgent()
       view.webContents.setUserAgent(userAgent)
       view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
-      await view.webContents.loadURL('https://web.whatsapp.com/', { userAgent })
+      try {
+        const proxy = this.preferences.get(accountId)?.proxy
+        await configureProxySession(view.webContents.session, proxy)
+        view.webContents.setWebRTCIPHandlingPolicy(proxy?.enabled ? 'disable_non_proxied_udp' : 'default')
+        await view.webContents.loadURL('https://web.whatsapp.com/', { userAgent })
+      } catch {
+        const obsolete = revision !== this.focusRevision
+        if (this.views.get(accountId) === view) this.remove(accountId)
+        if (obsolete) return
+        throw new Error('WhatsApp 加载失败，请检查账号代理或网络后重新打开。')
+      }
     }
     if (revision !== this.focusRevision || view.webContents.isDestroyed()) return
     this.activeId = accountId
@@ -186,7 +240,10 @@ export class WhatsAppAdapter {
         console.error('WhatsApp injection failed', error)
       }
     })
-    view.webContents.on('context-menu', () => this.menuHandler?.(accountId))
+    view.webContents.on('context-menu', (_event, params) => {
+      if (params.isEditable) Menu.buildFromTemplate([{ role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { type: 'separator' }, { role: 'selectAll', label: '全选' }]).popup({ window: this.mainWindow })
+      else if (params.selectionText) Menu.buildFromTemplate([{ role: 'copy', label: '复制所选文字' }]).popup({ window: this.mainWindow })
+    })
     return view
   }
 
