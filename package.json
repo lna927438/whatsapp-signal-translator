@@ -1,9 +1,9 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.5.1",
+  "version": "0.5.2-beta.1",
   "private": true,
   "author": "lna927438",
-  "description": "HelloDog \u2014 a friendly workspace for cross-language chats",
+  "description": "HelloDog — a friendly workspace for cross-language chats",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

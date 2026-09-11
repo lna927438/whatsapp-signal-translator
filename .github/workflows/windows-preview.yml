@@ -1,0 +1,57 @@
+name: Windows test installer
+on:
+  push:
+    branches: ['fix/quiet-send-review']
+    paths:
+      - '.github/workflows/windows-preview.yml'
+      - 'package.json'
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix tests --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck --prefix tests
+      - run: npm test --prefix tests
+  installer:
+    needs: regression
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate login configuration
+        shell: pwsh
+        run: |
+          if (-not $env:VITE_SUPABASE_URL -or -not $env:VITE_SUPABASE_PUBLISHABLE_KEY) { throw 'Missing public login configuration' }
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run dist:win
+      - name: Record installer checksum and source
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem release -Filter '*.exe'
+          if (-not $files) { throw 'No installer generated' }
+          $files | ForEach-Object { $hash = Get-FileHash $_.FullName -Algorithm SHA256; "$($hash.Hash.ToLower())  $($_.Name)" } | Set-Content release/SHA256SUMS.txt
+          "Source commit: $env:GITHUB_SHA`nTest build: 0.5.2-beta.1`nNo website or production deployment." | Set-Content release/BUILD-INFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HelloDog-0.5.2-beta.1-Windows
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+            release/BUILD-INFO.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

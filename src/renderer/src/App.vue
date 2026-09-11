@@ -446,7 +446,7 @@ onUnmounted(() => {
       <div class="sidebar-bottom">
         <button class="profile-btn" @click="openProfile" title="个人中心与字符余额"><UiIcon name="user" /><span><b>个人中心</b><small>剩余 {{ remainingCharsLabel }} 字符</small></span></button>
         <button class="settings-btn" @click="openSettings" title="设置与连接诊断"><UiIcon name="settings" /><span>设置与连接</span></button>
-        <small class="version-label">{{ collapsed ? '0.5.1' : 'HelloDog · v0.5.1' }}</small>
+        <small class="version-label">{{ collapsed ? '0.5.2-beta.1' : 'HelloDog · v0.5.2-beta.1' }}</small>
       </div>
       <div v-if="!collapsed" class="sidebar-resizer" role="separator" aria-label="调整账号侧栏宽度" aria-orientation="vertical" :aria-valuenow="sidebarWidth" :aria-valuemin="180" :aria-valuemax="340" tabindex="0" @pointerdown="resizeSidebar" @keydown="resizeSidebarKey"></div>
     </aside>
