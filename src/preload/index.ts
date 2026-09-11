@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onSignalMessage: (callback: (msg: any) => void) => { const fn = (_e: any, msg: any) => callback(msg); ipcRenderer.on('signal:message', fn); return () => ipcRenderer.removeListener('signal:message', fn) },
   onWhatsAppConversation: (callback: (info: any) => void) => { const fn = (_e: any, info: any) => callback(info); ipcRenderer.on('whatsapp:conversation', fn); return () => ipcRenderer.removeListener('whatsapp:conversation', fn) },
   onContactLanguage: (callback: (info: any) => void) => { const fn = (_e: any, info: any) => callback(info); ipcRenderer.on('accounts:contact-language', fn); return () => ipcRenderer.removeListener('accounts:contact-language', fn) },
+  onBillingChanged: (callback: () => void) => { const fn = () => callback(); ipcRenderer.on('billing:changed', fn); return () => ipcRenderer.removeListener('billing:changed', fn) },
   onTranslatorStatus: (callback: (status: any) => void) => { const fn = (_e: any, status: any) => callback(status); ipcRenderer.on('translator:status', fn); return () => ipcRenderer.removeListener('translator:status', fn) },
   onTranslatorError: (callback: (msg: string) => void) => { const fn = (_e: any, msg: string) => callback(msg); ipcRenderer.on('translator:error', fn); return () => ipcRenderer.removeListener('translator:error', fn) }
 })

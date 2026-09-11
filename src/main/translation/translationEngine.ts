@@ -46,6 +46,10 @@ export class TranslationEngine {
     lastUpdatedAt: Date.now()
   }
 
+  private billingChanged?: () => void
+  onBillingChanged(callback: () => void): void { this.billingChanged = callback }
+  private notifyBilling(): void { try { this.billingChanged?.() } catch { /* UI must not affect settlement */ } }
+
   setOnlineAccessToken(token?: string | null): void {
     this.onlineAccessToken = String(token || '').trim()
   }
@@ -174,7 +178,10 @@ export class TranslationEngine {
 
         this.metricsState.providerCalls += 1
         const provider = this.createProvider(settings, revision)
-        const translated = await provider.translate(normalized)
+        if (cloudManaged) this.notifyBilling()
+        let translated: string
+        try { translated = await provider.translate(normalized) }
+        finally { if (cloudManaged && revision === this.sessionRevision) this.notifyBilling() }
         const latency = Date.now() - started
         this.recordLatency(latency)
         this.metricsState.lastError = undefined

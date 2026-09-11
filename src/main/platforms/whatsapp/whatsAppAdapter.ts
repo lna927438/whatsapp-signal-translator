@@ -207,6 +207,7 @@ export class WhatsAppAdapter {
         additionalArguments: [`--rt-account-id=${accountId}`],
         contextIsolation: true,
         nodeIntegration: false,
+        backgroundThrottling: false,
         sandbox: false
       }
     })

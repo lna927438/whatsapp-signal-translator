@@ -29,6 +29,7 @@ type OnlineIdentity = { userId: string; email?: string; username?: string; acces
 
 
 export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
+  translator.onBillingChanged(() => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('billing:changed') })
   const accounts = new AccountManager()
   const settings = new SettingsStore()
   const profile = new ProfileStore()

@@ -64,6 +64,7 @@ export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'f
   notificationSound?: boolean
   autoStart?: boolean
   startMinimized?: boolean
+  closeBehaviorVersion?: number
   closeToTray?: boolean
   cloudRoute?: 'auto' | 'primary' | 'backup'
   groupTranslate?: boolean

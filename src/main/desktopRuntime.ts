@@ -7,9 +7,10 @@ let window: BrowserWindow | undefined
 let quitting = false
 export function applyDesktopOptions(value: Partial<AppSettings>) {
   if (process.platform === 'win32' || process.platform === 'darwin') app.setLoginItemSettings({ openAtLogin: value.autoStart === true })
+  preferences = { ...value }
   if (value.closeToTray && !tray) {
     const icon = nativeImage.createFromPath(join(__dirname, '../../resources/brand/hellodog-icon.png')).resize({ width: 20, height: 20 })
-    if (icon.isEmpty()) throw new Error('托盘图标不可用，未启用关闭到托盘。')
+    if (icon.isEmpty()) throw new Error('托盘图标不可用，关闭窗口将改为任务栏最小化。')
     tray = new Tray(icon); tray.setToolTip('HelloDog')
     tray.setContextMenu(Menu.buildFromTemplate([{ label: '打开 HelloDog', click: () => { window?.show(); window?.focus() } }, { label: '退出 HelloDog', click: () => { quitting = true; app.quit() } }]))
     tray.on('double-click', () => { window?.show(); window?.focus() })
@@ -19,7 +20,7 @@ export function applyDesktopOptions(value: Partial<AppSettings>) {
 export function attachDesktopRuntime(main: BrowserWindow) {
   window = main
   app.on('before-quit', () => { quitting = true })
-  main.on('close', event => { if (!quitting && preferences.closeToTray && tray) { event.preventDefault(); main.hide() } })
+  main.on('close', event => { if (!quitting && preferences.closeToTray !== false) { event.preventDefault(); if (tray) main.hide(); else main.minimize() } })
 }
 export function shouldStartMinimized() { return preferences.startMinimized === true }
 export function notifyAccount(accountId: string, label: string) {

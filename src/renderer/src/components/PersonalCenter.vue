@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { requireSupabase, signOutThisDevice, supabaseConfigured } from '../lib/supabase'
 import { cloudApi } from '../lib/cloudApi'
 
@@ -14,6 +14,14 @@ const busy = ref(false)
 const message = ref('')
 const cloudError = ref('')
 const usageError = ref('')
+const syncing = ref(false)
+const lastSyncedAt = ref('')
+let refreshAgain = false
+let disposed = false
+let revision = 0
+let poll: ReturnType<typeof setInterval> | undefined
+let unsubscribe: (() => void) | undefined
+function invalidate() { revision++; syncing.value = true; if (busy.value) refreshAgain = true; else void reload() }
 
 const formatter = new Intl.NumberFormat('zh-CN')
 const remaining = computed(() => Number(cloudState.value?.wallet?.balance || 0))
@@ -33,23 +41,34 @@ function formatDate(value: string | number | undefined) {
 async function reload() {
   if (busy.value) return
   busy.value = true
+  syncing.value = true
+  const current = revision
   cloudError.value = ''
   try {
     localProfile.value = (await window.desktopAPI.authStatus())?.user || localProfile.value
-    cloudState.value = await cloudApi.me()
+    const nextState = await cloudApi.me()
+    if (disposed || current !== revision) return
+    cloudState.value = nextState
     try {
       const usageResult = await cloudApi.usage()
-      cloudUsage.value = Array.isArray(usageResult?.usage) ? usageResult.usage : []
+      if (disposed || current !== revision) return
+      if (!Array.isArray(usageResult?.usage)) throw new Error('使用记录响应无效')
+      cloudUsage.value = usageResult.usage
       usageError.value = ''
+      lastSyncedAt.value = new Date().toLocaleTimeString()
     } catch { usageError.value = '使用记录暂未同步，请重新同步后查看。' }
-    username.value = profile.value?.username || localProfile.value?.username || ''
-    email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
+    if (!editing.value) {
+      username.value = profile.value?.username || localProfile.value?.username || ''
+      email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
+    }
   } catch (error: any) {
     cloudError.value = error?.message || String(error)
     username.value = localProfile.value?.username || ''
     email.value = localProfile.value?.email || ''
   } finally {
     busy.value = false
+    syncing.value = current !== revision
+    if (refreshAgain && !disposed) { refreshAgain = false; void reload() }
   }
 }
 
@@ -90,7 +109,8 @@ async function logout() {
   }
 }
 
-onMounted(reload)
+onMounted(() => { void reload(); unsubscribe = window.desktopAPI.onBillingChanged(invalidate); window.addEventListener('focus', invalidate); window.addEventListener('online', invalidate); poll = setInterval(() => { if (!busy.value) void reload() }, 5000) })
+onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(poll); window.removeEventListener('focus', invalidate); window.removeEventListener('online', invalidate) })
 </script>
 
 <template>
@@ -105,7 +125,7 @@ onMounted(reload)
         <div v-if="cloudError" class="api-message error">账户暂未同步：{{ cloudError }} <button :disabled="busy" @click="reload">重新同步</button></div>
 
         <div class="quota-hero">
-          <div><small>{{ cloudError ? '上次同步的剩余字符数' : '云端剩余字符数' }}</small><strong>{{ cloudState ? formatChars(remaining) : '未同步' }}</strong><span>{{ profile?.plan_code || '—' }}</span></div>
+          <div><small>{{ (cloudError || syncing) ? '上次确认的剩余字符数（待同步）' : '云端剩余字符数' }}</small><strong>{{ cloudState ? formatChars(remaining) : '未同步' }}</strong><span>{{ profile?.plan_code || '—' }}</span></div>
           <div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ cloudState ? (total > 0 ? 100 - usedPercent : 0) + '%' : '—' }}</b><small>剩余</small></div>
         </div>
         <div class="quota-progress"><i :style="{ width: usedPercent + '%' }"></i></div>
@@ -117,7 +137,7 @@ onMounted(reload)
           <div class="profile-row"><span>套餐类型</span><b>{{ profile?.plan_code || '未同步' }}</b></div>
           <div class="profile-row"><span>账号状态</span><b>{{ profile?.status || '未同步' }}</b></div>
           <div class="profile-row"><span>注册时间</span><b>{{ formatDate(profile?.created_at) }}</b></div>
-          <div class="profile-row"><span>云端服务</span><b>{{ cloudError ? '等待重新连接' : cloudState ? '已同步' : '同步中' }}</b></div>
+          <div class="profile-row"><span>云端服务</span><b>{{ cloudError ? '等待重新连接' : syncing ? '同步中' : cloudState ? '已同步' : '同步中' }}</b></div>
         </div>
 
         <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">账号中心</button><button class="personal-secondary" disabled title="支付系统接入后开放">充值即将开放</button></div>
@@ -130,6 +150,7 @@ onMounted(reload)
         </div>
 
         <div class="usage-history">
+          <p>{{ syncing ? "正在同步云端余额与使用记录…" : lastSyncedAt ? "上次同步：" + lastSyncedAt : "等待云端同步" }}</p>
           <p v-if="usageError" class="api-message error">{{ usageError }}</p>
           <div class="section-title"><div><strong>最近云端翻译消耗</strong><small>最近 {{ Math.min(cloudUsage.length, 50) }} 条</small></div></div>
           <div v-if="cloudUsage.length" class="usage-list">

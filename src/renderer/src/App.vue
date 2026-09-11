@@ -224,6 +224,7 @@ async function reloadSettings() {
   if (!languages.value.length) languages.value = await window.desktopAPI.getLanguages()
 }
 
+function invalidateProfile() { void profileSync.invalidate(async () => cloudProfileFromState(await cloudApi.me())) }
 async function reloadProfile() {
   return profileSync.refresh(async () => cloudProfileFromState(await cloudApi.me()))
 }
@@ -362,6 +363,9 @@ function onProfileUpdated(next: any) {
 
 onMounted(async () => {
   window.addEventListener('keydown', onShortcut)
+  window.addEventListener('focus', invalidateProfile)
+  window.addEventListener('online', invalidateProfile)
+  subscriptions.push(window.desktopAPI.onBillingChanged(invalidateProfile))
   boundsObserver = new ResizeObserver(updateBounds)
   if (contentArea.value) boundsObserver.observe(contentArea.value)
   updateBounds()
@@ -379,7 +383,7 @@ onMounted(async () => {
     if (event.action === 'diagnose') await openSettings()
   }))
   metricsTimer = setInterval(() => { void reloadMetrics() }, 1500)
-  walletTimer = setInterval(() => { void reloadProfile() }, 15000)
+  walletTimer = setInterval(() => { void reloadProfile() }, 5000)
   subscriptions.push(window.desktopAPI.onWhatsAppConversation((info: any) => {
     if (!info?.accountId || !info?.conversationId) return
     conversations.value = { ...conversations.value, [info.accountId]: { id: info.conversationId, name: info.conversationName } }
@@ -411,6 +415,8 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true
   window.removeEventListener('keydown', onShortcut)
+  window.removeEventListener('focus', invalidateProfile)
+  window.removeEventListener('online', invalidateProfile)
   boundsObserver?.disconnect()
   cancelAnimationFrame(boundsFrame)
   subscriptions.forEach(unsubscribe => unsubscribe())

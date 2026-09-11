@@ -56,7 +56,7 @@ test('global settings categories save real translation, notification and desktop
  try{await settle();assert.ok(root.querySelector('.settings-scroll'));input(root.querySelector('select option[value="manual"]')!.parentElement,'manual')
  const toggle=Array.from(root.querySelectorAll('label')).find(x=>x.textContent?.includes('发送前展开译文预览'))!.querySelector('input')!;toggle.click()
  click('通知');await settle();input(root.querySelector('select option[value="off"]')!.parentElement,'off')
- click('运行');await settle();Array.from(root.querySelectorAll('label')).find(x=>x.textContent?.includes('关闭窗口时保留'))!.querySelector('input')!.click()
+ click('运行');await settle();Array.from(root.querySelectorAll('label')).find(x=>x.textContent?.includes('点击右上角 X'))!.querySelector('input')!.click()
  click('数据');await settle();click('清理我的翻译缓存…');await settle();assert.equal(cleared,0);click('确认清理');await settle();assert.equal(cleared,1)
  click('保存设置');await settle();assert.equal(saved.length,1);assert.equal(saved[0].historyMode,'manual');assert.equal(saved[0].previewSend,true);assert.equal(saved[0].notifications,'off');assert.equal(saved[0].closeToTray,true)
  }finally{app.unmount();root.remove()}

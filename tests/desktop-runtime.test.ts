@@ -14,3 +14,21 @@ test('desktop notification modes, click navigation and close-to-tray execute the
  runtime.applyDesktopOptions({notifications:'off',closeToTray:false});runtime.notifyAccount('a','Work');assert.equal(notifications.length,1);prevented=false;events.close({preventDefault:()=>{prevented=true}});assert.equal(prevented,false)
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
+
+test('X minimizes instead of exiting when the tray is unavailable, while explicit exit is allowed',()=>{
+ const events:Record<string,any>={},appEvents:Record<string,any>={};let minimized=0
+ const h=mainHarness({app:{on:(n:string,f:any)=>{appEvents[n]=f},setLoginItemSettings:()=>{}},Menu:{},nativeImage:{createFromPath:()=>({resize:()=>({isEmpty:()=>true})})}})
+ try{const runtime=h.load('src/main/desktopRuntime.ts');runtime.attachDesktopRuntime({on:(n:string,f:any)=>{events[n]=f},minimize:()=>{minimized++}})
+ assert.throws(()=>runtime.applyDesktopOptions({closeToTray:true}),/任务栏最小化/)
+ let prevented=false;events.close({preventDefault:()=>{prevented=true}});assert.equal(prevented,true);assert.equal(minimized,1)
+ appEvents['before-quit']();prevented=false;events.close({preventDefault:()=>{prevented=true}});assert.equal(prevented,false)
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('existing settings migrate to background close, while a new explicit opt-out persists',async()=>{
+ const h=mainHarness()
+ try{const {SettingsStore}=h.load('src/main/storage/settingsStore.ts');const store=new SettingsStore();const initial=await store.get();assert.equal(initial.closeToTray,true)
+ await store.save({...initial,closeToTray:false,closeBehaviorVersion:undefined});assert.equal((await store.get()).closeToTray,true)
+ await store.save({...initial,closeToTray:false,closeBehaviorVersion:1});assert.equal((await store.get()).closeToTray,false)
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})

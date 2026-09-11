@@ -26,3 +26,23 @@ test('slow balance refreshes coalesce and cannot overwrite a newer confirmed wal
   await Promise.all([first, second])
   assert.deepEqual(changes.at(-1), { value: { balance: 50 }, synced: true })
 })
+
+test('settlement during a pending fetch invalidates its response and guarantees one trailing fetch', async () => {
+  const changes: any[] = []; let finish!: (n: number) => void; let calls = 0
+  const state = new RemoteSnapshot<number>((value, synced) => changes.push({value,synced}))
+  const pending = state.refresh(() => new Promise(resolve => { finish=resolve }))
+  await Promise.resolve()
+  state.invalidate(async()=>{calls++;return 80})
+  state.invalidate(async()=>{calls++;return 70})
+  finish(100); await pending
+  assert.equal(calls,1)
+  assert.equal(changes.some(x=>x.value===100),false)
+  assert.deepEqual(changes.at(-1),{value:70,synced:true})
+})
+
+test('lost connectivity after settlement keeps the confirmed value explicitly unsynced', async () => {
+ const changes:any[]=[];const state=new RemoteSnapshot<number>((value,synced)=>changes.push({value,synced}))
+ state.accept(100);await state.invalidate(async()=>{throw new Error('offline')})
+ assert.deepEqual(changes.at(-1),{value:100,synced:false})
+ await state.invalidate(async()=>90);assert.deepEqual(changes.at(-1),{value:90,synced:true})
+})

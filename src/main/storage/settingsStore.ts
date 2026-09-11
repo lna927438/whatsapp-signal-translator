@@ -5,7 +5,7 @@ import type { AppSettings, RuntimeSettings } from '../types'
 
 const defaults: AppSettings = {
   historyMode: 'new', previewSend: false, backTranslation: false,
-  notifications: 'background', notificationSound: false, autoStart: false, startMinimized: false, closeToTray: false,
+  notifications: 'background', notificationSound: false, autoStart: false, startMinimized: false, closeToTray: true, closeBehaviorVersion: 1,
   localLanguage: 'zh-CN',
   targetLanguage: 'en-US',
   provider: 'openai',
@@ -42,7 +42,8 @@ export class SettingsStore {
       } else {
         return envMerged
       }
-      return { ...envMerged, ...JSON.parse(json) }
+      const saved = JSON.parse(json)
+      return { ...envMerged, ...saved, ...(saved.closeBehaviorVersion === 1 ? {} : { closeToTray: true, closeBehaviorVersion: 1 }) }
     } catch {
       return envMerged
     }
