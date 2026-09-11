@@ -14,6 +14,7 @@ function harness(secure = true) {
   runInNewContext(code, {
     exports, Buffer, process,
     require(name: string) {
+      if (name === '../../shared/accountConfig') return require('../src/shared/accountConfig.ts')
       if (name === 'electron') return { safeStorage: {
         isEncryptionAvailable: () => secure,
         getSelectedStorageBackend: () => 'test-keychain',
@@ -52,4 +53,16 @@ test('unavailable secure storage refuses to save a password without creating a p
   await assert.rejects(h.manager.add('whatsapp', 'Work', undefined, { proxy: { enabled: true, host: 'proxy.example', port: 8080, password: 'test-password' } }), /安全存储/)
   assert.deepEqual(h.saved(), [])
   assert.deepEqual(h.encrypted, [])
+})
+
+
+test('batch creation is atomic, validates limits and isolates IDs while preserving pin/group', async () => {
+  const h = harness()
+  const created = await h.manager.addBatch('whatsapp','Team',3,{group:'Sales',pinned:true})
+  assert.equal(created.length,3); assert.equal(new Set(created.map((a:any)=>a.id)).size,3)
+  assert.equal(created[2].label,'Team 3'); assert.equal(created[0].group,'Sales'); assert.equal(created[0].pinned,true)
+  await assert.rejects(h.manager.addBatch('whatsapp','Bad',21,{}))
+  assert.equal(h.saved().length,3)
+  await assert.rejects(h.manager.addBatch('whatsapp','Proxy',2,{proxy:{enabled:true,host:'bad/path',port:80}}))
+  assert.equal(h.saved().length,3)
 })

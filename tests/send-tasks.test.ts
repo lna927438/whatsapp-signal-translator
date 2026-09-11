@@ -131,3 +131,15 @@ test('an initially empty WhatsApp chat retains its saved task when its stable ad
   assert.equal(first.id, resumed.id)
   assert.equal((await tasks.pending('user', input.accountId, 'wa:alex', 'peer:alex@c.us'))?.id, first.id)
 })
+
+
+test('editing preview retains original translation charge identity and cannot alter a submitted task', async () => {
+  const {tasks}=fixture();const task=await tasks.prepare('user',input)
+  let calls=0;await tasks.translate('user',task.id,async()=>{calls++;return 'first translation'},allowed)
+  const edited=await tasks.editPreview('user',task.id,'reviewed translation')
+  assert.equal(edited.request.requestId,task.request.requestId);assert.equal(edited.request.text,input.request.text)
+  const sent=await tasks.submit('user',task.id,async(value)=>{assert.equal(value.translated,'reviewed translation');return {ok:true}},allowed)
+  assert.equal(calls,1);assert.equal(sent.state,'sent')
+  await assert.rejects(tasks.editPreview('user',task.id,'too late'))
+  await assert.rejects(tasks.editPreview('other-user',task.id,'not owned'))
+})

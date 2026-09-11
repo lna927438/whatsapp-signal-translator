@@ -55,6 +55,15 @@ export class SendTasks {
     return task
   }
 
+  editPreview(owner: string, id: string, text: string): Promise<SendTask> {
+    return this.transaction(data => {
+      const task = this.owned(data, owner, id)
+      if (task.state !== 'ready' || typeof text !== 'string' || !text.trim() || text.length > 10000) throw new Error('仅可编辑待发送译文。')
+      task.translated = text.trim(); task.updatedAt = Date.now()
+      return task
+    })
+  }
+
   prepare(owner: string, input: NewSendTask): Promise<SendTask> {
     return this.transaction(data => {
       if (!owner || !input.accountId || !input.conversationId || !input.request.text.trim()) {

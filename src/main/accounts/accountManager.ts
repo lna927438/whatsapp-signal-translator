@@ -1,3 +1,4 @@
+import { accountNames } from '../../shared/accountConfig'
 import { safeStorage } from 'electron'
 import { normalizeProxy } from '../network/accountProxy'
 import { randomUUID } from 'crypto'
@@ -36,6 +37,17 @@ export class AccountManager {
       accounts.push(record)
       await this.store.write(accounts)
       return this.publicRecord(record)
+    })
+  }
+
+  async addBatch(platform: Platform, label: string, count: number, options: any): Promise<AccountRecord[]> {
+    const names = accountNames(label, count)
+    const prepared = this.preparePatch(options)
+    return this.serialized(async () => {
+      const all = await this.store.read()
+      const created = names.map(name => ({ localLanguage: 'zh-CN', targetLanguage: 'en-US', receiveAutoTranslate: true, sendAutoTranslate: true, blockChineseSend: true, groupTranslate: false, fontSize: 13, translationColor: '#7eada0', ...prepared, id: randomUUID(), platform, label: name, createdAt: Date.now() }))
+      await this.store.write([...all, ...created])
+      return created.map(record => this.publicRecord(record))
     })
   }
 
@@ -94,9 +106,11 @@ export class AccountManager {
 
   private preparePatch(input: any): Partial<AccountRecord> & { proxySecret?: string } {
     const out: any = {}
-    for (const key of ['label','signalAccount','localLanguage','targetLanguage','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','translationsVisible','zoomFactor','toolbarCollapsed']) {
+    for (const key of ['pinned','group','label','signalAccount','localLanguage','targetLanguage','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','translationsVisible','zoomFactor','toolbarCollapsed']) {
       if (input[key] !== undefined) out[key] = input[key]
     }
+    if (out.group !== undefined) out.group = String(out.group).trim().slice(0, 30)
+    if (out.pinned !== undefined) out.pinned = out.pinned === true
     if (out.label !== undefined) { out.label = String(out.label).trim().slice(0, 60); if (!out.label) throw new Error('请输入账号名称。') }
     if (input.proxy !== undefined) {
       out.proxy = normalizeProxy(input.proxy)

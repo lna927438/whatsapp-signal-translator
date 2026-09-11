@@ -79,3 +79,22 @@
 .app-shell .personal-logout{background:#382c29;color:#f2b39b;border-color:#715247}.app-shell .personal-logout:hover{background:#49362e}
 .app-shell .personal-message{background:var(--accent-soft);color:var(--accent)}.app-shell .account-editor input{background:var(--field);color:var(--text);border-color:var(--border)}
 .app-shell .usage-history th,.app-shell .usage-history td{border-color:var(--border);color:var(--muted)}
+
+/* A fieldset cannot be relied on as a shrinking flex scroll container. */
+.account-setup{height:min(850px,calc(100dvh - 32px));max-height:calc(100dvh - 32px)}
+.account-setup .setup-header,.account-setup .setup-footer{flex:0 0 auto}
+.account-setup .setup-scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.account-setup .setup-body{overflow:visible;min-width:0;padding:0 24px 20px}
+.app-shell .workspace-header{min-height:48px;padding:8px 14px}.app-shell .workspace-kicker{display:none}.app-shell .workspace-header h1{font-size:15px;margin:0}
+.app-shell .workspace-status{min-height:26px;padding:4px 12px}.app-shell .account-toolbar{padding:10px 14px;gap:10px}
+.app-shell.sidebar-collapsed{grid-template-columns:58px minmax(0,1fr)}
+.app-shell.sidebar-collapsed .sidebar{padding:8px 4px}.app-shell.sidebar-collapsed .brand{padding:0 0 10px}.app-shell.sidebar-collapsed .account-row{min-height:46px;margin-bottom:3px}
+.app-shell.sidebar-collapsed .platform-avatar{width:30px;height:30px}
+
+.app-shell .sidebar{position:relative;min-height:0}.sidebar-resizer{position:absolute;right:-3px;top:0;bottom:0;width:7px;cursor:col-resize;touch-action:none;z-index:3}.sidebar-resizer:hover,.sidebar-resizer:focus-visible{background:var(--accent)}
+.account-filters{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:8px 0}.account-filters select{min-width:0;background:var(--field);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px;font-size:11px}
+.account{position:relative}.unread-badge{position:absolute;top:1px;left:26px;padding:1px 4px;min-width:15px;border-radius:10px;background:#328264;color:white;font-size:9px}.app-shell .app-center{grid-column:1/-1;width:100%}.app-shell .app-center h2{font-size:22px}.platform-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:20px 0}.platform-cards button{display:grid;grid-template-columns:38px 1fr;gap:12px;text-align:left;padding:20px;background:var(--raised);color:var(--text);border:1px solid var(--border);border-radius:12px}.platform-cards img{width:32px;height:32px;background:#24835b;border-radius:8px;padding:4px}.platform-cards small{grid-column:2;color:var(--muted)}.template-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}.batch-create{margin-top:14px}.setup-scroll:focus-visible{outline:1px solid var(--accent);outline-offset:-2px}
+
+.app-shell .settings-panel{height:min(820px,calc(100dvh - 32px));max-height:calc(100dvh - 32px);display:flex;flex-direction:column;overflow:hidden;padding:0}.settings-panel>header,.settings-panel>footer,.settings-tabs{flex:0 0 auto}.settings-scroll{min-height:0;flex:1 1 0;overflow-y:auto;overscroll-behavior:contain;padding:18px 24px}.settings-tabs{display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--border)}.settings-tabs button{background:transparent;border:0;color:var(--muted);padding:8px 12px;border-radius:7px}.settings-tabs button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent)}.settings-group{display:grid;gap:16px}.settings-group p{font-size:12px;line-height:1.7}.settings-group .setup-toggle{display:flex;flex-direction:row;align-items:center;justify-content:space-between}
+
+.toolbar-advanced{position:relative;color:var(--muted);font-size:12px}.toolbar-advanced summary,.template-section summary{cursor:pointer;padding:8px 0}.toolbar-advanced[open]{flex-basis:100%}.toolbar-advanced .display-controls{padding-top:8px}.setup-error.notice{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}.signal-preview{padding:12px;border:1px solid #485b7d;border-radius:10px;max-height:300px;overflow-y:auto}.signal-preview button{margin:8px 8px 0 0}.signal-preview textarea{width:100%;min-height:60px}

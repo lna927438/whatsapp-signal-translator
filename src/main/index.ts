@@ -1,3 +1,5 @@
+import { SettingsStore } from './storage/settingsStore'
+import { applyDesktopOptions, attachDesktopRuntime, shouldStartMinimized } from './desktopRuntime'
 import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
@@ -80,7 +82,8 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  attachDesktopRuntime(mainWindow)
+  mainWindow.on('ready-to-show', () => { mainWindow?.show(); if (shouldStartMinimized()) mainWindow?.minimize() })
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { void shell.openExternal(url); return { action: 'deny' } })
   whatsapp.attachMainWindow(mainWindow)
   signal.attachMainWindow(mainWindow)
@@ -90,7 +93,8 @@ function createWindow(): void {
   else mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  try { applyDesktopOptions(await new SettingsStore().get()) } catch { /* Keep the window available if desktop integration is unsupported. */ }
   installChineseMenu()
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })

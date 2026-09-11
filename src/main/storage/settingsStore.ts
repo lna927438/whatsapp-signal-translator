@@ -4,6 +4,8 @@ import { join } from 'path'
 import type { AppSettings, RuntimeSettings } from '../types'
 
 const defaults: AppSettings = {
+  historyMode: 'new', previewSend: false, backTranslation: false,
+  notifications: 'background', notificationSound: false, autoStart: false, startMinimized: false, closeToTray: false,
   localLanguage: 'zh-CN',
   targetLanguage: 'en-US',
   provider: 'openai',
@@ -57,6 +59,7 @@ export class SettingsStore {
   async runtime(): Promise<RuntimeSettings> {
     const s = await this.get()
     return {
+      historyMode: s.historyMode, previewSend: s.previewSend, backTranslation: s.backTranslation,
       localLanguage: s.localLanguage,
       targetLanguage: s.targetLanguage,
       provider: s.provider,

@@ -17,6 +17,8 @@ export interface AccountRecord {
   signalAccount?: string
   proxy?: AccountProxy
   toolbarCollapsed?: boolean
+  pinned?: boolean
+  group?: string
   localLanguage?: string
   targetLanguage?: string
   receiveAutoTranslate?: boolean
@@ -42,6 +44,9 @@ export interface RuntimeSettings {
   fontSize: number
   translationColor: string
   translationsVisible?: boolean
+  historyMode?: 'new' | 'manual' | 'visible'
+  previewSend?: boolean
+  backTranslation?: boolean
   conversationId?: string
   conversationName?: string
   contactLanguageSource?: 'manual' | 'auto' | 'default'
@@ -55,6 +60,11 @@ export interface ProviderSettings {
 }
 
 export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor' | 'conversationId' | 'conversationName' | 'contactLanguageSource'>, ProviderSettings {
+  notifications?: 'off' | 'background' | 'always'
+  notificationSound?: boolean
+  autoStart?: boolean
+  startMinimized?: boolean
+  closeToTray?: boolean
   cloudRoute?: 'auto' | 'primary' | 'backup'
   groupTranslate?: boolean
   fontSize?: number
@@ -69,6 +79,8 @@ export interface TranslationContextItem {
 export interface TranslationRequest {
   /** Keep this ID when retrying one logical translation. */
   requestId?: string
+  /** Local cache namespace, never sent as an authorization claim. */
+  cacheUserId?: string
   text: string
   targetLanguage: string
   sourceLanguage?: string

@@ -166,6 +166,24 @@ async function cancelPending() {
   } catch (error: any) { status.value = error.message || String(error) }
 }
 
+const preview = ref<any>(null)
+const previewText = ref(''), backResult = ref(''), backBusy = ref(false)
+let finishPreview: ((value: string | null) => void) | undefined
+function choosePreview(value: string | null) { finishPreview?.(value); finishPreview = undefined; preview.value = null }
+async function backPreview() { if (!preview.value || backBusy.value) return; backBusy.value = true; const text = previewText.value; try { const value = await window.desktopAPI.backTranslateSend(preview.value.id, text); if (text === previewText.value) backResult.value = value } catch (e: any) { backResult.value = e.message } finally { backBusy.value = false } }
+watch(previewText, () => { backResult.value = '' })
+onUnmounted(() => choosePreview(null))
+
+const translatingMessages = ref(new Set<string>())
+async function translateMessage(message: any) {
+  const key = message.timestamp + ':' + message.peer
+  if (translatingMessages.value.has(key)) return
+  translatingMessages.value.add(key)
+  try { const translated = await window.desktopAPI.translateSignalMessage(props.accountRecord.id, message); messages.value = messages.value.map(item => item.timestamp === message.timestamp && item.peer === message.peer && !item.fromMe ? { ...item, translated } : item) }
+  catch (e: any) { status.value = e.message || '翻译失败' }
+  finally { translatingMessages.value.delete(key) }
+}
+
 async function send() {
   const text = input.value.trim()
   const current = scope()
@@ -182,6 +200,14 @@ async function send() {
     if (['uncertain', 'submitting'].includes(task.state)) { status.value = '请先核对上一次发送的结果。'; return }
     task = await window.desktopAPI.translateSend(task.id)
     if (disposed || current.account !== activeAccount.value || current.peer !== recipient.value.trim() || input.value.trim() !== text) throw new Error('对话或草稿已变化，译文已保存，没有发送。')
+    const settings = await window.desktopAPI.getSettings()
+    if (settings.previewSend && task.translate !== false) {
+      previewText.value = task.translated; backResult.value = ''; preview.value = { ...task, allowBack: settings.backTranslation }
+      const edited = await new Promise<string | null>(resolve => { finishPreview = resolve })
+      if (edited === null) { await window.desktopAPI.cancelSend(task.id); status.value = '已取消发送，原文已保留。'; return }
+      if (disposed || current.account !== activeAccount.value || current.peer !== recipient.value.trim() || input.value.trim() !== text) throw new Error('对话或草稿已变化，没有发送。')
+      task = await window.desktopAPI.editSendPreview(task.id, edited)
+    }
     status.value = '译文已确认，正在等待 Signal 发送确认…'
     const sent = await window.desktopAPI.submitSend(task.id)
     if (disposed) return
@@ -202,6 +228,7 @@ watch(input, value => {
   catch { status.value = '本地草稿保存失败，请先复制输入内容。'; }
 }, { flush: 'sync' })
 watch([activeAccount, recipient], () => {
+  choosePreview(null)
   input.value = readDraft(localStorage, scope())
   localStorage.setItem(peerKey, recipient.value)
   void recoverPending()
@@ -262,7 +289,7 @@ onUnmounted(() => {
     <template v-if="runtimeReady">
       <div class="signal-recipient"><label>对方手机号<input v-model="recipient" placeholder="例如 +1…" /></label></div>
       <div class="messages">
-        <div v-for="message in visibleMessages" :key="message.taskId || message.timestamp + ':' + message.peer + ':' + message.fromMe" class="msg" :class="{ mine: message.fromMe }"><div class="bubble"><div>{{ message.original }}</div><div v-if="message.translated && message.translated !== message.original" class="translated" :style="translatedStyle">{{ message.translated }}</div></div></div>
+        <div v-for="message in visibleMessages" :key="message.taskId || message.timestamp + ':' + message.peer + ':' + message.fromMe" class="msg" :class="{ mine: message.fromMe }"><div class="bubble"><div>{{ message.original }}</div><button v-if="!message.fromMe && !message.translated" :disabled="translatingMessages.has(message.timestamp + ':' + message.peer)" title="发起翻译，成功按字符计费" @click="translateMessage(message)">翻译此消息</button><div v-if="message.translated && message.translated !== message.original" class="translated" :style="translatedStyle">{{ message.translated }}</div></div></div>
       </div>
       <div v-if="uncertain" class="runtime-card" role="status">
         <p>上次发送结果未确认。请先在手机 Signal 的原对话中核对，避免重复发送。</p>
@@ -270,7 +297,7 @@ onUnmounted(() => {
         <button :disabled="sending" @click="resolvePending(false)">已核对未发送，允许重试</button>
       </div>
       <p v-else-if="pendingTask" class="status">原任务已保留；重试沿用原目标语言和已确认的译文。 <button :disabled="sending" @click="cancelPending">取消此待发送任务</button></p>
-      <div class="composer"><textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="输入中文，发送前自动翻译…"></textarea><button class="primary" :disabled="sending || uncertain || !input.trim() || !recipient.trim()" @click="send">{{ sending ? '处理中…' : '翻译并发送' }}</button></div>
+      <section v-if="preview" class="signal-preview"><label>原文<textarea :value="preview.request.text" readonly /></label><label>可编辑译文<textarea v-model="previewText" /></label><p v-if="backResult">{{ backResult }}</p><button class="primary" :disabled="!previewText.trim() || backBusy" @click="choosePreview(previewText.trim())">发送译文</button><button class="secondary" @click="choosePreview(null)">恢复原文 / 取消发送</button><button v-if="preview.allowBack" class="secondary" :disabled="backBusy" @click="backPreview">回翻核对（可能计费）</button></section><div class="composer"><textarea v-model="input" @keydown.enter.exact.prevent="send" placeholder="输入中文，发送前自动翻译…"></textarea><button class="primary" :disabled="sending || uncertain || !input.trim() || !recipient.trim()" @click="send">{{ sending ? '处理中…' : '翻译并发送' }}</button></div>
     </template>
   </div>
 </template>

@@ -1,3 +1,4 @@
+import { notifyAccount } from '../../desktopRuntime'
 import { BrowserWindow } from 'electron'
 import { SignalCli } from './signalCli'
 import type { SignalRuntimeStatus } from './signalRuntime'
@@ -20,6 +21,8 @@ export interface SignalMessage {
 }
 
 export class SignalAdapter {
+  private startedAt = Date.now()
+  private readonly receivedIds = new Set<string>()
   private readonly cli = new SignalCli()
   private readonly translator: TranslationEngine
   private readonly settings = new SettingsStore()
@@ -179,17 +182,17 @@ export class SignalAdapter {
     const runtime = await this.runtimeForRecord(recordId, conversationId)
     const context = recordId ? this.context(recordId, source) : []
     if (!stillCurrent()) return
-    const translated = runtime.receiveAutoTranslate
-      ? await this.translator.translate({
-          text,
-          sourceLanguage: 'auto',
-          targetLanguage: runtime.localLanguage,
-          accountId: recordId,
-          conversationId,
-          messageId: `${source}:${data.timestamp || envelope.timestamp || ''}`,
-          context
-        }).catch(() => undefined)
-      : undefined
+    const timestamp = Number(data.timestamp || envelope.timestamp || Date.now())
+    const messageId = `${source}:${timestamp}`
+    const receiptKey = `${recordId}:${messageId}:${Boolean(envelope.syncMessage?.sentMessage)}`
+    if (this.receivedIds.has(receiptKey)) return
+    const request = { text, sourceLanguage: 'auto', targetLanguage: runtime.localLanguage, accountId: recordId, conversationId, messageId, context }
+    let translated = await this.translator.cached(request).catch(() => undefined)
+    if (translated === undefined && runtime.receiveAutoTranslate && !envelope.syncMessage?.sentMessage
+      && runtime.historyMode !== 'manual' && (runtime.historyMode === 'visible' || timestamp >= this.startedAt)
+      && (!data.groupInfo || runtime.groupTranslate)) translated = await this.translator.translate(request).catch(() => undefined)
+    this.receivedIds.add(receiptKey)
+    if (this.receivedIds.size > 20000) this.receivedIds.delete(this.receivedIds.values().next().value!)
 
     if (!stillCurrent()) return
     if (recordId) this.remember(recordId, source, { role: envelope.syncMessage?.sentMessage ? 'outgoing' : 'incoming', text })
@@ -202,5 +205,6 @@ export class SignalAdapter {
       timestamp: Number(data.timestamp || envelope.timestamp || Date.now())
     }
     this.mainWindow?.webContents.send('signal:message', msg)
+    if (!msg.fromMe && recordId) notifyAccount(recordId, record?.label || 'Signal')
   }
 }

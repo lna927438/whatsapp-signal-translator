@@ -15,6 +15,12 @@ export const whatsappInjectionScript = String.raw`
   let incomingRetryAt = 0;
   let incomingFailures = 0;
   const incomingRequests = new WeakMap();
+  const historyTails = new Map();
+  const historySeen = new Set();
+  const allowedNew = new Set();
+  let lastUnread = -1;
+  let lastHistoryMode;
+  let lastDisplayLanguage;
   let lastPendingTarget = '';
   let statusTimer;
   let lastConversationId = '';
@@ -125,6 +131,7 @@ export const whatsappInjectionScript = String.raw`
 
   const isSendTarget = (target) => {
     if (!(target instanceof Node)) return false;
+    if ((target instanceof Element ? target : target.parentElement)?.closest('[data-rt-ui]')) return false;
     const known = findSendButton();
     if (known && (known === target || known.contains(target))) return true;
     const element = target instanceof Element ? target : target.parentElement;
@@ -326,8 +333,24 @@ export const whatsappInjectionScript = String.raw`
       const target = targetKey();
       const settings = await api.getRuntimeSettings(conversation.id);
       if (conversationInfo().id !== conversation.id || targetKey() !== target) return;
+      if (lastDisplayLanguage && lastDisplayLanguage !== settings.localLanguage) {
+        document.querySelectorAll('.rt-translation[data-rt-kind="incoming"], [data-rt-history-action]').forEach(el => el.remove());
+        document.querySelectorAll('[data-rt-translated]').forEach(el => { if (!isOutgoingContainer(el)) el.removeAttribute(RT_ATTR); });
+        allowedNew.clear(); historyTails.clear();
+      }
+      lastDisplayLanguage = settings.localLanguage;
       applyTranslationStyle(settings);
       const containers = messageContainers();
+      const mode = settings.historyMode || 'visible';
+      if (mode !== lastHistoryMode) { document.querySelectorAll('[data-rt-history-action]').forEach(el => el.remove()); document.querySelectorAll('[data-rt-translated="history"]').forEach(el => el.removeAttribute(RT_ATTR)); lastHistoryMode = mode; }
+      const previousTail = historyTails.get(target);
+      const tailIndex = containers.findIndex(el => messageId(el) === previousTail);
+      if (mode === 'new' && previousTail && tailIndex >= 0) {
+        containers.slice(tailIndex + 1).forEach(el => { const key = target + ':' + messageId(el); if (!historySeen.has(key)) allowedNew.add(key); });
+      }
+      containers.forEach(el => historySeen.add(target + ':' + messageId(el)));
+      if (historySeen.size > 20000) { historySeen.clear(); allowedNew.clear(); historyTails.clear(); containers.forEach(el => historySeen.add(target + ':' + messageId(el))); }
+      if (containers.length) historyTails.set(target, messageId(containers[containers.length - 1]));
       for (const container of containers) {
         if (!container.isConnected || conversationInfo().id !== conversation.id || targetKey() !== target) break;
         if (!isVisible(container)) continue;
@@ -336,7 +359,7 @@ export const whatsappInjectionScript = String.raw`
           continue;
         }
         if (!settings.receiveAutoTranslate || (!settings.groupTranslate && isGroupChat())) continue;
-        if (['working', 'done'].includes(container.getAttribute(RT_ATTR))) continue;
+        if (['working', 'done', 'history'].includes(container.getAttribute(RT_ATTR))) continue;
         const text = extractMessageText(container);
         if (!text) continue;
         let payload = incomingRequests.get(container);
@@ -347,7 +370,22 @@ export const whatsappInjectionScript = String.raw`
         }
         container.setAttribute(RT_ATTR, 'working');
         try {
-          const translated = await api.translateIncoming(payload);
+          const cached = await api.cachedIncoming?.(payload);
+          if (cached === undefined && mode !== 'visible' && !(mode === 'new' && allowedNew.has(target + ':' + messageId(container)))) {
+            container.setAttribute(RT_ATTR, 'history');
+            const button = document.createElement('button');
+            button.setAttribute('data-rt-ui', 'history-action'); button.setAttribute('data-rt-history-action', '');
+            button.textContent = '翻译此消息'; button.title = '缓存未命中；点击后发起翻译，成功按字符计费';
+            Object.assign(button.style, { display: 'block', background: 'transparent', color: '#8fb7ab', border: '0', padding: '4px 0', cursor: 'pointer', fontSize: '11px' });
+            button.onclick = async () => {
+              if (button.disabled) return; button.disabled = true;
+              try { const result = await api.translateIncoming(payload); if (container.isConnected && extractMessageText(container) === text) { addTranslation(container, result, settings); container.setAttribute(RT_ATTR, 'done'); button.remove(); } }
+              catch (error) { button.disabled = false; reportStatus('error', String(error?.message || error)); }
+            };
+            messageTextHost(container).appendChild(button);
+            continue;
+          }
+          const translated = cached !== undefined ? cached : await api.translateIncoming(payload);
           if (container.isConnected && extractMessageText(container) === text) {
             if (translated && normalizeMessage(translated) !== normalizeMessage(text)) addTranslation(container, translated, settings, 'incoming');
             container.setAttribute(RT_ATTR, 'done');
@@ -508,6 +546,24 @@ export const whatsappInjectionScript = String.raw`
     })).filter((item) => item.text).slice(-4);
   };
 
+  const previewTranslation = (task, settings, snapshot) => new Promise(resolve => {
+    const panel = document.createElement('section'); panel.setAttribute('data-rt-ui', 'send-preview'); panel.setAttribute('aria-label', '发送译文预览');
+    Object.assign(panel.style, { padding: '10px', background: '#202c33', color: '#e9edef', borderTop: '1px solid #42515a', maxHeight: '260px', overflowY: 'auto' });
+    const original = document.createElement('textarea'); original.value = task.request.text; original.readOnly = true; original.setAttribute('aria-label', '原文');
+    const translated = document.createElement('textarea'); translated.value = task.translated; translated.setAttribute('aria-label', '可编辑译文');
+    for (const area of [original, translated]) { Object.assign(area.style, { width: '100%', boxSizing: 'border-box', minHeight: '50px', background: '#111b21', color: '#e9edef', border: '1px solid #42515a', borderRadius: '6px', padding: '8px' }); panel.appendChild(area); }
+    const output = document.createElement('p'); output.style.fontSize = '12px'; panel.appendChild(output);
+    const finish = value => { clearInterval(timer); panel.remove(); resolve(value); };
+    const timer = setInterval(() => { if (!snapshot.composer.isConnected || navigationRevision !== snapshot.navigationRevision || targetKey() !== snapshot.targetKey) finish(null); }, 250);
+    const addButton = (label, run) => { const button = document.createElement('button'); button.textContent = label; Object.assign(button.style, { padding: '7px 12px', marginRight: '8px', color: '#e9edef', background: '#37554b', border: '0', borderRadius: '6px', cursor: 'pointer' }); button.onclick = run; panel.appendChild(button); return button; };
+    addButton('发送译文', () => { if (translated.value.trim()) finish(translated.value.trim()); });
+    addButton('恢复原文 / 取消发送', () => finish(null));
+    if (settings.backTranslation) { const button = addButton('回翻核对（可能计费）', async () => { button.disabled = true; const text = translated.value; try { const value = await window.realtimeTranslator.backTranslateSend(task.id, text); if (text === translated.value) output.textContent = '回翻：' + value; } catch (error) { output.textContent = String(error?.message || error); } finally { button.disabled = false; } }); }
+    translated.addEventListener('input', () => { output.textContent = ''; });
+    panel.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); finish(null); } });
+    (document.querySelector('#main footer') || document.body).appendChild(panel); translated.focus();
+  });
+
   const processSend = async (composer) => {
     const api = window.realtimeTranslator;
     const original = composerText(composer);
@@ -526,6 +582,13 @@ export const whatsappInjectionScript = String.raw`
       showSendStatus('正在确认译文，草稿已保留…', 'working', false);
       task = await api.translateSend(task.id);
       if (!matchesSnapshot(snapshot) || composerText(composer) !== original) throw new Error('对话或草稿已变化，译文已保存，没有发送。');
+      const settings = await api.getRuntimeSettings(conversation.id);
+      if (settings.previewSend && task.translate !== false) {
+        const edited = await previewTranslation(task, settings, snapshot);
+        if (edited === null) { await api.cancelSend(task.id); reportStatus('ready', '已取消发送，原文保留在输入框。'); return; }
+        if (!matchesSnapshot(snapshot) || composerText(composer) !== original) throw new Error('对话或草稿已变化，没有发送。');
+        task = await api.editSendPreview(task.id, edited);
+      }
       snapshot.translated = task.translated;
       showSendStatus('译文已保存，正在提交并等待 WhatsApp 确认…', 'working', false);
       await api.submitSend(task.id);
@@ -579,7 +642,10 @@ export const whatsappInjectionScript = String.raw`
     if (composer) interceptSendNow(event, composer);
   }, true);
 
-  setInterval(() => { void recoverPending(); void translateVisible(); }, 1400);
+  setInterval(() => {
+    const titleCount = Number(document.title.match(/^\((\d+)\)/)?.[1] || 0);
+    if (titleCount !== lastUnread) { lastUnread = titleCount; window.realtimeTranslator?.reportUnread?.(titleCount); }
+    void recoverPending(); void translateVisible(); }, 1400);
   void translateVisible();
 })();
 `;

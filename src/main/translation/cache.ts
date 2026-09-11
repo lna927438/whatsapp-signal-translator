@@ -3,6 +3,7 @@ import { JsonStore } from '../storage/jsonStore'
 import type { TranslationRequest } from '../types'
 
 interface CacheEntry {
+  ownerHash?: string
   translated: string
   textHash: string
   updatedAt: number
@@ -33,7 +34,7 @@ export class TranslationCache {
   }
 
   private normalizeText(text: string): string {
-    return String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim()
+    return String(text || '').replace(/\u00a0/g, ' ').replace(/\r\n/g, '\n').trim()
   }
 
   private textHash(text: string): string {
@@ -63,8 +64,8 @@ export class TranslationCache {
   private messageKey(request: TranslationRequest): string | undefined {
     if (!request.messageId) return undefined
     return this.hash([
-      'v3-message',
-      this.conversationScope(request),
+      'v4-message',
+      this.accountScope(request),
       request.messageId,
       this.textHash(request.text)
     ].join('\u241f'), 64)
@@ -147,6 +148,20 @@ export class TranslationCache {
     return hashes.has(String(entry.textHash || ''))
   }
 
+  async stats(owner: string) {
+    const data = await this.store.read()
+    const entries = Object.values(data).filter(entry => entry.ownerHash === this.hash(owner, 64))
+    return { aliases: entries.length, translations: new Set(entries.map(entry => entry.textHash + ':' + entry.translated)).size }
+  }
+  async clear(owner: string) {
+    this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
+      const data = await this.store.read()
+      for (const [key, entry] of Object.entries(data)) if (entry.ownerHash === this.hash(owner, 64)) delete data[key]
+      await this.store.write(data)
+    })
+    await this.writeChain
+  }
+
   async get(provider: string, request: TranslationRequest): Promise<string | undefined> {
     const cache = await this.store.read()
     const primary = [
@@ -156,7 +171,10 @@ export class TranslationCache {
       this.accountTextKey(request),
       this.globalTextKey(request)
     ].filter((value): value is string => Boolean(value))
-    const candidates = [...primary, ...this.v2Keys(request), this.legacyKey(provider, request)]
+    const scoped = (key: string) => request.cacheUserId ? this.hash(request.cacheUserId + ':' + key, 64) : key
+    const candidates = request.cacheUserId
+      ? [this.messageKey(request), this.contextualKey(request)].filter((key): key is string => Boolean(key)).map(scoped)
+      : [...primary, ...this.v2Keys(request), this.legacyKey(provider, request)]
 
     for (const key of candidates) {
       const entry = cache[key]
@@ -164,16 +182,17 @@ export class TranslationCache {
 
       // Promote every old/secondary hit into the full v3 alias set. From this
       // point onward restarts, contact-title changes and DOM changes remain local.
-      if (!primary.includes(key)) void this.set(provider, request, entry.translated)
+      if (!request.cacheUserId && !primary.includes(key)) void this.set(provider, request, entry.translated).catch(() => {})
       return entry.translated
     }
     return undefined
   }
 
   async set(_provider: string, request: TranslationRequest, translated: string): Promise<void> {
-    this.writeChain = this.writeChain.then(async () => {
+    this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
       const cache = await this.store.read()
       const entry: CacheEntry = {
+        ownerHash: request.cacheUserId ? this.hash(request.cacheUserId,64) : undefined,
         translated,
         textHash: this.textHash(request.text),
         updatedAt: Date.now()
@@ -186,7 +205,7 @@ export class TranslationCache {
         this.globalTextKey(request)
       ].filter((value): value is string => Boolean(value))
 
-      for (const key of keys) cache[key] = entry
+      for (const key of keys) cache[request.cacheUserId ? this.hash(request.cacheUserId + ':' + key, 64) : key] = entry
 
       // Up to five aliases per translation are expected. Keep a generous local
       // history while preventing the JSON file from growing forever.
@@ -196,7 +215,7 @@ export class TranslationCache {
         for (const key of allKeys.slice(0, allKeys.length - 50000)) delete cache[key]
       }
       await this.store.write(cache)
-    }).catch(() => undefined)
+    })
     await this.writeChain
   }
 }

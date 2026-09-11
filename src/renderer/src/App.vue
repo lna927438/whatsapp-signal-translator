@@ -27,6 +27,8 @@ type Account = {
   translationsVisible?: boolean
   proxy?: any
   toolbarCollapsed?: boolean
+  pinned?: boolean
+  group?: string
   zoomFactor?: number
   translationColor?: string
   contactLanguages?: Record<string, ContactPreference>
@@ -44,7 +46,20 @@ const error = ref('')
 const collapsed = ref(localStorage.getItem('hellodog:sidebar-collapsed') === 'true')
 const search = ref('')
 const contentArea = ref<HTMLElement | null>(null)
-const filteredAccounts = computed(() => accounts.value.filter(item => item.label.toLowerCase().includes(search.value.toLowerCase())))
+const platformFilter = ref('all'), groupFilter = ref('all')
+const unread = ref<Record<string, number>>({})
+const groups = computed(() => [...new Set(accounts.value.map(item => item.group || '').filter(Boolean))])
+const filteredAccounts = computed(() => accounts.value.filter(item => item.label.toLowerCase().includes(search.value.toLowerCase()) && (platformFilter.value === 'all' || item.platform === platformFilter.value) && (groupFilter.value === 'all' || (item.group || '') === groupFilter.value)).sort((a,b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))))
+const sidebarWidth = ref(Math.max(180, Math.min(340, Number(localStorage.getItem('hellodog:sidebar-width')) || 240)))
+function resizeSidebar(event: PointerEvent) {
+  const handle = event.currentTarget as HTMLElement
+  handle.setPointerCapture(event.pointerId)
+  const move = (e: PointerEvent) => { sidebarWidth.value = Math.max(180, Math.min(340, e.clientX)); updateBounds() }
+  const stop = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', stop); handle.removeEventListener('pointercancel', stop); localStorage.setItem('hellodog:sidebar-width', String(sidebarWidth.value)) }
+  handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop)
+}
+function resizeSidebarKey(event: KeyboardEvent) { if (!['ArrowLeft','ArrowRight'].includes(event.key)) return; event.preventDefault(); sidebarWidth.value = Math.max(180, Math.min(340, sidebarWidth.value + (event.key === 'ArrowLeft' ? -10 : 10))); localStorage.setItem('hellodog:sidebar-width', String(sidebarWidth.value)); updateBounds() }
+
 const renaming = ref<Account | null>(null)
 const newLabel = ref('')
 const routes = ref<any[]>([])
@@ -228,6 +243,7 @@ async function addSignalRecord() { await openSetup('signal') }
 
 async function select(account: Account) {
   selected.value = account
+  if (account.platform === "signal") unread.value[account.id] = 0
   await nextTick()
   updateBounds()
   controlFeedback.value = { state: 'idle', message: '' }
@@ -319,6 +335,8 @@ async function openSettings() {
 }
 
 async function closeSettings() {
+  sidebarWidth.value = Number(localStorage.getItem('hellodog:sidebar-width')) || 240
+  collapsed.value = localStorage.getItem('hellodog:sidebar-collapsed') === 'true'
   showSettings.value = false
   await window.desktopAPI.setOverlayOpen(false)
   void reloadSettings()
@@ -348,8 +366,11 @@ onMounted(async () => {
   if (contentArea.value) boundsObserver.observe(contentArea.value)
   updateBounds()
   void measureRoutes()
+  subscriptions.push(window.desktopAPI.onAccountUnread((event: any) => { unread.value[event.accountId] = Math.max(0, Number(event.count) || 0) }))
+  subscriptions.push(window.desktopAPI.onSignalMessage((message: any) => { const account = accounts.value.find(item => item.platform === 'signal' && item.signalAccount === message.account); if (account && !message.fromMe && selected.value?.id !== account.id) unread.value[account.id] = (unread.value[account.id] || 0) + 1 }))
   subscriptions.push(window.desktopAPI.onAccountAction(async (event: any) => {
     const account = accounts.value.find(item => item.id === event.accountId)
+    if (event.action === 'focus' && account) await select(account)
     if (event.action === 'configure' && account) await openSetup(account.platform, account)
     if (event.action === 'rename' && account) await renameAccount(account)
     if (event.action === 'updated') await reload()
@@ -400,17 +421,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-platform="selected?.platform || 'whatsapp'">
+  <div class="app-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-platform="selected?.platform || 'whatsapp'" :style="{gridTemplateColumns: (collapsed ? 58 : sidebarWidth) + 'px minmax(0,1fr)'}">
     <aside class="sidebar">
       <button class="brand" @click="home" title="HelloDog 工作台"><img src="/hellodog-icon.webp" alt="HelloDog" /><span><b>HelloDog</b><small>让每一句，都被听懂。</small></span></button>
       <div class="sidebar-heading"><span>工作空间</span><button class="icon-button collapse-button" :aria-expanded="!collapsed" :title="collapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'" @click="collapsed = !collapsed"><UiIcon name="panel" /></button></div>
       <button class="nav-button" :class="{ active: !selected }" @click="home" title="工作台"><UiIcon name="home" /><span>工作台</span></button>
-      <div class="sidebar-heading account-heading"><span>我的账号 <b>{{ accounts.length }}</b></span></div>
+      <div v-if="!collapsed" class="account-filters"><select v-model="platformFilter" aria-label="平台筛选"><option value="all">全部平台</option><option value="whatsapp">WhatsApp</option><option value="signal">Signal</option></select><select v-model="groupFilter" aria-label="账号分组"><option value="all">全部分组</option><option value="">未分组</option><option v-for="group in groups" :key="group">{{ group }}</option></select></div><div class="sidebar-heading account-heading"><span>我的账号 <b>{{ accounts.length }}</b></span></div>
       <label v-if="!collapsed" class="account-search"><UiIcon name="search" /><input v-model="search" placeholder="搜索账号" aria-label="搜索账号" /></label>
       <div class="account-list">
         <div v-for="account in filteredAccounts" :key="account.id" class="account-row" :class="{ active: selected?.id === account.id }" @contextmenu.prevent="accountMenu(account)">
           <button class="account" :title="account.label" @click="select(account)" @keydown.shift.f10.prevent="accountMenu(account)">
-            <span class="platform-avatar" :class="account.platform"><img :src="`./${account.platform}.svg`" :alt="account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" /></span><span class="account-label"><b>{{ account.label }}</b><small>{{ account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal' }}</small></span>
+            <span class="platform-avatar" :class="account.platform"><img :src="`./${account.platform}.svg`" :alt="account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" /></span><span v-if="unread[account.id]" class="unread-badge" :aria-label="unread[account.id] + ' 条未读'">{{ unread[account.id] > 99 ? '99+' : unread[account.id] }}</span><span class="account-label"><b>{{ account.pinned ? "★ " : "" }}{{ account.label }}</b><small>{{ account.group || (account.platform === 'whatsapp' ? 'WhatsApp' : 'Signal') }}</small></span>
           </button><button v-if="!collapsed" class="icon-button account-more" :aria-label="account.label + ' 的更多操作'" @click="accountMenu(account)"><UiIcon name="more" /></button>
         </div>
         <p v-if="!filteredAccounts.length && !collapsed" class="sidebar-hint">{{ search ? '没有匹配的账号' : '添加账号，开始对话。' }}</p>
@@ -421,24 +442,25 @@ onUnmounted(() => {
         <button class="settings-btn" @click="openSettings" title="设置与连接诊断"><UiIcon name="settings" /><span>设置与连接</span></button>
         <small class="version-label">{{ collapsed ? '0.5.1' : 'HelloDog · v0.5.1' }}</small>
       </div>
+      <div v-if="!collapsed" class="sidebar-resizer" role="separator" aria-label="调整账号侧栏宽度" aria-orientation="vertical" :aria-valuenow="sidebarWidth" :aria-valuemin="180" :aria-valuemax="340" tabindex="0" @pointerdown="resizeSidebar" @keydown="resizeSidebarKey"></div>
     </aside>
     <div class="workspace">
       <header class="workspace-header"><div><span class="workspace-kicker">HELLODOG WORKSPACE</span><h1>{{ selected?.label || '你的聊天，世界都听得懂。' }}</h1></div><div class="workspace-header-actions"><button class="connection-button" @click="openSettings" title="查看实测线路与连接诊断"><UiIcon name="signal" />{{ lineLabel }}</button><button v-if="selected" class="toolbar-collapse" :aria-expanded="!selected.toolbarCollapsed" @click="patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })">{{ selected.toolbarCollapsed ? '展开翻译面板' : '收起面板' }} <span>{{ selected.toolbarCollapsed ? '⌄' : '⌃' }}</span></button><button v-if="selected" class="icon-button" title="账号操作" @click="accountMenu(selected)"><UiIcon name="more" /></button></div></header>
       <section v-if="selected" class="account-toolbar" :class="{ 'toolbar-compact': selected.toolbarCollapsed }" :inert="selected.toolbarCollapsed">
         <div class="language-control"><label><span>我使用的语言</span><select :value="localLanguage" @change="setStringField('localLanguage', $event)"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label><span class="language-arrow">⇄</span><label><span>{{ contactLabel || '对方的语言' }}</span><select :value="targetLanguage" @change="setTargetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label></div>
         <div class="translation-toggles"><label><input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />接收翻译</label><label><input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />发送翻译</label><label><input type="checkbox" :checked="blockChineseSend" @change="patchSelected({ blockChineseSend: !blockChineseSend })" />拦截中文原文</label><label><input type="checkbox" :checked="groupTranslate" @change="patchSelected({ groupTranslate: !groupTranslate })" />群组翻译</label></div>
-        <div class="display-controls"><label>译文字号<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label title="译文颜色">颜色<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? '显示译文' : '隐藏译文' }}</button></div>
+        <details class="toolbar-advanced"><summary>显示设置</summary><div class="display-controls"><label>译文字号<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label title="译文颜色">颜色<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? '显示译文' : '隐藏译文' }}</button></div></details>
       </section>
       <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ selectedLiveStatus.message }}</span></div><span>{{ channelName }}</span><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" title="查看代理设置">独立代理已配置</button><span class="metric-text">{{ metricLabel }}</span><span class="save-feedback" :class="controlFeedback.state" role="status">{{ controlFeedback.message }}</span><span class="quota-text" :class="{ low: quotaLow }">余 {{ remainingCharsLabel }} 字符</span></div>
       <main ref="contentArea" class="content" :class="{ 'signal-content': selectedIsSignal }">
         <SignalView v-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" />
-        <div v-else-if="!selected" class="welcome">
+        <div v-else-if="!selected" class="welcome"><section class="app-center"><h2>应用中心</h2><div class="platform-cards"><button @click="addWhatsApp"><img :src="'./whatsapp.svg'" alt="" />WhatsApp<small>{{ accounts.filter(a => a.platform === 'whatsapp').length }} 个账号 · 添加窗口</small></button><button @click="addSignalRecord"><img :src="'./signal.svg'" alt="" />Signal<small>{{ accounts.filter(a => a.platform === 'signal').length }} 个账号 · 添加窗口</small></button></div></section>
           <div class="welcome-copy"><span class="eyebrow">SAY HELLO, GO FURTHER.</span><h2>让交流少一点距离。<br /><em>多一点 Hello。</em></h2><p>连接你的聊天账号，用熟悉的语言，聊更远的世界。</p><div class="welcome-actions"><button class="primary" @click="addWhatsApp"><UiIcon name="plus" />添加 WhatsApp</button><button class="secondary" @click="addSignalRecord()">添加 Signal</button></div><small>已有账号？从左侧选择，继续上一次对话。</small></div><img class="welcome-dog" src="/hellodog-icon.webp" alt="HelloDog 小狗" />
           <div class="welcome-cards"><button @click="openSettings"><UiIcon name="signal" /><b>先检查连接</b><p>检测线路、登录与翻译服务，定位问题。</p><span>打开连接诊断 →</span></button><button @click="openProfile"><UiIcon name="user" /><b>字符余额，一目了然</b><p>剩余 {{ remainingCharsLabel }} 字符，查看真实消费记录。</p><span>打开个人中心 →</span></button><article><UiIcon name="shield" /><b>发送前，多一道确认</b><p>失败保留草稿，发送结果不明确时由你确认。</p><span>账号右键 · 更多实用操作</span></article></div>
         </div>
       </main>
     </div>
-    <AccountSetup v-if="setup" :platform="setup.platform" :account="setup.account" :languages="languages" @close="closeSetup" @saved="setupSaved" />
+    <AccountSetup v-if="setup" :platform="setup.platform" :account="setup.account" :languages="languages" :owner="props.userId" @close="closeSetup" @saved="setupSaved" />
     <SettingsPanel v-if="showSettings" @close="closeSettings" />
     <PersonalCenter v-if="showProfile" @close="closeProfile" @updated="onProfileUpdated" />
     <div v-if="renaming" class="modal-backdrop" @click.self="finishRename(false)"><form class="panel rename-panel" @submit.prevent="finishRename(true)"><header><h2>给账号取个名字</h2><button type="button" @click="finishRename(false)" aria-label="关闭">×</button></header><label>账号名称<input v-model="newLabel" maxlength="60" required autofocus /></label><footer><button type="button" class="secondary" @click="finishRename(false)">取消</button><button class="primary" type="submit">保存名称</button></footer></form></div>

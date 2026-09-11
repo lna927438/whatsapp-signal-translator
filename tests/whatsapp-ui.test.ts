@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 const { whatsappInjectionScript } = createRequire(import.meta.url)('../src/main/platforms/whatsapp/inject/script.ts') as typeof import('../src/main/platforms/whatsapp/inject/script')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function until(check: () => boolean) { for (let n = 0; n < 200; n++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 2)) }; assert.fail('UI did not settle') }
-function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string } = {}) {
+function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string; historyMode?: 'new' | 'manual' | 'visible'; incomingResult?: string; cachedIncoming?: string; previewSend?: boolean } = {}) {
   const dom = new JSDOM('<div id="sidebar">other chat</div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header><div class="message-in" data-id="false_peer-a@c.us_old"><span class="selectable-text">hello</span></div><footer><div contenteditable="true" role="textbox">原文</div><button aria-label="Send">send</button></footer></div>', { url: 'https://web.whatsapp.com', runScripts: 'outside-only' })
   const win = dom.window as any
   const composer = win.document.querySelector('[contenteditable]')
@@ -18,21 +18,24 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
   const originalTimeout = win.setTimeout.bind(win)
   win.setTimeout = (fn: () => void, delay: number) => originalTimeout(fn, delay === 100 ? 0 : delay)
   win.realtimeTranslator = {
-    getRuntimeSettings: async () => ({ receiveAutoTranslate: Boolean(options.incomingError), groupTranslate: true }),
+    getRuntimeSettings: async () => ({ receiveAutoTranslate: Boolean(options.incomingError || options.historyMode), groupTranslate: true, historyMode: options.historyMode, previewSend: options.previewSend }),
     reportConversation: () => {}, reportStatus: (status: any) => statuses.push(status),
-    translateIncoming: async () => { incoming++; throw new Error(options.incomingError || 'offline') },
+    cachedIncoming: async () => options.cachedIncoming,
+    translateIncoming: async () => { incoming++; if (options.incomingResult) return options.incomingResult; throw new Error(options.incomingError || 'offline') },
     prepareSend: async (payload: any) => {
       prepared.push(payload)
       lastTask = { ...payload, id: 'send-test', state: 'draft', request: { text: payload.text }, translated: 'translation' }
       return lastTask
     },
     translateSend: async () => { await translationGate; return { ...lastTask, state: 'ready' } },
+    editSendPreview: async (_id: string, text: string) => { lastTask.translated = text; return lastTask },
+    cancelSend: async () => { lastTask.state = 'cancelled' },
     pendingSend: async () => lastTask && lastTask.state !== 'sent' ? lastTask : null,
     submitSend: async () => {
       submits++
       const args = { ...lastTask, original: lastTask.request.text }
       if (!win.__RT_SEND_SELECT__(args)) throw new Error('guard rejected')
-      composer.textContent = 'translation' // Models Chromium insertText, not WhatsApp dispatch.
+      composer.textContent = lastTask.translated // Models Chromium insertText, not WhatsApp dispatch.
       const result = await win.__RT_SEND_COMMIT__(args)
       win.__RT_SEND_RELEASE__(lastTask.id, result.dispatched === false)
       if (!result.confirmed) { lastTask.state = 'uncertain'; throw new Error('发送结果未确认') }
@@ -49,6 +52,7 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
       const el = win.document.createElement('div')
       el.className = 'message-out'; el.setAttribute('data-id', 'true_peer-a@c.us_new-' + nativeClicks)
       el.innerHTML = options.directionalText ? '<div class="selectable-text">\u200etranslation\u200f</div>' : '<span class="selectable-text">translation</span>'
+      if (!options.directionalText) el.querySelector('.selectable-text').textContent = lastTask.translated
       let receipt = el
       if (options.wrappedReceipt) {
         receipt = win.document.createElement('div'); receipt.setAttribute('data-id', el.getAttribute('data-id'))
@@ -212,4 +216,43 @@ test('failed recovery actions remain available and never dispatch a second messa
     assert.equal(box.querySelectorAll('button:disabled').length, 0)
     assert.equal(box.open, true); assert.equal(h.nativeClicks, 1)
   } finally { h.dom.window.close() }
+})
+
+
+test('opening historical WhatsApp messages restores cache without paid requests', async () => {
+ const h=harness({historyMode:'new',cachedIncoming:'历史译文'})
+ try{await until(()=>Boolean(h.win.document.querySelector('.rt-translation')));assert.equal(h.incoming,0);assert.equal(h.win.document.querySelector('.rt-translation').textContent,'历史译文')}finally{h.dom.window.close()}
+})
+
+test('new-only mode skips initial and prepended history, translates one appended message and avoids remount repeats', async () => {
+ const h=harness({historyMode:'new',incomingResult:'译文'})
+ try{
+  await until(()=>Boolean(h.win.document.querySelector('[data-rt-history-action]')));assert.equal(h.incoming,0)
+  const main=h.win.document.querySelector('#main');const old=h.win.document.createElement('div');old.className='message-in';old.setAttribute('data-id','false_peer-a@c.us_older');old.innerHTML='<span class="selectable-text">Older text</span>';main.insertBefore(old,main.querySelector('.message-in'))
+  h.intervals.forEach(fn=>fn());await until(()=>old.getAttribute('data-rt-translated')==='history');assert.equal(h.incoming,0)
+  const fresh=h.win.document.createElement('div');fresh.className='message-in';fresh.setAttribute('data-id','false_peer-a@c.us_fresh');fresh.innerHTML='<span class="selectable-text">New text</span>';main.insertBefore(fresh,main.querySelector('footer'))
+  h.intervals.forEach(fn=>fn());await until(()=>fresh.getAttribute('data-rt-translated')==='done');assert.equal(h.incoming,1)
+  h.intervals.forEach(fn=>fn());await tick();assert.equal(h.incoming,1)
+ }finally{h.dom.window.close()}
+})
+
+test('manual history action makes one translation despite repeated clicks', async () => {
+ const h=harness({historyMode:'manual',incomingResult:'手动译文'})
+ try{await until(()=>Boolean(h.win.document.querySelector('[data-rt-history-action]')));const button=h.win.document.querySelector('[data-rt-history-action]');button.click();button.click();await until(()=>Boolean(h.win.document.querySelector('.rt-translation')));assert.equal(h.incoming,1)}finally{h.dom.window.close()}
+})
+
+
+test('optional preview waits for explicit send, edits the existing task and dispatches once', async () => {
+ const h=harness({previewSend:true})
+ try{h.enter();await until(()=>Boolean(h.win.document.querySelector('[data-rt-ui="send-preview"]')));assert.equal(h.nativeClicks,0)
+ const panel=h.win.document.querySelector('[data-rt-ui="send-preview"]');const translated=panel.querySelector('textarea[aria-label="可编辑译文"]');translated.value='reviewed text';panel.querySelector('button').click()
+ await until(()=>h.statuses.some(s=>s.state==='success'));assert.equal(h.nativeClicks,1);assert.equal(h.prepared.length,1);const sent=h.win.document.querySelector('.message-out .selectable-text').cloneNode(true);sent.querySelectorAll('[data-rt-ui], .rt-translation').forEach((node:any)=>node.remove());assert.equal(sent.textContent,'reviewed text')
+ }finally{h.dom.window.close()}
+})
+
+test('cancelling optional preview preserves the original composer without dispatch', async () => {
+ const h=harness({previewSend:true})
+ try{h.enter();await until(()=>Boolean(h.win.document.querySelector('[data-rt-ui="send-preview"]')))
+ h.win.document.querySelectorAll('[data-rt-ui="send-preview"] button')[1].click();await until(()=>h.statuses.some(s=>s.message.includes('已取消发送')));assert.equal(h.nativeClicks,0);assert.equal(h.composer.textContent,'原文')
+ }finally{h.dom.window.close()}
 })

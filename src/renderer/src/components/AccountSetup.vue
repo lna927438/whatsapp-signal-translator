@@ -1,10 +1,25 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-const props = defineProps<{ platform: 'whatsapp' | 'signal'; account?: any; languages: any[] }>()
+import { accountNames, accountTemplate } from '../../../shared/accountConfig'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+const props = defineProps<{ platform: 'whatsapp' | 'signal'; account?: any; languages: any[]; owner: string }>()
 const emit = defineEmits<{ close: []; saved: [account: any] }>()
 const name = props.platform === 'whatsapp' ? 'WhatsApp' : 'Signal'
 const initial = props.account || {}
-const draft = reactive({ label: initial.label || name, localLanguage: initial.localLanguage || 'zh-CN', targetLanguage: initial.targetLanguage || 'en-US', receiveAutoTranslate: initial.receiveAutoTranslate ?? true, sendAutoTranslate: initial.sendAutoTranslate ?? true, blockChineseSend: initial.blockChineseSend ?? true, groupTranslate: initial.groupTranslate ?? false, fontSize: initial.fontSize || 13, translationColor: initial.translationColor || '#7eada0', proxy: { enabled: false, protocol: 'http', host: '', port: 8080, username: '', hasPassword: false, ...initial.proxy, password: '', clearPassword: false } })
+const count = ref(1), templateName = ref(''), templateId = ref('')
+const templateKey = 'hellodog:templates:' + props.owner
+const templates = ref<Array<{name: string; options: any}>>([])
+try { templates.value = JSON.parse(localStorage.getItem(templateKey) || '[]') } catch {}
+const names = computed(() => { try { return accountNames(draft.label, count.value) } catch { return [] } })
+function saveTemplate() {
+  const name = templateName.value.trim().slice(0, 40)
+  if (!name) { message.value = '请填写模板名称。'; return }
+  const values = templates.value.filter(item => item.name !== name)
+  values.push({ name, options: accountTemplate(draft) })
+  try { localStorage.setItem(templateKey, JSON.stringify(values.slice(-20))); templates.value = values.slice(-20); message.value = '模板已保存，不包含代理凭据。' } catch { message.value = '模板保存失败。' }
+}
+function applyTemplate() { const item = templates.value.find(item => item.name === templateId.value); if (item) Object.assign(draft, accountTemplate(item.options)) }
+function deleteTemplate() { try { const values = templates.value.filter(item => item.name !== templateId.value); localStorage.setItem(templateKey, JSON.stringify(values)); templates.value = values; templateId.value = ''; message.value = '模板已删除。' } catch { message.value = '模板删除失败。' } }
+const draft = reactive({ group: initial.group || '', pinned: initial.pinned || false, label: initial.label || name, localLanguage: initial.localLanguage || 'zh-CN', targetLanguage: initial.targetLanguage || 'en-US', receiveAutoTranslate: initial.receiveAutoTranslate ?? true, sendAutoTranslate: initial.sendAutoTranslate ?? true, blockChineseSend: initial.blockChineseSend ?? true, groupTranslate: initial.groupTranslate ?? false, fontSize: initial.fontSize || 13, translationColor: initial.translationColor || '#7eada0', proxy: { enabled: false, protocol: 'http', host: '', port: 8080, username: '', hasPassword: false, ...initial.proxy, password: '', clearPassword: false } })
 const busy = ref(false), testing = ref(false), message = ref(''), proxyResult = ref(''), paste = ref('')
 const form = ref<HTMLFormElement | null>(null)
 const previousFocus = document.activeElement as HTMLElement | null
@@ -45,7 +60,7 @@ async function save() {
   busy.value = true; message.value = ''
   try {
     const options = JSON.parse(JSON.stringify(draft))
-    const account = initial.id ? await window.desktopAPI.updateAccount(initial.id, options) : await window.desktopAPI.addAccount({ platform: props.platform, label: draft.label, options })
+    const account = initial.id ? await window.desktopAPI.updateAccount(initial.id, options) : (await window.desktopAPI.addAccounts({ platform: props.platform, label: draft.label, count: count.value, options }))[0]
     if (!account) throw new Error('账号不存在，请关闭面板后重试。')
     emit('saved', account)
   } catch (error: any) { message.value = error?.message || '保存失败，请重试。' }
@@ -57,8 +72,9 @@ async function save() {
   <div class="modal-backdrop account-setup-backdrop" @click.self="close">
     <form ref="form" class="account-setup" role="dialog" aria-modal="true" aria-labelledby="account-setup-title" :data-platform="platform" @submit.prevent="save" @keydown="keydown">
       <header class="setup-header"><span class="platform-avatar" :class="platform"><img :src="`./${platform}.svg`" :alt="name" /></span><div><h2 id="account-setup-title">{{ initial.id ? '账号设置' : '新建 ' + name + ' 窗口' }}</h2><p>为这一个账号设置语言与连接方式。</p></div><button type="button" class="icon-button" aria-label="关闭" :disabled="busy || testing" @click="close">×</button></header>
-      <fieldset class="setup-body" :disabled="busy || testing">
-        <section class="setup-section"><h3>基本信息</h3><label>窗口名称<input v-model="draft.label" name="account-name" maxlength="60" required autocomplete="off" /></label><div class="setup-provider"><span>翻译引擎</span><b>HelloDog 云端</b><small>账号独立设置，成功翻译按字符计费</small></div></section>
+      <div class="setup-scroll" tabindex="0" aria-label="窗口设置，可滚动"><fieldset class="setup-body" :disabled="busy || testing">
+        <details class="setup-section template-section"><summary>配置模板</summary><div class="setup-grid"><label>使用模板<select v-model="templateId" @change="applyTemplate"><option value="">自定义设置</option><option v-for="item in templates" :key="item.name">{{ item.name }}</option></select></label><label>模板名称<input v-model="templateName" maxlength="40" placeholder="例如 英语客户" /></label></div><div class="template-actions"><button type="button" class="secondary" @click="saveTemplate">保存当前配置为模板</button><button type="button" class="secondary" :disabled="!templateId" @click="deleteTemplate">删除选中模板</button></div></details>
+        <section class="setup-section"><h3>基本信息</h3><label>窗口名称<input v-model="draft.label" name="account-name" maxlength="60" required autocomplete="off" /></label><div class="setup-grid"><label>分组<input v-model="draft.group" maxlength="30" placeholder="未分组" /></label><label class="setup-toggle"><span>置顶账号</span><input v-model="draft.pinned" type="checkbox" /></label></div><div v-if="!initial.id" class="batch-create"><label>创建数量<input v-model.number="count" type="number" min="1" max="20" required /></label><p class="setup-note">{{ names.join("、") }}<br />只打开第一个窗口，其余从侧栏选择。代理配置将应用于本批账号。</p></div><div class="setup-provider"><span>翻译引擎</span><b>HelloDog 云端</b><small>账号独立设置，成功翻译按字符计费</small></div></section>
         <section class="setup-section"><h3>语言与翻译</h3><div class="setup-grid"><label>我的语言<select v-model="draft.localLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label><label>对方的语言<select v-model="draft.targetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ language.zhName || language.name }}</option></select></label></div><p class="setup-note">已为联系人单独设置的语言优先于账号默认语言。</p><div class="setup-grid"><label v-for="toggle in toggles" :key="toggle.key" class="setup-toggle"><span><b>{{ toggle.label }}</b><small>{{ toggle.hint }}</small></span><input v-model="draft[toggle.key]" type="checkbox" role="switch" /></label></div><div class="setup-grid display-setup"><label>译文字号<select v-model.number="draft.fontSize"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label>译文颜色<input v-model="draft.translationColor" type="color" /></label></div></section>
         <section class="setup-section"><label class="setup-toggle proxy-heading"><span><b>独立代理 IP</b><small>{{ platform === 'whatsapp' ? '仅用于此 WhatsApp 窗口；关闭后使用系统网络' : 'Signal 独立代理暂不支持，当前使用系统网络' }}</small></span><input v-model="draft.proxy.enabled" type="checkbox" role="switch" :disabled="platform === 'signal'" /></label>
           <div v-if="draft.proxy.enabled && platform === 'whatsapp'" class="proxy-fields">
@@ -66,8 +82,8 @@ async function save() {
             <div class="proxy-import"><input v-model="paste" type="password" autocomplete="off" aria-label="代理链接" placeholder="协议://账号:密码@主机:端口" /><button type="button" class="secondary" @click="parse">解析</button></div><div class="proxy-test"><button type="button" class="secondary" :disabled="testing || busy" @click="testProxy">{{ testing ? '正在检测…' : '检测出口 IP' }}</button><span role="status">{{ proxyResult }}</span></div><p class="setup-note">使用你自行购买或配置的代理。启用后连接失败不会自动直连；云端翻译请求仍使用 HelloDog 的服务线路。保存后将重新加载此窗口。</p>
           </div>
         </section>
-        <p v-if="message" class="setup-error" role="alert">{{ message }}</p>
-      </fieldset>
+        <p v-if="message" class="setup-error" :class="{notice: message.startsWith('模板已')}" role="status">{{ message }}</p>
+      </fieldset></div>
       <footer class="setup-footer"><button type="button" class="secondary" :disabled="busy || testing" @click="close">取消</button><button class="primary" type="submit" :disabled="busy || testing">{{ busy ? '正在保存…' : initial.id ? '保存设置' : '创建窗口' }}</button></footer>
     </form>
   </div>

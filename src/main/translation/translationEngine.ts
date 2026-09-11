@@ -3,6 +3,7 @@ import type { AppSettings, TranslationMetrics, TranslationRequest } from '../typ
 import { SettingsStore } from '../storage/settingsStore'
 import { ProfileStore } from '../storage/profileStore'
 import { ChargeRegistry } from '../storage/chargeRegistry'
+import { MessageRequests } from './messageRequests'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
 import { CloudflareProvider } from './providers/cloudflare'
@@ -20,6 +21,7 @@ export class TranslationEngine {
   private readonly settings = new SettingsStore()
   private readonly profile = new ProfileStore()
   private readonly charges = new ChargeRegistry()
+  private readonly messageRequests = new MessageRequests()
   private readonly cache = new TranslationCache()
   private readonly inFlight = new Map<string, Promise<string>>()
   private readonly queue: QueueJob[] = []
@@ -66,6 +68,16 @@ export class TranslationEngine {
     return this.translateWithSettings(request, settings, false)
   }
 
+  cacheInfo() { return this.cache.stats(this.onlineUserId) }
+  clearCache() { if (this.activeRequests || this.queue.length) throw new Error('请等待翻译完成后再清理缓存。'); return this.cache.clear(this.onlineUserId) }
+  async cached(request: TranslationRequest): Promise<string | undefined> {
+    const user = this.onlineUserId
+    const value = await this.cache.get('openai', { ...request, cacheUserId: user })
+    if (user !== this.onlineUserId) throw new Error('登录状态已变化。')
+    if (value !== undefined) this.metricsState.cacheHits += 1
+    return value
+  }
+
   metrics(): TranslationMetrics {
     return { ...this.metricsState, activeRequests: this.activeRequests, queueDepth: this.queue.length }
   }
@@ -107,9 +119,10 @@ export class TranslationEngine {
     const revision = this.sessionRevision
     const text = request.text.trim()
     if (!text) return request.text
-    const normalized: TranslationRequest = {
+    let normalized: TranslationRequest = {
       ...request,
       text,
+      cacheUserId: this.onlineUserId,
       context: (request.context || []).filter((item) => item?.text?.trim()).slice(-4)
     }
 
@@ -127,6 +140,7 @@ export class TranslationEngine {
 
     if (useCache) {
       const cached = await this.cache.get(settings.provider, normalized)
+      if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
       if (cached !== undefined) {
         this.metricsState.cacheHits += 1
         this.metricsState.lastLatencyMs = 0
@@ -135,6 +149,8 @@ export class TranslationEngine {
       }
     }
 
+    if (useCache) normalized = await this.messageRequests.prepare(normalized)
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
     const key = this.requestKey(settings.provider, normalized)
     const existing = this.inFlight.get(key)
     if (existing) {
@@ -149,6 +165,7 @@ export class TranslationEngine {
       let reserved = false
       try {
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+        if (useCache) { const cached = await this.cache.get(settings.provider, normalized); if (revision !== this.sessionRevision) throw new Error('登录状态已变化。'); if (cached !== undefined) { this.metricsState.cacheHits += 1; return cached } }
         if (!cloudManaged) {
           await this.profile.ensureAvailable(charge, this.reservedCharacters)
           this.reservedCharacters += charge
@@ -162,7 +179,10 @@ export class TranslationEngine {
         this.recordLatency(latency)
         this.metricsState.lastError = undefined
 
-        if (useCache) await this.cache.set(settings.provider, normalized, translated)
+        if (useCache) {
+          try { await this.cache.set(settings.provider, normalized, translated) }
+          catch { this.metricsState.lastError = '译文已完成，但本机缓存写入失败；重试将沿用原请求。' }
+        }
 
         // OpenAI billing is now authoritative on the Cloudflare + Supabase server.
         // DeepL/Google remain local legacy providers for now and keep the old local quota path.
