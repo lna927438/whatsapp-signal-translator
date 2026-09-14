@@ -15388,4 +15388,4 @@ declare abstract class WorkflowInstance {
     }): Promise<void>;
 }
 
-export type { SecurityWorkerBindings, ScheduledController };
+export type { SecurityWorkerBindings, ScheduledController, ExecutionContext };

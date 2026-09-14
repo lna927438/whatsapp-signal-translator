@@ -11,7 +11,7 @@ export function providerConfig(env: ProviderEnv) {
   const provider = String(env.TRANSLATION_PROVIDER || 'openai').trim()
   if (provider === 'deepseek') return {
     provider, baseUrl: 'https://api.deepseek.com',
-    model: String(env.DEEPSEEK_MODEL || 'deepseek-flash').trim(),
+    model: String(env.DEEPSEEK_MODEL || 'deepseek-v4-pro').trim(),
     key: String(env.DEEPSEEK_API_KEY || '').trim()
   }
   if (provider !== 'openai') throw new Error('invalid_translation_provider')

@@ -55,11 +55,11 @@ test('DeepSeek readiness lists models with its own credential and never uses the
     assert.equal(String(url), 'https://api.deepseek.com/models')
     assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-deepseek')
     assert.equal(init?.body, undefined)
-    return new Response(JSON.stringify({ data: [{ id: 'deepseek-flash' }] }))
+    return new Response(JSON.stringify({ data: [{ id: 'deepseek-v4-pro' }] }))
   }
   const result = await checkProviderReadiness(settings)
   assert.equal(result.status, 'available'); assert.equal(result.provider, 'deepseek')
-  assert.equal(result.model, 'deepseek-flash'); assert.equal(result.inferenceTested, false)
+  assert.equal(result.model, 'deepseek-v4-pro'); assert.equal(result.inferenceTested, false)
   assert.ok(!JSON.stringify(result).includes('test-deepseek'))
   globalThis.fetch = async () => { assert.fail('must not fall back to the old OpenAI credential') }
   assert.equal((await checkProviderReadiness({ ...settings, DEEPSEEK_API_KEY: '' })).code, 'provider_auth')

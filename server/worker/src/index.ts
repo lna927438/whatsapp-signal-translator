@@ -157,7 +157,10 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
     })
   })
 
-  const payload: any = await response.json().catch(() => ({}))
+  // Keep the HTTP evidence even if the response body is interrupted. A body
+  // timeout is still a timeout, not an empty successful translation.
+  captureProviderReceipt(receipt, {}, response, started)
+  const payload: any = await response.json()
   captureProviderReceipt(receipt, payload, response, started)
   if (!response.ok) {
     throw classifyProviderFailure(response.status, payload)
@@ -256,7 +259,7 @@ async function translate(request: Request, env: Env, user: User, ctx?: Pick<Exec
   const model = config.model
   const bounds = providerTokenBounds(body.text, translationInstructions(body.sourceLanguage, body.targetLanguage, body.context, body.quality))
   let claim: Claim
-  try { claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
+  const claimBody = {
     p_user_id: user.id,
     p_request_id: requestId,
     p_payload_hash: await requestHash(body, model),
@@ -268,7 +271,23 @@ async function translate(request: Request, env: Env, user: User, ctx?: Pick<Exec
       provider: config.provider, account_id: body.accountId || null, conversation_id: body.conversationId || null,
       source_language: body.sourceLanguage, target_language: body.targetLanguage
     }
-  }) } catch (error) {
+  }
+  try {
+    try { claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', claimBody) }
+    catch (error) {
+      // A server-side Flash/Pro switch must not turn an otherwise identical
+      // persisted request into a conflict. The database still verifies the
+      // complete old fingerprint and returns its original terminal/pending
+      // state; this never retries the provider or changes an old debit.
+      const previousModel = config.provider === 'deepseek'
+        ? model === 'deepseek-v4-pro' ? 'deepseek-flash' : model === 'deepseek-flash' ? 'deepseek-v4-pro' : null
+        : null
+      if (!(error instanceof Error) || error.message !== 'request_id_conflict' || !previousModel) throw error
+      claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
+        ...claimBody, p_payload_hash: await requestHash(body, previousModel)
+      })
+    }
+  } catch (error) {
     if (error instanceof Error && ['rate_limited','cost_limit','security_paused'].includes(error.message)) {
       await adminPost(env, '/rest/v1/rpc/record_security_event', { p_actor: user.id, p_code: error.message }).catch(() => undefined)
     }
@@ -284,6 +303,7 @@ async function translate(request: Request, env: Env, user: User, ctx?: Pick<Exec
 }
 
 async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, model: string): Promise<Response> {
+  const started = Date.now()
   let translated: Awaited<ReturnType<typeof providerTranslate>>
   const receipt=providerReceipt(model)
   try {
@@ -291,7 +311,9 @@ async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody
   } catch (error: any) {
     const failureCode = error instanceof ProviderFailure ? error.code
       : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'
-    console.warn(JSON.stringify({ event: 'translation_provider_failure', code: failureCode, status: error instanceof ProviderFailure ? error.upstreamStatus : undefined }))
+    console.warn(JSON.stringify({ event: 'translation_provider_failure', code: failureCode,
+      provider: providerConfig(env).provider, model, latencyMs: Date.now() - started,
+      status: error instanceof ProviderFailure ? error.upstreamStatus : receipt.httpStatus }))
     // A provider timeout is ambiguous. Store a terminal outcome for this ID,
     // release its reservation, and never automatically call the provider again.
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -332,8 +354,8 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-channel1', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-channel1', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)

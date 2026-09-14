@@ -25,7 +25,7 @@ before(async () => {
         assert.equal(url.origin, 'https://api.deepseek.com')
         assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-deepseek')
         const body = JSON.parse(String(init?.body))
-        assert.equal(body.model, 'deepseek-flash')
+        assert.equal(body.model, env.DEEPSEEK_MODEL || 'deepseek-v4-pro')
         assert.equal(body.reasoning.effort, 'none')
         assert.equal(body.store, false)
       }
@@ -64,6 +64,7 @@ beforeEach(async () => {
   providerCalls = 0
   delete env.TRANSLATION_PROVIDER
   delete env.DEEPSEEK_API_KEY
+  delete env.DEEPSEEK_MODEL
   loseCompletionResponse = false
   loseFailureResponse = false
   provider = async () => reply({ output_text: '译文', model: 'test-model' })
@@ -236,7 +237,7 @@ test('a specific provider failure is safely persisted and replayed without expos
 
 
 test('DeepSeek translation uses isolated key, non-thinking Responses, and correct usage provider with one debit on replay', async () => {
-  env.TRANSLATION_PROVIDER = 'deepseek'; env.DEEPSEEK_API_KEY = 'test-deepseek'
+  env.TRANSLATION_PROVIDER = 'deepseek'; env.DEEPSEEK_API_KEY = 'test-deepseek'; env.DEEPSEEK_MODEL = 'deepseek-flash'
   provider = async () => reply({ output: [{ type: 'message', content: [{ type: 'output_text', text: '你好' }] }], model: 'deepseek-flash' })
   const first = await request()
   assert.equal(first.status, 200)
@@ -258,6 +259,58 @@ test('DeepSeek insufficient balance is terminal and releases characters without 
   assert.equal(providerCalls, 1)
   assert.deepEqual(await counts(), { debits: 0, usages: 0 })
   assert.deepEqual(await wallet(db), { balance: 100, reserved_characters: 0, lifetime_debited: 0 })
+})
+
+test('a model switch replays completed Flash receipts without another call or debit and still rejects changed content', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';env.DEEPSEEK_API_KEY='test-deepseek';env.DEEPSEEK_MODEL='deepseek-flash'
+  provider=async()=>reply({output_text:'你好',model:'deepseek-flash'})
+  const original=await (await request('switch-completed')).json()
+  env.DEEPSEEK_MODEL='deepseek-v4-pro'
+  const replay=await request('switch-completed')
+  assert.equal(replay.status,200);assert.deepEqual(await replay.json(),original)
+  for(const patch of [{text:'other'},{targetLanguage:'en'},{accountId:'other-account'},{context:[{role:'incoming',text:'different context'}]}]) {
+    assert.equal((await request('switch-completed',patch)).status,409)
+  }
+  assert.equal(providerCalls,1);assert.deepEqual(await counts(),{debits:1,usages:1})
+})
+
+test('failed Flash IDs remain terminal after a switch while a fresh retry uses Pro and charges once', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';env.DEEPSEEK_API_KEY='test-deepseek';env.DEEPSEEK_MODEL='deepseek-flash'
+  provider=async()=>{throw new DOMException('simulated timeout','TimeoutError')}
+  const original=await (await request('switch-failed')).json()
+  env.DEEPSEEK_MODEL='deepseek-v4-pro'
+  assert.deepEqual(await (await request('switch-failed')).json(),original)
+  assert.equal(providerCalls,1);assert.equal((await wallet(db)).balance,100)
+  provider=async()=>reply({output_text:'你好',model:'deepseek-v4-pro',usage:{input_tokens:100,input_tokens_details:{cached_tokens:40},output_tokens:50,total_tokens:150}})
+  assert.equal((await request('switch-fresh-retry')).status,200)
+  assert.equal((await request('switch-fresh-retry')).status,200)
+  assert.equal(providerCalls,2);assert.deepEqual(await counts(),{debits:1,usages:1})
+  const row=(await db.query<any>("select model,cost_status,input_rate,output_rate,cost_usd from translator_private.provider_usage where request_id='switch-fresh-retry'")).rows[0]
+  assert.equal(row.model,'deepseek-v4-pro');assert.equal(row.cost_status,'calculated')
+  assert.ok([0.66,1.32].includes(Number(row.input_rate)));assert.ok([1.98,3.96].includes(Number(row.output_rate)))
+  assert.ok([0.00013948,0.00027896].includes(Number(row.cost_usd)))
+  assert.deepEqual(await wallet(db),{balance:95,reserved_characters:0,lifetime_debited:5})
+})
+
+test('pending Flash work stays pending across a model switch and settles its original result exactly once', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';env.DEEPSEEK_API_KEY='test-deepseek';env.DEEPSEEK_MODEL='deepseek-flash'
+  let release!:()=>void,entered!:()=>void
+  const started=new Promise<void>(r=>entered=r),hold=new Promise<void>(r=>release=r)
+  provider=async()=>{entered();await hold;return reply({output_text:'你好',model:'deepseek-flash'})}
+  const first=request('switch-pending');await started
+  try {env.DEEPSEEK_MODEL='deepseek-v4-pro';assert.equal((await request('switch-pending')).status,202);assert.equal(providerCalls,1)}
+  finally {release()}
+  assert.equal((await first).status,200);assert.equal((await request('switch-pending')).status,200)
+  assert.equal(providerCalls,1);assert.deepEqual(await counts(),{debits:1,usages:1})
+})
+
+test('a response body timeout keeps its HTTP evidence and does not become an empty success or charge', async () => {
+  provider=async()=>{const response=reply({});response.json=async()=>{throw new DOMException('body interrupted','TimeoutError')};return response}
+  const result=await (await request('body-timeout')).json()
+  assert.equal(result.error,'provider_timeout')
+  const row=(await db.query<any>("select http_status from translator_private.provider_usage where request_id='body-timeout'")).rows[0]
+  assert.equal(row.http_status,200);assert.equal(providerCalls,1)
+  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
 })
 
 test('quality terms and URL protection settle the original character count and replay without a second debit',async()=>{
