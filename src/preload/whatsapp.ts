@@ -9,6 +9,8 @@ const accountArg = process.argv.find((value) => value.startsWith('--rt-account-i
 const accountId = accountArg?.slice('--rt-account-id='.length)
 
 contextBridge.exposeInMainWorld('realtimeTranslator', {
+  getContactNote: (peer: string) => ipcRenderer.invoke('whatsapp:contact-note', accountId, peer),
+  saveContactNote: (peer: string, text: string, revision: number) => ipcRenderer.invoke('whatsapp:save-contact-note', accountId, peer, text, revision),
   getDraft: (target: any) => ipcRenderer.invoke('draft:get', { ...target, accountId }),
   saveDraft: (target: any, text: string) => ipcRenderer.invoke('draft:save', { ...target, accountId }, text),
   editComposer: (value: any) => ipcRenderer.invoke('whatsapp:edit-composer', accountId, value),

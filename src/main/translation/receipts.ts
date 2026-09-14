@@ -1,4 +1,5 @@
 import { JsonStore } from '../storage/jsonStore'
+import { createHash } from 'crypto'
 import type { TranslationRequest } from '../types'
 import { qualityKey } from '../../shared/translationPolicy'
 
@@ -22,6 +23,7 @@ export interface TranslationReceipt {
   providerMs?: number
   error?: string
   missingRetries?: number
+  retryRequestId?: string
   createdAt: number
   updatedAt: number
 }
@@ -50,6 +52,16 @@ export class TranslationReceipts {
       if (!receipt || receipt.state !== 'pending' || receipt.contentExpired || receipt.contextCleared || (receipt.missingRetries || 0) >= limit) return undefined
       receipt.state = 'queued'; receipt.error = undefined; receipt.missingRetries = (receipt.missingRetries || 0) + 1; receipt.updatedAt = Date.now()
       return receipt.request
+    })
+  }
+  retryFailedOutgoing(owner: string, requestId: string) {
+    return this.mutate(data => {
+      const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
+      if (!receipt || !requestId.startsWith('send-') || receipt.state !== 'failed' || receipt.chargedCharacters !== 0
+        || receipt.contentExpired || receipt.contextCleared) throw new Error('原翻译尚未确认失败，不能创建重试。')
+      receipt.retryRequestId ??= 'send-retry-' + createHash('sha256').update(requestId).digest('hex')
+      receipt.updatedAt = Date.now()
+      return { ...receipt.request, requestId: receipt.retryRequestId }
     })
   }
   prepare(owner: string, provider: string, request: TranslationRequest): Promise<TranslationReceipt> {

@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
 
 const protectedFiles = new Set(['online-auth-v1.json', 'translation-content-policy-v1.json', 'drafts-v1.json', 'outgoing-tasks-v1.json', 'translation-receipts-v1.json', 'message-requests-v1.json', 'translation-cache.json', 'signal-history-v1.json'])
+protectedFiles.add('contact-notes-v1.json')
 const pendingWrites = new Map<string, Promise<void>>()
 const encryptedPrefix = 'hellodog-encrypted-v1:'
 

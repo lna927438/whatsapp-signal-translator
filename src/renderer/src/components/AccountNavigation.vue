@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { t } from '../lib/uiLocale'
 import UiIcon from './UiIcon.vue'
 const props=defineProps<{accounts:any[];selectedId?:string;unread:Record<string,number>;position:'top'|'side';platform:string}>()
-const emit=defineEmits(['select','menu','add','search','remove','remark'])
+const emit=defineEmits(['select','menu','add','search','remove','remark','caption'])
 const list=ref<HTMLElement>()
 const rows=computed(()=>[...props.accounts].sort((a,b)=>Number(Boolean(b.pinned))-Number(Boolean(a.pinned))))
 const name=(a:any)=>a.note||a.label
@@ -19,6 +19,7 @@ function move(event:KeyboardEvent,index:number){const delta=['ArrowRight','Arrow
      <span class="tab-app-icon"><img :src="`./${account.platform}.svg`" alt="" /><span v-if="unread[account.id]" class="unread-badge">{{unread[account.id]>99?'99+':unread[account.id]}}</span></span><span class="account-tab-name">{{name(account)}}</span><i v-if="account.pinned" class="account-pin"></i>
     </button>
     <button class="account-close" :title="t('移除账号入口')+' · '+name(account)" :aria-label="t('移除账号入口')+' · '+name(account)" @click.stop="emit('remove',account)">×</button>
+    <button class="account-caption" :title="account.caption || t('添加独立红色备注')" :aria-label="t('编辑红色备注')+' · '+name(account)" @click.stop="emit('caption',account)">{{account.caption || t('＋红色备注')}}</button>
    </div>
   </div>
   <button class="compact-tool account-add" @click="emit('add')" :title="t('添加账号')" :aria-label="t('添加账号')"><UiIcon name="plus" /></button>
@@ -27,14 +28,15 @@ function move(event:KeyboardEvent,index:number){const delta=['ArrowRight','Arrow
 </template>
 <style scoped>
 .account-navigation{display:flex;align-items:center;gap:4px;min-width:0;min-height:0;background:var(--surface);box-sizing:border-box}
-.account-navigation.top{height:42px;padding:3px 7px;border-bottom:1px solid var(--border);flex-shrink:0}
+.account-navigation.top{height:58px;padding:3px 7px;border-bottom:1px solid var(--border);flex-shrink:0}
 .account-navigation.side{width:156px;flex:0 0 156px;flex-direction:column;padding:6px;border-left:1px solid var(--border)}
 .account-switch-list{display:flex;gap:5px;flex:1;min-width:50px;min-height:0;padding:3px 1px;overflow:auto;scrollbar-width:thin}
 .side .account-switch-list{flex-direction:column;width:100%;box-sizing:border-box;padding:3px 0}
-.account-tab{position:relative;display:flex;align-items:center;flex:0 0 auto;height:30px;width:150px;border:1px solid var(--border);border-radius:8px;background:var(--field);box-sizing:border-box}
-.side .account-tab{width:100%;height:36px}.account-tab:hover,.account-tab.active{border-color:var(--accent);background:var(--accent-soft)}
+.account-tab{position:relative;display:flex;align-items:flex-start;flex:0 0 auto;height:47px;width:150px;padding-bottom:17px;border:1px solid var(--border);border-radius:8px;background:var(--field);box-sizing:border-box}
+.side .account-tab{width:100%;height:51px}.account-tab:hover,.account-tab.active{border-color:var(--accent);background:var(--accent-soft)}
 .account-switch{position:relative;display:flex;align-items:center;gap:7px;flex:1;min-width:0;height:100%;padding:3px 3px 3px 6px;border:0;background:transparent;color:var(--text);cursor:pointer;text-align:left}
 .account-tab-name{font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.tab-app-icon{position:relative;flex:0 0 22px;width:22px;height:22px}.tab-app-icon img{width:22px;height:22px}
+.account-caption{position:absolute;bottom:2px;left:6px;right:6px;max-width:calc(100% - 12px);padding:0;border:0;background:transparent;color:#ff858d;font-size:11px;line-height:14px;text-align:left;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer}
 .account-count{display:flex;align-items:center;justify-content:center;gap:3px;flex:0 0 auto;height:30px;min-width:39px;padding:2px 4px;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;font-size:11px}.account-count img{width:18px;height:18px}
 .account-close{display:grid;place-items:center;flex:0 0 22px;width:22px;height:22px;margin-right:2px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--muted);font-size:18px;cursor:pointer}.account-close:hover{color:var(--text);background:var(--raised)}
 .account-navigation-tools{flex:0 0 auto;min-width:0;border-left:1px solid var(--border);padding-left:5px}.account-pin{bottom:0;left:3px;right:auto}

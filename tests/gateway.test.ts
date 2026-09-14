@@ -8,6 +8,7 @@ let providerCalls = 0
 let providerBody: any
 let provider: () => Promise<Response>
 let loseCompletionResponse = false
+let loseFailureResponse = false
 const originalFetch = globalThis.fetch
 const env: Env = { API_RATE_LIMITER: { limit: async () => ({ success: true }) }, SUPABASE_URL: 'https://database.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public',
   SUPABASE_SECRET_KEY: 'test-service', OPENAI_API_KEY: 'test-provider', OPENAI_MODEL: 'test-model' }
@@ -52,6 +53,7 @@ before(async () => {
         loseCompletionResponse = false
         throw new TypeError('Simulated lost response after successful commit')
       }
+      if (name === 'fail_translation_metered' && loseFailureResponse) { loseFailureResponse=false; throw new TypeError('Lost failed-settlement response') }
       return reply(result)
     }
     throw new Error('Unexpected request '+url.pathname)
@@ -63,6 +65,7 @@ beforeEach(async () => {
   delete env.TRANSLATION_PROVIDER
   delete env.DEEPSEEK_API_KEY
   loseCompletionResponse = false
+  loseFailureResponse = false
   provider = async () => reply({ output_text: '译文', model: 'test-model' })
 })
 after(async () => { globalThis.fetch = originalFetch; await db?.close() })
@@ -89,6 +92,20 @@ test('successful retry replays the original result without a second AI call or d
   assert.equal(providerCalls,1)
   assert.deepEqual(await wallet(db),{ balance:95,reserved_characters:0,lifetime_debited:5 })
   assert.deepEqual(await counts(),{ debits:1,usages:1 })
+})
+
+test('claimed work is retained past a disconnected desktop and failure settlement survives a lost reply', async () => {
+  let release!:()=>void,entered!:()=>void
+  const started=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r),background:Promise<unknown>[]=[]
+  provider=async()=>{entered();await gate;return reply({error:{message:'unavailable'}},503)}
+  loseFailureResponse=true
+  const abort=new AbortController()
+  const response=worker.fetch(new Request('https://worker.invalid/api/translate',{method:'POST',headers:{Authorization:'Bearer test-user','Content-Type':'application/json'},body:JSON.stringify({requestId:'retained-work',text:'hello',targetLanguage:'zh-CN'}),signal:abort.signal}),env,{waitUntil(work){background.push(work)}})
+  await started;abort.abort();release()
+  assert.equal((await response).status,502);await Promise.all(background);assert.ok(background.length>=1)
+  assert.equal((await request('retained-work')).status,502);assert.equal(providerCalls,1)
+  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
+  assert.equal((await rpc(db,'translation_status',{p_user_id:USER,p_request_id:'retained-work'})).state,'failed')
 })
 
 test('simultaneous requests from separate gateway calls acquire only one provider claim', async () => {

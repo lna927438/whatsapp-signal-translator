@@ -1,4 +1,5 @@
 import { whatsappSidebarScript } from './sidebar'
+import { whatsappContactScript } from './contactDetails'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
 import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
 export const whatsappInjectionScript = String.raw`
@@ -157,7 +158,7 @@ export const whatsappInjectionScript = String.raw`
     ];
     let name = '';
     for (const selector of titleSelectors) {
-      const candidates = Array.from(header.querySelectorAll(selector));
+      const candidates = Array.from(header.querySelectorAll(selector)).filter(el => !el.closest('[data-rt-ui]'));
       const found = candidates.map((el) => normalizeMessage(el.getAttribute('title') || el.textContent || '')).find((value) => value && value.length < 160);
       if (found) { name = found; break; }
     }
@@ -451,9 +452,16 @@ export const whatsappInjectionScript = String.raw`
             button.disabled = true; incomingActive.add(container); incomingActiveCount++;
             try {
               const result = await bounded(api.translateIncoming({ ...payload, manual: true }), 45000, '翻译暂未完成，请重试');
-              if (current()) { finish(result); button.remove(); payload.retryAt = 0; payload.failures = 0; }
+              if (current()) {
+                finish(result); button.remove(); payload.retryAt = 0; payload.failures = 0;
+                incomingPaused = false; incomingFailures = 0; incomingRetryAt = 0;
+                if (!activeSend) reportStatus('ready', '翻译已恢复');
+              }
             } catch (error) { if (current()) { incomingError(error, payload); button.disabled = false; button.textContent = ui('重试翻译'); } }
-            finally { incomingActive.delete(container); incomingActiveCount--; }
+            finally {
+              incomingActive.delete(container); incomingActiveCount--;
+              if (document.defaultView && document.documentElement?.isConnected) setTimeout(() => { void translateVisible(); }, 30);
+            }
           };
           messageTextHost(container).appendChild(button);
         };
@@ -787,7 +795,9 @@ export const whatsappInjectionScript = String.raw`
         if (result?.state === 'uncertain') job.state = 'uncertain';
         else { queuedSends.delete(job.id); showSendStatus('已发送', 'success'); void translateVisible(); }
       } catch (error) {
-        job.state = /后台确认|未确认/.test(error?.message || '') ? 'uncertain' : 'failed'; job.error = String(error?.message || '暂未发送');
+        // Translation uncertainty is not platform-send uncertainty. Only a
+        // submitted platform command can require a no-resend reconciliation.
+        job.state = job.state === 'sending' && /后台确认|未确认/.test(error?.message || '') ? 'uncertain' : 'failed'; job.error = String(error?.message || '暂未发送');
         if(job.state==='failed') {
           const composer = getComposer();
           if (composer && !composerText(composer) && targetKey() === job.targetKey && conversationInfo().id === job.conversationId
@@ -1031,4 +1041,4 @@ export const whatsappInjectionScript = String.raw`
     void recoverPending(); void translateVisible(); }, 1400);
   void translateVisible();
 })();
-` + whatsappSidebarScript;
+` + whatsappSidebarScript + whatsappContactScript;

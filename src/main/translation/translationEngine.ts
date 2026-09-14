@@ -6,7 +6,7 @@ import { ChargeRegistry } from '../storage/chargeRegistry'
 import { MessageRequests } from './messageRequests'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
-import { CloudflareProvider, TranslationOutcomeError, validateCloudReceipt } from './providers/cloudflare'
+import { CloudflareProvider, TranslationOutcomeError, validateCloudReceipt, translationFailureMessage } from './providers/cloudflare'
 import { TranslationReceipts } from './receipts'
 import { normalizeQuality, qualityKey, protectLiterals } from '../../shared/translationPolicy'
 import { DeepLProvider } from './providers/deepl'
@@ -73,6 +73,28 @@ export class TranslationEngine {
   private freshSession?: (owner: string, force?: boolean, rejectedToken?: string) => Promise<string>
   onSessionRefresh(callback: (owner: string, force?: boolean, rejectedToken?: string) => Promise<string>) { this.freshSession = callback }
   async outgoingSettlement(requestId: string) { return this.cloudProvider(this.sessionRevision, this.onlineUserId).status(requestId) }
+  /** Retry only a confirmed uncharged translation; preserve platform dispatch identity. */
+  async prepareOutgoingRequest(request: TranslationRequest): Promise<TranslationRequest> {
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    if (!request.requestId?.startsWith('send-')) return request
+    let current = request
+    for (let depth = 0; depth < 1000; depth++) {
+      if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+      let receipt = await this.receipts.get(owner, current.requestId!)
+      if (!receipt) return current
+      await this.content.assertAvailable(receipt.request)
+      if (receipt.contentExpired || receipt.contextCleared) throw new Error('原请求内容已清理，不能再次提交。')
+      if (receipt.retryRequestId) { current = { ...receipt.request, requestId: receipt.retryRequestId }; continue }
+      if (receipt.state === 'pending') {
+        await this.reconcilePending(receipt.requestId)
+        receipt = await this.receipts.get(owner, receipt.requestId)
+      }
+      if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+      if (receipt?.state === 'failed' && receipt.chargedCharacters === 0) return this.receipts.retryFailedOutgoing(owner, receipt.requestId)
+      return receipt?.request || current
+    }
+    throw new Error('此消息的重试记录过多，请复制原文后联系支持。')
+  }
   async existingOutgoing(requestId: string, accountId: string, conversationId: string, original: string, translated: string): Promise<TranslationRequest> {
     const owner = this.onlineUserId, revision = this.sessionRevision
     const receipt = await this.receipts.get(owner, requestId)
@@ -194,14 +216,26 @@ export class TranslationEngine {
   async retryOriginal(requestId: string) {
     const owner = this.onlineUserId, revision = this.sessionRevision
     const receipt = await this.receipts.get(owner, requestId)
-    if (!receipt || receipt.provider !== 'openai' || receipt.state !== 'pending') throw new Error('此请求不需要重试，请先核对结果。')
+    if (!receipt || receipt.provider !== 'openai' || !['pending','failed'].includes(receipt.state)) throw new Error('此请求不需要重试，请先核对结果。')
+    if (receipt.contentExpired || receipt.contextCleared) throw new Error('原请求包含已清理的内容，只能查询原结果，不能再次提交。')
+    if (requestId.startsWith('send-')) {
+      const request = await this.prepareOutgoingRequest(receipt.request)
+      return this.translate(request)
+    }
+    if (receipt.state === 'failed') return this.translateIncoming(receipt.request, true)
     const result = await this.cloudProvider(revision, owner).status(requestId)
     if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
-    if (result.state !== 'not_found') { await this.reconcilePending(requestId); throw new Error('云端已有此请求，已继续核对。不会重新发起翻译。') }
+    if (result.state !== 'not_found') {
+      await this.reconcilePending(requestId)
+      const latest = await this.receipts.get(owner, requestId)
+      if (latest?.state === 'charged') return latest.correction ?? latest.translated
+      if (latest?.state === 'failed') return this.translateIncoming(latest.request, true)
+      throw new Error('云端仍在处理此请求，请稍后继续核对。')
+    }
     if (receipt.contentExpired || receipt.contextCleared) throw new Error('原请求包含已清理的内容，只能查询原结果，不能再次提交。')
     await this.content.assertAvailable(receipt.request)
     await this.receipts.update(owner, requestId, { state: 'queued', error: undefined })
-    return this.translateWithSettings(receipt.request, { ...await this.settings.get(), provider: 'openai' }, true)
+    return this.translateWithSettings(receipt.request, { ...await this.settings.get(), provider: 'openai' }, true, { manual: true })
   }
   async reconcilePending(requestId?: string) {
     const missing = new Set<string>()
@@ -225,8 +259,8 @@ export class TranslationEngine {
             await this.receipts.update(owner, entry.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined })
             const settled = await this.receipts.get(owner, entry.requestId)
             if (!settled?.contentExpired) await this.cache.set(entry.provider, entry.request, receipt.translation)
-          } else if (result.state === 'failed') await this.receipts.update(owner, entry.requestId, { state: 'failed', chargedCharacters: 0, error: '云端已确认未扣费。' })
-          else await this.receipts.update(owner, entry.requestId, { error: result.state === 'not_found' ? '云端暂未查到此编号。可主动重试原编号，仍按同一请求处理。' : '云端仍在处理，稍后继续核对。' })
+          } else if (result.state === 'failed') await this.receipts.update(owner, entry.requestId, { state: 'failed', chargedCharacters: 0, error: translationFailureMessage(result.error) })
+          else await this.receipts.update(owner, entry.requestId, { error: result.state === 'not_found' ? '云端暂未查到此编号。可主动重试原编号，仍按同一请求处理。' : '云端仍在处理，结果待确认，稍后继续核对。' })
           if (result.state === 'not_found') return 'not_found' as const
         } catch (error) { await this.receipts.update(owner, entry.requestId, { error: error instanceof TranslationOutcomeError ? error.message : '暂时无法核对原请求，请恢复连接或重新登录。' }) }
         })().finally(()=>this.reconciliations.delete(key))
@@ -315,7 +349,7 @@ export class TranslationEngine {
       normalized.sourceLanguage = previous?.request.sourceLanguage ?? (evidence.confidence === 'high' ? evidence.language : 'auto')
     }
     if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
-    const stored = await this.receipts.prepare(owner, settings.provider, normalized)
+    let stored = await this.receipts.prepare(owner, settings.provider, normalized)
     normalized = stored.request
     await this.content.assertAvailable(normalized)
     const concurrent = this.inFlight.get(this.requestKey(settings.provider, normalized))
@@ -330,11 +364,14 @@ export class TranslationEngine {
       if (missing?.has(stored.requestId) && (historyRecovery || stored.requestId.startsWith('send-'))) {
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
         const retry = await this.receipts.retryMissing(owner, stored.requestId, historyRecovery?.manual ? Infinity : 2)
-        if (retry) return this.translateWithSettings(retry, settings, useCache)
+        if (retry) return this.translateWithSettings(retry, settings, useCache, historyRecovery)
         const latest = await this.receipts.get(owner, stored.requestId)
-        if (latest?.state === 'queued' || this.inFlight.has(this.requestKey(settings.provider, normalized))) return this.translateWithSettings(normalized, settings, useCache)
+        if (latest?.state === 'queued' || this.inFlight.has(this.requestKey(settings.provider, normalized))) return this.translateWithSettings(normalized, settings, useCache, historyRecovery)
       }
-      throw new TranslationOutcomeError('原请求结果待确认，请在翻译记录中继续核对。不会自动重发。')
+      // The lookup may have moved pending -> failed in this very call. Continue
+      // from the authoritative state instead of falsely reporting it as pending.
+      if (reconciled?.state === 'failed') stored = reconciled
+      else throw new TranslationOutcomeError(reconciled?.error || '原请求结果待确认，恢复连接后会继续核对。')
     }
     if (stored.state === 'failed') {
       // Never replace a pending/unknown or settled request. Confirmed uncharged
@@ -343,7 +380,7 @@ export class TranslationEngine {
       if (historyRecovery && stored.chargedCharacters === 0 && !stored.contentExpired && !stored.contextCleared) {
         const next = await this.messageRequests.recoverFailed(normalized, historyRecovery.manual ? Infinity : 2)
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
-        if (next && next.requestId !== normalized.requestId) return this.translateWithSettings(next, settings, true)
+        if (next && next.requestId !== normalized.requestId) return this.translateWithSettings(next, settings, true, historyRecovery)
       }
       throw new TranslationOutcomeError(stored.error || '此请求已失败，请重试此消息。', true)
     }

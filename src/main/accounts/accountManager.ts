@@ -131,6 +131,7 @@ export class AccountManager {
       if (input[key] !== undefined) out[key] = input[key]
     }
     if (input.note !== undefined) { if (typeof input.note !== 'string' || input.note.length > 80) throw new Error('账号备注最多 80 个字符。'); out.note = input.note.trim() }
+    if (input.caption !== undefined) { if (typeof input.caption !== 'string' || input.caption.length > 120) throw new Error('红色备注最多 120 个字符。'); out.caption = input.caption.trim() }
     if (out.group !== undefined) out.group = String(out.group).trim().slice(0, 30)
     if (out.pinned !== undefined) out.pinned = out.pinned === true
     if (out.label !== undefined) { out.label = String(out.label).trim().slice(0, 60); if (!out.label) throw new Error('请输入账号名称。') }

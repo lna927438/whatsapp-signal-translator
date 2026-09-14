@@ -1,4 +1,4 @@
-import type { SecurityWorkerBindings, ScheduledController } from '../worker-configuration'
+import type { SecurityWorkerBindings, ScheduledController, ExecutionContext } from '../worker-configuration'
 import { providerConfig, type ProviderEnv } from './providerConfig'
 import { boundedJson, rateKey, providerTokenBounds } from './requestSecurity'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
@@ -83,7 +83,7 @@ async function adminGet<T>(env: Env, path: string): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: string): Promise<T> {
+async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: string, timeoutMs = 15000): Promise<T> {
   const response = await fetch(`${env.SUPABASE_URL}${path}`, {
     method: 'POST',
     headers: {
@@ -92,7 +92,7 @@ async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: stri
       Accept: 'application/json',
       ...(prefer ? { Prefer: prefer } : {})
     },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(15000)
+    body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs)
   })
   if (!response.ok) {
     const error = await response.json().catch(() => ({})) as { message?: string }
@@ -141,7 +141,8 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   if (!config.key) throw new ProviderFailure('provider_auth')
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
-    signal: AbortSignal.timeout(45_000),
+    // Leave time for settlement before the desktop's 30-second POST timeout.
+    signal: AbortSignal.timeout(20_000),
     headers: {
       Authorization: `Bearer ${config.key}`,
       'Content-Type': 'application/json'
@@ -245,7 +246,7 @@ async function requestHash(body: TranslateBody, model: string): Promise<string> 
   return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-async function translate(request: Request, env: Env, user: User): Promise<Response> {
+async function translate(request: Request, env: Env, user: User, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
   const body = normalizeBody(await boundedJson(request))
   // Old 0.4.3 clients sent different header/body IDs. Keep the body authoritative.
   const requestId = body.requestId || request.headers.get('x-request-id') || ''
@@ -275,6 +276,14 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   }
   if (claim.state !== 'claimed') return claimResponse(claim)
 
+  const work = settleTranslation(env, body, requestId, user.id, claimToken, model)
+  // A tab refresh or a timed-out desktop request must not abandon a claimed
+  // translation before its result/failure and wallet reservation are settled.
+  ctx?.waitUntil(work.then(() => undefined, () => undefined))
+  return work
+}
+
+async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, model: string): Promise<Response> {
   let translated: Awaited<ReturnType<typeof providerTranslate>>
   const receipt=providerReceipt(model)
   try {
@@ -285,15 +294,16 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
     console.warn(JSON.stringify({ event: 'translation_provider_failure', code: failureCode, status: error instanceof ProviderFailure ? error.upstreamStatus : undefined }))
     // A provider timeout is ambiguous. Store a terminal outcome for this ID,
     // release its reservation, and never automatically call the provider again.
-    try {
-      const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation_metered', {
-        p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
-        p_error_code: failureCode, p_receipt: receipt
-      })
-      return claimResponse(failed)
-    } catch {
-      return failure('settlement_pending')
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation_metered', {
+          p_user_id: userId, p_request_id: requestId, p_claim_token: claimToken,
+          p_error_code: failureCode, p_receipt: receipt
+        }, undefined, 2500)
+        return claimResponse(failed)
+      } catch { /* Idempotent failure settlement, including a lost commit reply. */ }
     }
+    return failure('settlement_pending')
   }
 
   // Retrying the database completion is safe: it stores the result, debits the
@@ -301,10 +311,10 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const completed = await adminPost<Claim>(env, '/rest/v1/rpc/complete_translation_metered', {
-        p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
+        p_user_id: userId, p_request_id: requestId, p_claim_token: claimToken,
         p_translation: translated.translation, p_model: translated.model,
         p_latency_ms: translated.latencyMs, p_receipt: receipt
-      })
+      }, undefined, 2500)
       return claimResponse(completed)
     } catch (error) {
       if (error instanceof Error && error.message === 'account_disabled') return failure('account_disabled')
@@ -315,15 +325,15 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   return failure('settlement_pending')
 }
 
-async function route(request: Request, env: Env): Promise<Response> {
+async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
   const url = new URL(request.url)
   if (request.method !== 'OPTIONS' && !(request.method === 'GET' && url.pathname === '/health')) {
     if (!env.API_RATE_LIMITER || !(await env.API_RATE_LIMITER.limit({ key: await rateKey(request) })).success) return failure('rate_limited')
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.9', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.9', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)
@@ -356,14 +366,16 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json({ user: { id: user.id, email: user.email || null }, profile,
       ...await adminPost<Record<string, unknown>>(env, '/rest/v1/rpc/account_snapshot', { p_user_id: user.id }) })
   }
-  if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user)
+  if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user, ctx)
   return json({ error: 'not_found', message: 'API route not found.' }, 404)
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
     try {
-      return await route(request, env)
+      const work = route(request, env, ctx)
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/translate') ctx?.waitUntil(work.then(() => undefined, () => undefined))
+      return await work
     } catch (error) {
       if (error instanceof Response) return error
       const code = error instanceof Error ? error.message : 'internal_error'

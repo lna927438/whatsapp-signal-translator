@@ -42,6 +42,19 @@ test('WhatsApp burst translates concurrently, dispatches in order and preserves 
  }finally{h.dom.window.close()}
 })
 
+test('translation uncertainty is retryable and cannot turn an unsent draft into an uncertain platform send',async()=>{
+ const h=setup();try{
+  h.type('failed original');h.enter();await until(()=>h.translations.length===1)
+  h.gates.get('send-1')!.reject(Error('翻译结果未确认，原请求已保存'))
+  await until(()=>h.composer.textContent==='failed original');await tick()
+  h.type('next original');h.enter();await until(()=>h.translations.length===2)
+  h.gates.get('send-2')!.resolve('next translated');await until(()=>h.submits.length===1)
+  assert.equal(await h.win.__RT_RETRY_QUEUED_SEND__('send-1'),true);await until(()=>h.translations.length===3)
+  h.gates.get('send-1')!.resolve('first recovered');await until(()=>h.submits.length===2)
+  assert.deepEqual(h.submits,['send-2','send-1']);assert.equal(h.tasks.size,2)
+ }finally{h.dom.window.close()}
+})
+
 test('20 rapid messages keep distinct identities and dispatch in order even when translations finish backwards',async()=>{
  const h=setup();try{
   for(let n=1;n<=20;n++){h.type('message '+n);h.enter();h.enter();await until(()=>h.translations.length===n)}

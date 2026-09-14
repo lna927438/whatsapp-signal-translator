@@ -17,6 +17,7 @@ export interface AccountRecord {
   platform: Platform
   label: string
   note?: string
+  caption?: string
   signalAccount?: string
   signalEngine?: 'cli' | 'desktop'
   proxy?: AccountProxy

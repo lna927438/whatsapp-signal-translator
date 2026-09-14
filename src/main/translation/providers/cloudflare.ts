@@ -10,6 +10,11 @@ export class TranslationOutcomeError extends Error {
   constructor(message: string, readonly confirmedFailure = false) { super(message) }
 }
 const terminalFailures = new Set(['translation_failed', 'translation_outcome_unknown', 'provider_auth', 'provider_quota', 'provider_rate_limit', 'provider_model', 'provider_permission', 'provider_request', 'provider_timeout', 'provider_unavailable', 'provider_empty', 'protected_literal_mismatch', 'provider_wrong_language'])
+export function translationFailureMessage(code?: string) {
+  if (['provider_timeout','provider_unavailable','provider_rate_limit'].includes(code || '')) return '翻译服务暂时繁忙，本次未扣费。请稍后重试，其他消息可继续发送。'
+  if (code === 'translation_outcome_unknown') return '上次翻译已结束且未扣费，可以重试此消息。'
+  return '本次翻译未成功，云端已确认未扣费，可以重试此消息。'
+}
 const capabilityChecks = new Map<string, { until: number; work: Promise<boolean> }>()
 export function clearCloudCapabilityCache() { capabilityChecks.clear() }
 async function supportsQuality(base: string): Promise<boolean> {
@@ -93,13 +98,13 @@ export class CloudflareProvider implements TranslationProvider {
       const message = payload?.error === 'cost_limit' ? '今日翻译费用已达到保护上限，请联系管理员核对。' : payload?.error === 'security_paused' ? '翻译正在安全维护，请稍后继续。' : '翻译请求较多，请稍后重试。'
       throw new TranslationOutcomeError(message + '原消息和草稿已保留。', status.state === 'not_found' || status.state === 'failed')
     }
-    if (terminalFailures.has(payload?.error)) throw new TranslationOutcomeError('本次翻译未成功，云端已确认未扣费。', true)
+    if (terminalFailures.has(payload?.error)) throw new TranslationOutcomeError(translationFailureMessage(payload.error), true)
     for (let attempt = 0; attempt < 4; attempt++) {
       if (Date.now() + 300 * 2 ** attempt >= deadline) break
       await new Promise(resolve => setTimeout(resolve, 300 * 2 ** attempt))
       const result = await this.status(requestId, deadline)
       if (result.state === 'completed') return finish(result.response)
-      if (result.state === 'failed') throw new TranslationOutcomeError('云端已确认本次未扣费。请查看原任务。', true)
+      if (result.state === 'failed') throw new TranslationOutcomeError(translationFailureMessage(result.error), true)
     }
     throw new TranslationOutcomeError('翻译结果待确认，原请求和草稿已保留。恢复连接后继续核对。')
   }

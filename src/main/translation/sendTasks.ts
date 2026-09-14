@@ -148,6 +148,16 @@ export class SendTasks {
     return this.transaction(data => Object.assign(this.owned(data, owner, id), patch, { updatedAt: Date.now() }))
   }
 
+  useTranslationRequest(owner: string, id: string, request: TranslationRequest): Promise<SendTask> {
+    return this.transaction(data => {
+      const task = this.owned(data, owner, id)
+      if (!['draft','translating'].includes(task.state) || task.translated !== undefined || !request.requestId?.startsWith('send-')
+        || request.text !== task.request.text || request.accountId !== task.accountId
+        || request.conversationId !== task.conversationId || request.targetLanguage !== task.request.targetLanguage) throw new Error('此发送任务不能替换翻译请求。')
+      task.request = structuredClone(request); task.updatedAt = Date.now()
+      return task
+    })
+  }
   translate(owner: string, id: string, run: (request: TranslationRequest) => Promise<string>, authorized: () => boolean): Promise<SendTask> {
     const key = `${owner}:${id}`
     const existing = this.translations.get(key)
@@ -158,6 +168,7 @@ export class SendTasks {
       if (task.state === 'cancelled') throw new Error('此任务已取消，请按当前设置重新发送。')
       if (task.state === 'sent') return task
       if (task.translated !== undefined) return task
+      if (['uncertain','submitting'].includes(task.state)) throw new Error(uncertainSendMessage)
       await this.update(owner, id, { state: 'translating' })
       try {
         const translated = task.translate && !alreadyInTargetLanguage(task.request) ? await run(task.request) : task.request.text

@@ -17,6 +17,7 @@ import { languages } from './translation/languages'
 import { WhatsAppAdapter } from './platforms/whatsapp/whatsAppAdapter'
 import { SignalAdapter } from './platforms/signal/signalAdapter'
 import { JsonStore } from './storage/jsonStore'
+import { ContactNotes } from './storage/contactNotes'
 import { SendTasks, SendNotStartedError, type SendTaskData } from './translation/sendTasks'
 import { cloudRead, measureCloudRoutes, setCloudRoute, postNoticeReceipt } from './network/cloudConnection'
 import { ClientNotifications } from './clientNotifications'
@@ -56,6 +57,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('auth:storage-set', (_event, key: string, value: string | null) => onlineSessions.set(key, value))
   translator.onBillingChanged(() => { outgoingCredit.invalidate(); if (!mainWindow.isDestroyed()) mainWindow.webContents.send('billing:changed') })
   const accounts = new AccountManager()
+  const contactNotes = new ContactNotes()
   const settings = new SettingsStore()
   const profile = new ProfileStore()
   const auth = new AuthStore()
@@ -197,6 +199,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
         if (hasBlockedChinese(raw.text, runtime.targetLanguage)) throw new Error('仍含中文原文，已阻止发送。请开启发送翻译后重试。')
         return { enabled: false }
       }
+      request = await translator.prepareOutgoingRequest(request)
       await outgoingCredit.check(owner, request, true)
       const text = await translator.translate(request)
       if (!authorized()) throw new Error('登录状态已变化。')
@@ -438,6 +441,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       { label: account.pinned ? t('取消置顶') : t('置顶账号'), click: safe(() => update({ pinned: !account.pinned })) },
       { label: t('重命名'), click: () => notify('rename') },
       { label: t('编辑备注'), click: () => notify('remark') },
+      { label: t('编辑红色备注'), click: () => notify('caption') },
       { label: t('显示译文'), type: 'checkbox', checked: account.translationsVisible !== false, click: safe(() => update({ translationsVisible: account.translationsVisible === false })) },
       { label: t('页面缩放 {0}%', Math.round((account.zoomFactor || 1) * 100)), enabled: Boolean(contents), submenu: [
         { label: t('放大'), click: safe(() => update({ zoomFactor: Math.min(1.5, (account.zoomFactor || 1) + 0.1) })) },
@@ -490,8 +494,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const { owner, authorized } = taskIdentity()
     const original = await sendTasks.get(owner, id)
     assertTaskSender(event, original)
-    if (!['sent', 'uncertain', 'submitting'].includes(original.state)) await outgoingCredit.check(owner, original.request, original.translate)
-    const task = await sendTasks.translate(owner, id, request => translator.translate(request), authorized)
+    if (!['sent', 'uncertain', 'submitting'].includes(original.state) && original.translated !== undefined) await outgoingCredit.check(owner, original.request, original.translate)
+    const task = await sendTasks.translate(owner, id, async request => {
+      const retry = await translator.prepareOutgoingRequest(request)
+      if (!authorized()) throw new Error('登录状态已变化。')
+      await sendTasks.useTranslationRequest(owner, id, retry)
+      await outgoingCredit.check(owner, retry, original.translate)
+      return translator.translate(retry)
+    }, authorized)
     mainWindow.webContents.send('translator:status', { accountId: task.accountId, state: 'working', message: '正在发送…', settled: true })
     return task
   })
@@ -577,6 +587,20 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     mainWindow.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system')
     setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); signalDesktop.refresh(); return true })
   ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => { await requireAuth(); return accountRuntime(accountId, conversationId) })
+  ipcMain.handle('whatsapp:contact-note', async (event, accountId: string, peer: string) => {
+    const { owner, authorized } = taskIdentity()
+    if (!whatsapp.ownsSender(accountId, event.sender.id)) throw new Error('账号窗口不匹配。')
+    const note = await contactNotes.get(owner, accountId, peer)
+    if (!authorized()) throw new Error('登录状态已变化。')
+    return note
+  })
+  ipcMain.handle('whatsapp:save-contact-note', async (event, accountId: string, peer: string, text: string, revision: number) => {
+    const { owner, authorized } = taskIdentity()
+    if (!whatsapp.ownsSender(accountId, event.sender.id)) throw new Error('账号窗口不匹配。')
+    const note = await contactNotes.save(owner, accountId, peer, text, revision)
+    if (!authorized()) throw new Error('登录状态已变化。')
+    return note
+  })
   ipcMain.handle('translator:cache-info', async (event) => { requireMain(event); await requireAuth(); return translator.cacheInfo() })
   ipcMain.handle('translator:clear-cache', async (event) => { requireMain(event); await requireAuth(); await translator.clearCache(); return true })
   ipcMain.handle('translator:metrics', async () => { await requireAuth(); return translator.metrics() })

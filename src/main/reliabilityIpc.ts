@@ -122,7 +122,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     const task = await tasks.get(user, id)
     if (user !== owner()) throw new Error('登录状态已变化。')
     if (action === 'retry') {
-      if (task.platform !== 'whatsapp' || !['draft','ready'].includes(task.state)) throw new Error('此任务正在处理或确认，不能重复发送。')
+      if (task.platform !== 'whatsapp' || !['draft','translating','ready'].includes(task.state)) throw new Error('此任务正在处理或确认，不能重复发送。')
       if (!await whatsapp.retryTask(task)) {
         const message='请先打开原账号的原对话，再重试这条消息。'
         window.webContents.send('translator:error',message)
