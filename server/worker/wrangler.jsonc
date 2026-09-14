@@ -10,7 +10,8 @@
   "triggers": { "crons": ["17 * * * *"] },
   "vars": {
     "OPENAI_MODEL": "gpt-5.6-luna",
-    "TRANSLATION_PROVIDER": "deepseek",
+    "TRANSLATION_PROVIDER": "openai",
+    "TRANSLATION_FALLBACK_PROVIDER": "deepseek",
     "DEEPSEEK_MODEL": "deepseek-v4-pro"
   }
 }

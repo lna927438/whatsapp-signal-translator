@@ -3,12 +3,13 @@ export interface ProviderReceipt {
   model: string; responseId: string | null; requestId: string | null; createdAt: string | null
   inputTokens: number | null; cachedTokens: number | null; outputTokens: number | null
   totalTokens: number | null; reasoningTokens: number | null; httpStatus: number | null
+  cacheWriteTokens: number | null; serviceTier: string | null
 }
 const count = (v: unknown): number | null => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= 100_000_000 ? v : null
 const identifier = (v: unknown): string | null => typeof v === 'string' && /^[a-zA-Z0-9_.:/-]{1,200}$/.test(v) ? v : null
 export function providerReceipt(model: string): ProviderReceipt {
   return {model, responseId:null, requestId:null, createdAt:null, inputTokens:null, cachedTokens:null,
-    outputTokens:null, totalTokens:null, reasoningTokens:null, httpStatus:null}
+    outputTokens:null, totalTokens:null, reasoningTokens:null, httpStatus:null, cacheWriteTokens:null, serviceTier:null}
 }
 export function captureProviderReceipt(receipt:ProviderReceipt, payload:any, response:Response, started:number, now=Date.now()) {
   receipt.httpStatus=response.status
@@ -27,10 +28,14 @@ export function captureProviderReceipt(receipt:ProviderReceipt, payload:any, res
   receipt.totalTokens=count(usage?.total_tokens)
   receipt.cachedTokens=count(responses?usage?.input_tokens_details?.cached_tokens:usage?.prompt_cache_hit_tokens ?? usage?.prompt_tokens_details?.cached_tokens)
   receipt.reasoningTokens=count(responses?usage?.output_tokens_details?.reasoning_tokens:usage?.completion_tokens_details?.reasoning_tokens)
+  receipt.cacheWriteTokens=count(responses?usage?.input_tokens_details?.cache_write_tokens:usage?.prompt_tokens_details?.cache_write_tokens)
+  receipt.serviceTier=identifier(payload?.service_tier)
   if(receipt.inputTokens!==null && receipt.cachedTokens!==null && receipt.cachedTokens>receipt.inputTokens)receipt.cachedTokens=null
   if(receipt.reasoningTokens!==null && receipt.outputTokens!==null && receipt.reasoningTokens>receipt.outputTokens)receipt.reasoningTokens=null
+  if(receipt.cacheWriteTokens!==null && receipt.inputTokens!==null
+    && receipt.cacheWriteTokens+(receipt.cachedTokens||0)>receipt.inputTokens)receipt.cacheWriteTokens=null
   if(receipt.inputTokens!==null && receipt.outputTokens!==null && receipt.totalTokens!==receipt.inputTokens+receipt.outputTokens) {
     // A conflicting total must not become a seemingly exact financial record.
-    if(receipt.totalTokens!==null){receipt.inputTokens=null;receipt.outputTokens=null;receipt.cachedTokens=null}
+    if(receipt.totalTokens!==null){receipt.inputTokens=null;receipt.outputTokens=null;receipt.cachedTokens=null;receipt.cacheWriteTokens=null}
   }
 }

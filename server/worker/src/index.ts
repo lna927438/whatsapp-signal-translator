@@ -1,5 +1,5 @@
 import type { SecurityWorkerBindings, ScheduledController, ExecutionContext } from '../worker-configuration'
-import { providerConfig, type ProviderEnv } from './providerConfig'
+import { providerConfig, providerPlan, type ProviderEnv, type ProviderConfig } from './providerConfig'
 import { boundedJson, rateKey, providerTokenBounds } from './requestSecurity'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
 import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
@@ -134,15 +134,15 @@ function translationInstructions(sourceLanguage: string, targetLanguage: string,
   ].filter(Boolean).join('\n')
 }
 
-async function providerTranslate(env: Env, body: TranslateBody, text: string, receipt:ProviderReceipt): Promise<{ translation: string; latencyMs: number; model: string }> {
+async function providerTranslate(env: Env, body: TranslateBody, text: string, receipt:ProviderReceipt,
+  config: ProviderConfig = providerConfig(env), timeoutMs = 20_000): Promise<{ translation: string; latencyMs: number; model: string }> {
   const started = Date.now()
-  const config = providerConfig(env)
   const protectedText = protectLiterals(text, body.quality)
   if (!config.key) throw new ProviderFailure('provider_auth')
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
     // Leave time for settlement before the desktop's 30-second POST timeout.
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(Math.max(1, Math.floor(timeoutMs))),
     headers: {
       Authorization: `Bearer ${config.key}`,
       'Content-Type': 'application/json'
@@ -153,6 +153,7 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
       input: protectedText.input,
       max_output_tokens: providerTokenBounds(body.text || '', translationInstructions(String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context, body.quality)).output,
       reasoning: { effort: 'none' },
+      ...(config.provider === 'openai' ? { service_tier: 'default' } : {}),
       store: false
     })
   })
@@ -249,24 +250,26 @@ async function requestHash(body: TranslateBody, model: string): Promise<string> 
   return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-async function translate(request: Request, env: Env, user: User, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
+async function translate(request: Request, env: Env, user: User, deadline: number, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
   const body = normalizeBody(await boundedJson(request))
   // Old 0.4.3 clients sent different header/body IDs. Keep the body authoritative.
   const requestId = body.requestId || request.headers.get('x-request-id') || ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
   const claimToken = crypto.randomUUID()
   const config = providerConfig(env)
+  const plan = providerPlan(env)
   const model = config.model
   const bounds = providerTokenBounds(body.text, translationInstructions(body.sourceLanguage, body.targetLanguage, body.context, body.quality))
   let claim: Claim
   const claimBody = {
     p_user_id: user.id,
     p_request_id: requestId,
-    p_payload_hash: await requestHash(body, model),
+    p_payload_hash: await requestHash(body, plan.length > 1 ? 'routing-v2' : model),
     p_characters: unicodeLength(body.text),
     p_claim_token: claimToken,
     p_metadata: {
-      metering_version: '1', requested_model: model,
+      metering_version: plan.length > 1 ? '2' : '1', requested_model: model,
+      ...(plan.length > 1 ? { provider_plan: plan.map(item => ({ provider: item.provider, model: item.model })) } : {}),
       security_input_token_bound: bounds.input, security_output_token_bound: bounds.output,
       provider: config.provider, account_id: body.accountId || null, conversation_id: body.conversationId || null,
       source_language: body.sourceLanguage, target_language: body.targetLanguage
@@ -279,13 +282,22 @@ async function translate(request: Request, env: Env, user: User, ctx?: Pick<Exec
       // persisted request into a conflict. The database still verifies the
       // complete old fingerprint and returns its original terminal/pending
       // state; this never retries the provider or changes an old debit.
-      const previousModel = config.provider === 'deepseek'
-        ? model === 'deepseek-v4-pro' ? 'deepseek-flash' : model === 'deepseek-flash' ? 'deepseek-v4-pro' : null
-        : null
-      if (!(error instanceof Error) || error.message !== 'request_id_conflict' || !previousModel) throw error
-      claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
-        ...claimBody, p_payload_hash: await requestHash(body, previousModel)
-      })
+      if (!(error instanceof Error) || error.message !== 'request_id_conflict') throw error
+      const compatibleModels = [...new Set(['routing-v2', model, String(env.OPENAI_MODEL || 'gpt-5.6-luna'), 'deepseek-v4-pro', 'deepseek-flash'])]
+        .filter(item => item !== (plan.length > 1 ? 'routing-v2' : model))
+      let resolved: Claim | undefined
+      for (const previousModel of compatibleModels) {
+        try {
+          resolved = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
+            ...claimBody, p_payload_hash: await requestHash(body, previousModel)
+          })
+          break
+        } catch (previousError) {
+          if (!(previousError instanceof Error) || previousError.message !== 'request_id_conflict') throw previousError
+        }
+      }
+      if (!resolved) throw error
+      claim = resolved
     }
   } catch (error) {
     if (error instanceof Error && ['rate_limited','cost_limit','security_paused'].includes(error.message)) {
@@ -295,11 +307,95 @@ async function translate(request: Request, env: Env, user: User, ctx?: Pick<Exec
   }
   if (claim.state !== 'claimed') return claimResponse(claim)
 
-  const work = settleTranslation(env, body, requestId, user.id, claimToken, model)
+  const work = plan.length > 1
+    ? settleRoutedTranslation(env, body, requestId, user.id, claimToken, plan, deadline)
+    : settleTranslation(env, body, requestId, user.id, claimToken, model)
   // A tab refresh or a timed-out desktop request must not abandon a claimed
   // translation before its result/failure and wallet reservation are settled.
   ctx?.waitUntil(work.then(() => undefined, () => undefined))
   return work
+}
+
+type ProviderAttempt = {
+  provider: string; model: string; startedAt: string; finishedAt: string
+  errorCode: string | null; receipt: ProviderReceipt
+}
+type RouteLease = { allowed: boolean; generation: number; probeToken: string | null; retryAfterMs: number }
+
+function providerErrorCode(error: unknown) {
+  return error instanceof ProviderFailure ? error.code
+    : error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name) ? 'provider_timeout' : 'provider_unavailable'
+}
+
+async function settleRoutedTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string,
+  userId: string, claimToken: string, plan: ProviderConfig[], deadline: number): Promise<Response> {
+  const started = Date.now()
+  const attempts: ProviderAttempt[] = []
+  let translated: Awaited<ReturnType<typeof providerTranslate>> | undefined
+  let selectedProvider: string | null = null
+  let failureCode: string = 'provider_unavailable'
+  for (let index = 0; index < plan.length; index++) {
+    if (Date.now() >= deadline) break
+    const config = plan[index]
+    const routeArgs = { p_user_id: userId, p_request_id: requestId, p_claim_token: claimToken,
+      p_provider: config.provider, p_model: config.model }
+    let lease: RouteLease | undefined
+    // A lost lease reply may be read back with identical arguments. No provider
+    // invocation is permitted until the durable route decision is known.
+    for (let lookup = 0; lookup < 2 && !lease && Date.now() < deadline; lookup++) {
+      try { lease = await adminPost<RouteLease>(env, '/rest/v1/rpc/provider_route_acquire', routeArgs, undefined, 1500) }
+      catch { /* Failed route lookup never authorizes an untracked invocation. */ }
+    }
+    if (!lease?.allowed) continue
+    const timeoutMs = Math.min(index === 0 ? 8000 : 12000, deadline - Date.now())
+    if (timeoutMs < 250) break
+    const receipt = providerReceipt(config.model)
+    const attempt: ProviderAttempt = { provider: config.provider, model: config.model,
+      startedAt: new Date().toISOString(), finishedAt: '', errorCode: null, receipt }
+    attempts.push(attempt)
+    try {
+      translated = await providerTranslate(env, body, body.text, receipt, config, timeoutMs)
+      selectedProvider = config.provider
+    } catch (error) {
+      failureCode = providerErrorCode(error)
+      attempt.errorCode = failureCode
+      console.warn(JSON.stringify({ event: 'translation_provider_attempt_failed', provider: config.provider,
+        model: config.model, code: failureCode, status: receipt.httpStatus,
+        attempt: attempts.length, latencyMs: Date.now() - Date.parse(attempt.startedAt) }))
+    }
+    attempt.finishedAt = new Date().toISOString()
+    try {
+      await adminPost(env, '/rest/v1/rpc/provider_route_outcome', { ...routeArgs,
+        p_generation: lease.generation, p_probe_token: lease.probeToken,
+        p_success: attempt.errorCode === null, p_error_code: attempt.errorCode
+      }, undefined, 1500)
+    } catch {
+      // Lease expiry prevents a crashed/missing report from permanently opening
+      // a circuit. The final immutable billing envelope still retains evidence.
+      console.warn(JSON.stringify({ event: 'translation_route_outcome_pending', provider: config.provider, model: config.model }))
+    }
+    if (translated) break
+  }
+  const envelope = { version: 2, selectedProvider, attempts }
+  const settlement = translated ? {
+    path: '/rest/v1/rpc/complete_translation_metered', body: {
+      p_user_id: userId, p_request_id: requestId, p_claim_token: claimToken,
+      p_translation: translated.translation, p_model: translated.model,
+      p_latency_ms: Date.now() - started, p_receipt: envelope
+    }
+  } : {
+    path: '/rest/v1/rpc/fail_translation_metered', body: {
+      p_user_id: userId, p_request_id: requestId, p_claim_token: claimToken,
+      p_error_code: failureCode, p_receipt: envelope
+    }
+  }
+  // Both providers share this one final transaction and customer debit. Retries
+  // repeat the identical settlement only, never either inference or chat send.
+  for (let retry = 0; retry < 3; retry++) {
+    try { return claimResponse(await adminPost<Claim>(env, settlement.path, settlement.body, undefined, 2500)) }
+    catch { /* Idempotent settlement survives a lost database commit reply. */ }
+  }
+  return failure('settlement_pending')
 }
 
 async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, model: string): Promise<Response> {
@@ -348,14 +444,17 @@ async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody
 }
 
 async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
+  // Authentication and claiming consume the same provider budget. Preserve
+  // time for durable settlement before the desktop's own request timeout.
+  const translationDeadline = Date.now() + 20_000
   const url = new URL(request.url)
   if (request.method !== 'OPTIONS' && !(request.method === 'GET' && url.pathname === '/health')) {
     if (!env.API_RATE_LIMITER || !(await env.API_RATE_LIMITER.limit({ key: await rateKey(request) })).success) return failure('rate_limited')
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-channel1', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-channel1', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-dual1', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-dual1', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)
@@ -388,7 +487,7 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
     return json({ user: { id: user.id, email: user.email || null }, profile,
       ...await adminPost<Record<string, unknown>>(env, '/rest/v1/rpc/account_snapshot', { p_user_id: user.id }) })
   }
-  if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user, ctx)
+  if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user, translationDeadline, ctx)
   return json({ error: 'not_found', message: 'API route not found.' }, 404)
 }
 
