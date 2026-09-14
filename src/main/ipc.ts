@@ -24,6 +24,8 @@ import { registerReliabilityIpc } from './reliabilityIpc'
 import { mergeQuality } from '../shared/translationPolicy'
 import { normalizeSignalPeer } from '../shared/signalProtocol'
 import { BackgroundAccountStatus } from './network/backgroundAccountStatus'
+import { SessionRefresh } from './network/sessionRefresh'
+import { OutgoingCredit } from './translation/outgoingCredit'
 import { registerSignalFeatures } from './platforms/signal/signalFeatures'
 import { signalNeedsTranslation, type SignalPayload } from '../shared/signalMedia'
 import { SignalDesktopHost } from './platforms/signal/signalDesktopHost'
@@ -52,7 +54,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   const onlineSessions = new OnlineSessionStore()
   ipcMain.handle('auth:storage-get', (_event, key: string) => onlineSessions.get(key))
   ipcMain.handle('auth:storage-set', (_event, key: string, value: string | null) => onlineSessions.set(key, value))
-  translator.onBillingChanged(() => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('billing:changed') })
+  translator.onBillingChanged(() => { outgoingCredit.invalidate(); if (!mainWindow.isDestroyed()) mainWindow.webContents.send('billing:changed') })
   const accounts = new AccountManager()
   const settings = new SettingsStore()
   const profile = new ProfileStore()
@@ -61,7 +63,13 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   let onlineIdentity: OnlineIdentity = null
   let identityRevision = 0
   let identityWrites: Promise<unknown> = Promise.resolve()
-  const accountStatus = new BackgroundAccountStatus(token => cloudRead('/api/me', token))
+  const sessions = new SessionRefresh(() => onlineIdentity, request => mainWindow.webContents.send('auth:refresh-requested', request))
+  translator.onSessionRefresh((owner, force, rejectedToken) => sessions.token(owner, force, rejectedToken))
+  ipcMain.handle('auth:refresh-complete', (event, id: string, ok: boolean) => {
+    if (event.sender.id !== mainWindow.webContents.id || typeof id !== 'string' || id.length > 100 || typeof ok !== 'boolean') throw new Error('登录恢复响应无效。')
+    sessions.complete(id, ok)
+  })
+  const accountStatus = new BackgroundAccountStatus(() => cloudRequest('/api/me'))
   const accountCheckTimer = setInterval(() => { void accountStatus.refresh() }, 60000)
   accountCheckTimer.unref?.()
   mainWindow.on?.('closed', () => clearInterval(accountCheckTimer))
@@ -92,10 +100,11 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   }
 
   const cloudRequest = async (path: string): Promise<any> => {
-    const accessToken = String(onlineIdentity?.accessToken || '').trim()
-    if (!accessToken) throw new Error('在线登录令牌缺失，请重新登录。')
-    return cloudRead(path, accessToken)
+    const owner = String(onlineIdentity?.userId || '')
+    if (!owner) throw new Error('在线登录令牌缺失，请重新登录。')
+    return cloudRead(path, (force, rejectedToken) => sessions.token(owner, force, rejectedToken))
   }
+  const outgoingCredit = new OutgoingCredit(() => onlineIdentity?.userId || '', () => cloudRequest('/api/me'), id => translator.outgoingSettlement(id))
 
   const cloudBackedProfile = async () => {
     const local = await profile.get()
@@ -135,7 +144,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       targetLanguage: contact?.language || account.targetLanguage || base.targetLanguage,
       receiveAutoTranslate: account.receiveAutoTranslate ?? base.receiveAutoTranslate,
       sendAutoTranslate: account.sendAutoTranslate ?? base.sendAutoTranslate,
-      blockChineseSend: account.blockChineseSend ?? base.blockChineseSend,
+      blockChineseSend: true,
       groupTranslate: account.groupTranslate ?? base.groupTranslate,
       fontSize: Number(account.fontSize || base.fontSize || 13),
       translationColor: account.translationColor || base.translationColor || '#c8d4e4',
@@ -168,6 +177,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       if (raw.expiresAt <= Date.now()) throw new Error('此消息已删除或过期，不能再次翻译。')
     }
     if (raw.direction === 'display') return { enabled:runtime.translationsVisible, fontSize:runtime.fontSize, color:runtime.translationColor, uiLanguage:runtime.uiLanguage }
+    if (raw.authorizationOnly) {
+      const original = await translator.existingOutgoing(raw.requestId!, accountId, conversationId, raw.text, raw.translated!)
+      if (hasBlockedChinese(raw.translated!, original.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
+      validateTranslation(original, raw.translated!)
+      await outgoingCredit.check(owner, original, true, true)
+      if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
+      return { authorized: true }
+    }
     const outgoing = raw.direction === 'outgoing'
     const requestId = (outgoing ? 'send-sd-' : 'sd-') + createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,raw.direction,raw.text,runtime.localLanguage,runtime.targetLanguage,runtime.translationQuality,...(raw.editTimestamp?[raw.editTimestamp]:[])])).digest('hex')
     let request: import('./types').TranslationRequest = { text: raw.text, accountId, conversationId, messageId: raw.id, requestId, sourceLanguage: outgoing ? runtime.localLanguage : 'auto', targetLanguage: outgoing ? runtime.targetLanguage : runtime.localLanguage, quality: runtime.translationQuality }
@@ -176,11 +193,17 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     else request = await translator.preserveIncomingRequest(request)
     if (!authorized()) throw new Error('登录状态已变化。')
     if (outgoing) {
-      if (!runtime.sendAutoTranslate || !signalNeedsTranslation(raw.text) || alreadyInTargetLanguage({...request,quality:runtime.translationQuality})) return { enabled: false }
+      if (!runtime.sendAutoTranslate || !signalNeedsTranslation(raw.text) || alreadyInTargetLanguage({...request,quality:runtime.translationQuality})) {
+        if (hasBlockedChinese(raw.text, runtime.targetLanguage)) throw new Error('仍含中文原文，已阻止发送。请开启发送翻译后重试。')
+        return { enabled: false }
+      }
+      await outgoingCredit.check(owner, request, true)
       const text = await translator.translate(request)
       if (!authorized()) throw new Error('登录状态已变化。')
-      if (runtime.blockChineseSend && hasBlockedChinese(text, runtime.targetLanguage)) throw new Error('译文语言与目标不符，消息未发送。请修改译文或检查目标语言。')
+      if (hasBlockedChinese(text, runtime.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
       validateTranslation(request, text)
+      await outgoingCredit.check(owner, request, true, true)
+      if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
       return { enabled: true, text, requestId: request.requestId }
     }
     if (!runtime.translationsVisible) return { enabled: false }
@@ -219,6 +242,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (event.sender.id !== mainWindow.webContents.id) throw new Error('登录会话只能由主窗口更新。')
     const previous = onlineIdentity
     onlineIdentity = identity?.userId ? identity : null
+    sessions.changed()
+    outgoingCredit.invalidate()
     accountStatus.setIdentity(onlineIdentity?.userId, onlineIdentity?.accessToken)
     notifications.setIdentity()
     if (previous?.userId !== onlineIdentity?.userId) {
@@ -235,6 +260,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       await identityWrites
     }
     whatsapp.resumeTranslations()
+    if (previous?.userId === onlineIdentity?.userId && previous?.accessToken !== onlineIdentity?.accessToken) signalDesktop.refresh()
     if (previous?.userId !== onlineIdentity?.userId && onlineIdentity?.userId) void recover().catch(() => undefined)
     return { authenticated: Boolean(onlineIdentity), source: 'supabase', user: onlineIdentity ? { ...onlineIdentity, accessToken: undefined } : null }
   })
@@ -250,6 +276,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('auth:logout', async () => {
     signalDesktop.stopAll()
     onlineIdentity = null
+    sessions.changed()
+    outgoingCredit.invalidate()
     notifications.setIdentity()
     accountStatus.setIdentity()
     identityRevision += 1
@@ -453,14 +481,16 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!authorized()) throw new Error('登录状态已变化。')
     return sendTasks.prepare(owner, { platform: input.platform, accountId: input.accountId, intentId: input.intentId,
       conversationId: input.conversationId, targetKey: input.targetKey, signalAccount: input.signalAccount, recipient: input.recipient,
-      signalPayload, translate: runtime.sendAutoTranslate && (input.platform !== 'signal' || signalNeedsTranslation(String(input.text || ''))), blockChinese: runtime.blockChineseSend,
+      signalPayload, translate: runtime.sendAutoTranslate && (input.platform !== 'signal' || signalNeedsTranslation(String(input.text || ''))), blockChinese: true,
       request: { text: String(input.text || ''), accountId: input.accountId, conversationId: input.conversationId,
         sourceLanguage: runtime.localLanguage, targetLanguage: runtime.targetLanguage, quality: runtime.translationQuality,
         context: input.platform === 'signal' ? signal.contextForTask(input.accountId, input.recipient || '') : input.context || [] } })
   })
   ipcMain.handle('send:translate', async (event, id: string) => {
     const { owner, authorized } = taskIdentity()
-    assertTaskSender(event, await sendTasks.get(owner, id))
+    const original = await sendTasks.get(owner, id)
+    assertTaskSender(event, original)
+    if (!['sent', 'uncertain', 'submitting'].includes(original.state)) await outgoingCredit.check(owner, original.request, original.translate)
     const task = await sendTasks.translate(owner, id, request => translator.translate(request), authorized)
     mainWindow.webContents.send('translator:status', { accountId: task.accountId, state: 'working', message: '正在发送…', settled: true })
     return task
@@ -481,6 +511,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     try {
     const result = await sendTasks.submit(owner, id, async task => {
       try {
+        await outgoingCredit.check(owner, task.request, task.translate, true)
         accountStatus.assertAvailable()
         if (!authorized()) throw new Error('登录状态已变化。')
       } catch (error: any) { throw new SendNotStartedError(String(error?.message || error)) }

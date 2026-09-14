@@ -204,7 +204,7 @@ export class WhatsAppAdapter {
       && Boolean(this.mainWindow?.isFocused()) && view && !view.webContents.isDestroyed()
     if (!canSend() || !view) throw new SendNotStartedError('发送窗口已切换，原对话草稿已保留。')
     const args = JSON.stringify({ id: task.id, conversationId: task.conversationId,
-      targetKey: task.targetKey, original: task.request.text, translated: task.translated })
+      targetKey: task.targetKey, original: task.request.text, translated: task.translated, targetLanguage: task.request.targetLanguage })
     let dispatched = false
     try {
       // Page guard selects only the snapshotted editor. Input is briefly locked
@@ -326,14 +326,18 @@ export class WhatsAppAdapter {
     )
 
     installWebSecurity(view.webContents, 'whatsapp')
-    view.webContents.on('did-finish-load', async () => {
+    const installTranslation = async () => {
       try {
         await view.webContents.executeJavaScript(whatsappInjectionScript, true)
         await this.applyPreferences(accountId, this.preferences.get(accountId) || {})
+        const ready = await view.webContents.executeJavaScript('typeof window.__RT_SEND_COMMIT__ === "function" && typeof window.__RT_SEND_SELECT__ === "function"')
+        if (ready) view.webContents.send('translator:send-guard-ready')
       } catch (error) {
         console.error('WhatsApp injection failed')
       }
-    })
+    }
+    view.webContents.on('dom-ready', installTranslation)
+    view.webContents.on('did-finish-load', installTranslation)
     view.webContents.on('context-menu', (_event, params) => {
       const items = whatsAppContextMenu(view.webContents, params, () => this.mainWindow?.webContents.send('translator:error', '此操作未完成，请重试。'))
       if (items.length) Menu.buildFromTemplate(items).popup({ window: this.mainWindow })

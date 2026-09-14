@@ -86,7 +86,7 @@ test('one failed translation does not deadlock the next message or lose either o
  const h=setup();try{
   h.type('first');h.enter();await until(()=>h.translations.length===1);h.type('second');h.enter();await until(()=>h.translations.length===2)
   h.gates.get('send-1')!.reject(Error('network timeout'));h.gates.get('send-2')!.resolve('second translated');await until(()=>h.submits.length===1)
-  assert.deepEqual(h.submits,['send-2']);assert.equal(h.tasks.get('send-1').request.text,'first');assert.equal(h.win.document.querySelector('[data-rt-ui="outbox"]'),null);assert.equal(h.composer.textContent,'')
+  assert.deepEqual(h.submits,['send-2']);assert.equal(h.tasks.get('send-1').request.text,'first');assert.equal(h.win.document.querySelector('[data-rt-ui="outbox"]'),null);assert.equal(h.composer.textContent,'first')
  }finally{h.dom.window.close()}
 })
 
@@ -105,6 +105,15 @@ test('records retry keeps the original task identity without recreating a chat o
   assert.equal(await h.win.__RT_RETRY_QUEUED_SEND__('send-1'),true);await until(()=>h.translations.length===2);
   h.gates.get('send-1')!.resolve('translated');await until(()=>h.submits.length===1);
   assert.equal(h.tasks.size,1);assert.deepEqual(h.translations,['send-1','send-1']);assert.equal(h.win.document.querySelector('[data-rt-ui="outbox"]'),null);
+  assert.equal(h.composer.textContent,'');
+ }finally{h.dom.window.close()}
+})
+
+test('Enter on an untouched recovered draft retries the same task and does not leave a duplicate draft',async()=>{
+ const h=setup();try{
+  h.type('recover me');h.enter();await until(()=>h.translations.length===1);h.gates.get('send-1')!.reject(Error('offline'));
+  await until(()=>h.composer.textContent==='recover me');await tick();h.enter();await until(()=>h.translations.length===2);
+  assert.equal(h.tasks.size,1);h.gates.get('send-1')!.resolve('recovered');await until(()=>h.submits.length===1);assert.equal(h.composer.textContent,'');
  }finally{h.dom.window.close()}
 })
 test('freshly composed identical messages use distinct send intents while repeated Enter coalesces',async()=>{

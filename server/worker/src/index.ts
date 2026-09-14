@@ -62,13 +62,16 @@ async function requireUser(request: Request, env: Env): Promise<User> {
   const token = bearer(request)
   if (!token) throw new Response(JSON.stringify({ error: 'unauthorized', message: '缺少登录令牌。' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 
-  const response = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
-    headers: {
-      apikey: env.SUPABASE_PUBLISHABLE_KEY,
-      Authorization: `Bearer ${token}`
-    }, signal: AbortSignal.timeout(8000)
-  })
-  if (!response.ok) throw new Response(JSON.stringify({ error: 'unauthorized', message: '登录状态无效或已过期。' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+  let response: Response
+  try {
+    response = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000)
+    })
+  } catch { throw json({ error: 'auth_unavailable', message: '登录服务暂时无法连接，请稍后重试。草稿已保留。' }, 503) }
+  if (!response.ok) {
+    if (response.status !== 401 && response.status !== 403) throw json({ error: 'auth_unavailable', message: '登录服务暂时繁忙，请稍后重试。' }, 503)
+    throw json({ error: 'unauthorized', message: '登录状态无效或已过期。' }, 401)
+  }
   return response.json() as Promise<User>
 }
 
@@ -319,8 +322,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-security-0.5.8', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-security-0.5.8', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.9', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.9', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)

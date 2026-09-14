@@ -21,6 +21,7 @@ export interface TranslationReceipt {
   queueWaitMs?: number
   providerMs?: number
   error?: string
+  missingRetries?: number
   createdAt: number
   updatedAt: number
 }
@@ -43,6 +44,14 @@ export class TranslationReceipts {
     return (await this.store.read()).filter(item => item.owner === owner).sort((a, b) => b.updatedAt - a.updatedAt)
   }
   async get(owner: string, requestId: string) { return (await this.list(owner)).find(item => item.requestId === requestId) }
+  retryMissing(owner: string, requestId: string, limit: number) {
+    return this.mutate(data => {
+      const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
+      if (!receipt || receipt.state !== 'pending' || receipt.contentExpired || receipt.contextCleared || (receipt.missingRetries || 0) >= limit) return undefined
+      receipt.state = 'queued'; receipt.error = undefined; receipt.missingRetries = (receipt.missingRetries || 0) + 1; receipt.updatedAt = Date.now()
+      return receipt.request
+    })
+  }
   prepare(owner: string, provider: string, request: TranslationRequest): Promise<TranslationReceipt> {
     if (!request.requestId) throw new Error('缺少翻译请求编号。')
     return this.mutate(data => {

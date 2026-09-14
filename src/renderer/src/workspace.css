@@ -133,3 +133,7 @@
 }
 
 .app-shell .display-controls{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-left:0}.app-shell .display-controls label{display:flex;align-items:center;gap:6px}.send-record{margin:12px 0;padding:14px;border:1px solid var(--border);border-radius:10px}.send-record blockquote{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--field);white-space:pre-wrap;overflow-wrap:anywhere}.send-record button{margin:4px 8px 4px 0}.send-record small{display:block;overflow-wrap:anywhere;color:var(--muted);margin-top:8px}
+
+.quota-text.low,.quota-warning{color:#cf303b!important;font-weight:700}
+.app-shell .quota-text.low{color:#ff858d!important}
+.quota-text b{font-size:inherit}

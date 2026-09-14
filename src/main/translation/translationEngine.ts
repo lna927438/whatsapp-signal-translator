@@ -42,7 +42,7 @@ export class TranslationEngine {
       && ![item.requestId,item.request.messageId].some(id => id && protectedIds.has(id)))
   }
   private recovering = false
-  private reconciliations = new Map<string, Promise<void>>()
+  private reconciliations = new Map<string, Promise<'not_found' | undefined>>()
   private readonly cache = new TranslationCache()
   private readonly inFlight = new Map<string, Promise<string>>()
   private readonly queue: QueueJob[] = []
@@ -70,6 +70,17 @@ export class TranslationEngine {
 
   private billingChanged?: () => void
   onBillingChanged(callback: () => void): void { this.billingChanged = callback }
+  private freshSession?: (owner: string, force?: boolean, rejectedToken?: string) => Promise<string>
+  onSessionRefresh(callback: (owner: string, force?: boolean, rejectedToken?: string) => Promise<string>) { this.freshSession = callback }
+  async outgoingSettlement(requestId: string) { return this.cloudProvider(this.sessionRevision, this.onlineUserId).status(requestId) }
+  async existingOutgoing(requestId: string, accountId: string, conversationId: string, original: string, translated: string): Promise<TranslationRequest> {
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    const receipt = await this.receipts.get(owner, requestId)
+    if (revision !== this.sessionRevision || !requestId.startsWith('send-') || !receipt || receipt.contentExpired
+      || !['charged','cached','free'].includes(receipt.state) || receipt.request.accountId !== accountId || receipt.request.conversationId !== conversationId
+      || receipt.request.text !== original || (receipt.correction ?? receipt.translated) !== translated) throw new Error('原发送记录尚未核实，消息未发送。请在原消息上重试。')
+    return receipt.request
+  }
   private notifyBilling(): void { try { this.billingChanged?.() } catch { /* UI must not affect settlement */ } }
 
   setOnlineAccessToken(token?: string | null): void {
@@ -193,17 +204,18 @@ export class TranslationEngine {
     return this.translateWithSettings(receipt.request, { ...await this.settings.get(), provider: 'openai' }, true)
   }
   async reconcilePending(requestId?: string) {
-    if ((!requestId && this.recovering) || !this.onlineUserId || !this.onlineAccessToken) return
+    const missing = new Set<string>()
+    if ((!requestId && this.recovering) || !this.onlineUserId || !this.onlineAccessToken) return missing
     if (!requestId) this.recovering = true
     const owner = this.onlineUserId, revision = this.sessionRevision
     try {
       await this.sweepContent()
       const entries = (await this.receipts.list(owner)).filter(item => item.state === 'pending' && item.provider === 'openai' && (!requestId || item.requestId === requestId)).sort((a,b)=>a.updatedAt-b.updatedAt).slice(0,20)
       for (const entry of entries) {
-        if (revision !== this.sessionRevision) return
+        if (revision !== this.sessionRevision) return missing
         const key = owner + ':' + entry.requestId
         const existing = this.reconciliations.get(key)
-        if (existing) { await existing; continue }
+        if (existing) { if (await existing === 'not_found') missing.add(entry.requestId); continue }
         const work = (async () => {
         try {
           const result = await this.cloudProvider(revision, owner).status(entry.requestId)
@@ -215,12 +227,14 @@ export class TranslationEngine {
             if (!settled?.contentExpired) await this.cache.set(entry.provider, entry.request, receipt.translation)
           } else if (result.state === 'failed') await this.receipts.update(owner, entry.requestId, { state: 'failed', chargedCharacters: 0, error: '云端已确认未扣费。' })
           else await this.receipts.update(owner, entry.requestId, { error: result.state === 'not_found' ? '云端暂未查到此编号。可主动重试原编号，仍按同一请求处理。' : '云端仍在处理，稍后继续核对。' })
+          if (result.state === 'not_found') return 'not_found' as const
         } catch (error) { await this.receipts.update(owner, entry.requestId, { error: error instanceof TranslationOutcomeError ? error.message : '暂时无法核对原请求，请恢复连接或重新登录。' }) }
         })().finally(()=>this.reconciliations.delete(key))
         this.reconciliations.set(key, work)
-        await work
+        if (await work === 'not_found') missing.add(entry.requestId)
       }
     } finally { if (!requestId) this.recovering = false; if (revision === this.sessionRevision) this.notifyBilling() }
+    return missing
   }
   async cached(request: TranslationRequest): Promise<string | undefined> {
     const user = this.onlineUserId
@@ -307,10 +321,19 @@ export class TranslationEngine {
     const concurrent = this.inFlight.get(this.requestKey(settings.provider, normalized))
     if (concurrent) { this.metricsState.dedupHits += 1; return concurrent }
     if (stored.state === 'pending') {
-      await this.reconcilePending(stored.requestId)
+      const missing = await this.reconcilePending(stored.requestId)
       const reconciled = await this.receipts.get(owner, stored.requestId)
       await this.content.assertAvailable(normalized)
       if (reconciled?.state === 'charged' && reconciled.translated !== undefined) return reconciled.correction ?? reconciled.translated
+      // A successful authenticated lookup is required before replaying the exact
+      // immutable ID. Persist the limit so scrolling/restarts cannot loop forever.
+      if (missing?.has(stored.requestId) && (historyRecovery || stored.requestId.startsWith('send-'))) {
+        if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+        const retry = await this.receipts.retryMissing(owner, stored.requestId, historyRecovery?.manual ? Infinity : 2)
+        if (retry) return this.translateWithSettings(retry, settings, useCache)
+        const latest = await this.receipts.get(owner, stored.requestId)
+        if (latest?.state === 'queued' || this.inFlight.has(this.requestKey(settings.provider, normalized))) return this.translateWithSettings(normalized, settings, useCache)
+      }
       throw new TranslationOutcomeError('原请求结果待确认，请在翻译记录中继续核对。不会自动重发。')
     }
     if (stored.state === 'failed') {
@@ -495,9 +518,11 @@ export class TranslationEngine {
   }
 
   private cloudProvider(revision: number, owner: string) {
-    return new CloudflareProvider(() => {
+    return new CloudflareProvider(async (force, rejectedToken) => {
       if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
-      return this.onlineAccessToken
+      const token = this.freshSession ? await this.freshSession(owner, force, rejectedToken) : this.onlineAccessToken
+      if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+      return token
     }, undefined, async receipt => { await this.receipts.update(owner, receipt.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined }) })
   }
   private createProvider(settings: AppSettings, revision = this.sessionRevision, owner = this.onlineUserId): TranslationProvider {

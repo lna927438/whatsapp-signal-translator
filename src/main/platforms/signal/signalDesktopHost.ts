@@ -8,7 +8,7 @@ import type { AccountRecord } from '../../types'
 import { setAccountState, setExternalMetrics } from '../../runtimeHealth'
 import { updateAccountUnread, notifyAccount } from '../../desktopRuntime'
 
-export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number }
+export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number; authorizationOnly?: boolean; requestId?: string; translated?: string }
 type Instance = { owner: string; accountId: string; child: ChildProcess; helper?: ChildProcess; state: 'starting' | 'ready' | 'failed' | 'stopped'; error?: string; version?: string; startedAt: number; visible?: boolean; boundsKey?: string; pending?: number; view?: string; startupTimer?: ReturnType<typeof setTimeout>; refresh?: { id:string; work:Promise<void>; finish:(error?:boolean)=>void } }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 export function signalDesktopProfile(root: string, owner: string, accountId: string): string {
@@ -117,12 +117,13 @@ export class SignalDesktopHost {
       }
       if(raw.type==='translate'&&typeof raw.id==='string'){
         const request=raw.request as DesktopTranslationRequest
+        if (request?.authorizationOnly !== undefined && (request.authorizationOnly !== true || request.direction !== 'outgoing' || !/^send-[\w-]{1,150}$/.test(request.requestId || '') || typeof request.translated !== 'string' || request.translated.length > 20000)) { reply({type:'translation',id:raw.id,error:'发送记录无效。'}); return }
         if(request?.editTimestamp!==undefined&&(!Number.isSafeInteger(request.editTimestamp)||request.editTimestamp<=0)){reply({type:'translation',id:raw.id,error:'翻译内容无效。'});return}
         if(!request||typeof request.text!=='string'||request.text.length>10000||!['incoming','outgoing','display'].includes(request.direction)||! /^[\w-]{1,100}$/.test(request.id)||! /^[\w-]{1,100}$/.test(request.conversationId)||(request.expiresAt!==undefined&&(!Number.isSafeInteger(request.expiresAt)||request.expiresAt<0))){reply({type:'translation',id:raw.id,error:'翻译内容无效。'});return}
         void this.translate(record.id,request,item.startedAt).then(result=>reply({type:'translation',id:raw.id,result}),error=>{
           // Only known user-facing messages cross the process boundary. Do not
           // leak raw provider responses, stack traces, tokens or message text.
-          const known = ['本机译文已按保留期清理，不会自动重新翻译。','此消息已删除或过期，不能再次翻译。','译文语言与目标不符，消息未发送。请修改译文或检查目标语言。','在线登录状态已过期，请重新登录后核对原请求。','可用字符余额不足。原请求已保留，结算以查询结果为准。','本次翻译未成功，云端已确认未扣费。']
+          const known = ['可用字符已用完，无法发送翻译消息。请补充字符后重试，草稿已保留。','译文仍含中文，已阻止发送并保留草稿。','仍含中文原文，已阻止发送。请开启发送翻译后重试。','暂时无法恢复在线登录，请检查网络或重新登录。草稿已保留。','在线登录尚未恢复，请重新登录。草稿已保留。','原发送记录尚未核实，消息未发送。请在原消息上重试。','本机译文已按保留期清理，不会自动重新翻译。','此消息已删除或过期，不能再次翻译。','译文语言与目标不符，消息未发送。请修改译文或检查目标语言。','在线登录状态已过期，请重新登录后核对原请求。','可用字符余额不足。原请求已保留，结算以查询结果为准。','本次翻译未成功，云端已确认未扣费。']
           reply({type:'translation',id:raw.id,error:known.includes(error?.message)?error.message:'翻译暂未完成，消息未发送。原请求已保留，可重试原消息。'})
         })
       }

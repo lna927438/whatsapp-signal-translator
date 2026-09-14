@@ -1,5 +1,6 @@
 import { whatsappSidebarScript } from './sidebar'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
+import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
 export const whatsappInjectionScript = String.raw`
 (() => {
   if (window.__RT_TRANSLATOR_INSTALLED__) return;
@@ -36,6 +37,7 @@ export const whatsappInjectionScript = String.raw`
   const composingEditors = new WeakSet();
   const nativeParagraphEditors = new WeakSet();
   let inputRevision = 0;
+  let restoredFailedDraft = null;
   let lastUserInputAt = 0;
   let navigationRevision = 0;
   let incomingBusy = false;
@@ -101,6 +103,7 @@ export const whatsappInjectionScript = String.raw`
   const normalizeMessage = (text) => String(text || '').replace(/\u00a0/g, ' ').replace(/[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
   const equivalentDisplayText = ${equivalentDisplayText.toString()};
   const wrongTargetScript = ${wrongTargetScript.toString()};
+  const hasBlockedChinese = ${hasBlockedChinese.toString()};
   const composerText = (composer) => String(composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
 
   const reportStatus = (state, message) => {
@@ -584,7 +587,10 @@ export const whatsappInjectionScript = String.raw`
         || (!queued.targetKey.startsWith('peer:') && queued.navigationRevision !== navigationRevision)) return false;
       activeSend = { composer, id: task.id, original: task.original, translated: task.translated,
         targetKey: queued.targetKey, conversationId: queued.conversationId, header: document.querySelector('#main header'),
-        navigationRevision, queued: true, restoreText: composerText(composer) };
+        navigationRevision, queued: true, restoreText: restoredFailedDraft?.id === task.id
+          && restoredFailedDraft.composer === composer && restoredFailedDraft.revision === inputRevision
+          && composerText(composer) === queued.original ? '' : composerText(composer) };
+      if (restoredFailedDraft?.id === task.id) restoredFailedDraft = null;
     }
     const snapshot = activeSend;
     if (!snapshot || snapshot.id !== task.id || !matchesSnapshot(snapshot)
@@ -608,6 +614,9 @@ export const whatsappInjectionScript = String.raw`
     const snapshot = activeSend;
     await sleep(0); // Let native input/React update the send button before clicking.
     const button = findSendButton();
+    if (hasBlockedChinese(composerText(snapshot?.composer), task.targetLanguage || 'en')) {
+      return { dispatched: false, message: '输入框仍含中文，已阻止发送并保留草稿。' };
+    }
     if (!snapshot || snapshot.id !== task.id || !matchesSnapshot(snapshot)
       || normalizeMessage(composerText(snapshot.composer)) !== normalizeMessage(task.translated)
       || !button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
@@ -733,6 +742,10 @@ export const whatsappInjectionScript = String.raw`
   window.__RT_RETRY_QUEUED_SEND__ = async id => {
     await restoreQueuedSends(true);
     const job = queuedSends.get(id);
+    if (job?.state === 'failed' && job.scheduled) {
+      const deadline = Date.now() + 5500;
+      while (job.scheduled && Date.now() < deadline) await sleep(10);
+    }
     if (!job || job.state === 'uncertain' || job.scheduled || job.targetKey !== targetKey()
       || job.conversationId !== conversationInfo().id) return false;
     job.navigationRevision = navigationRevision;
@@ -775,7 +788,17 @@ export const whatsappInjectionScript = String.raw`
         else { queuedSends.delete(job.id); showSendStatus('已发送', 'success'); void translateVisible(); }
       } catch (error) {
         job.state = /后台确认|未确认/.test(error?.message || '') ? 'uncertain' : 'failed'; job.error = String(error?.message || '暂未发送');
-        if(job.state==='failed') reportStatus('error','消息尚未发送，已保留在记录与恢复。' + job.error);
+        if(job.state==='failed') {
+          const composer = getComposer();
+          if (composer && !composerText(composer) && targetKey() === job.targetKey && conversationInfo().id === job.conversationId
+            && !editorLocked && !composingEditors.has(composer)) {
+            if (await replaceComposerText(composer, job.original)) {
+              restoredFailedDraft = { id:job.id, composer, revision:inputRevision };
+              void api.saveDraft?.({conversationId:job.conversationId,targetKey:job.targetKey},job.original).catch(() => {});
+            }
+          }
+          reportStatus('error','消息尚未发送，原文已保留。' + job.error);
+        }
         else reportStatus('ready', '');
       } finally { job.scheduled = false; renderQueuedSends(); }
     });
@@ -784,6 +807,12 @@ export const whatsappInjectionScript = String.raw`
     if (queuePreparing || editorLocked) return;
     const original = composerText(composer), conversation = conversationInfo(), key = targetKey();
     if (!original || !conversation.id) return;
+    const restored = restoredFailedDraft?.composer === composer && restoredFailedDraft.revision === inputRevision
+      ? queuedSends.get(restoredFailedDraft.id) : null;
+    if (restored && restored.original === original && restored.targetKey === key) {
+      if (!restored.scheduled) await window.__RT_RETRY_QUEUED_SEND__(restored.id);
+      return;
+    }
     const preparation = {};
     queuePreparing = preparation;
     try {
@@ -877,6 +906,12 @@ export const whatsappInjectionScript = String.raw`
   };
 
   const stopInput = (event) => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); };
+  const auxiliaryEditor = target => (target instanceof Element ? target : target?.parentElement)?.closest('[role="dialog"], [data-testid*="media-preview"]');
+  const guardAuxiliary = (event, scope) => {
+    const text = [...scope.querySelectorAll('[contenteditable="true"], [contenteditable="plaintext-only"], textarea')]
+      .map(editor => editor.value || composerText(editor)).join(' ');
+    if (/\p{Script=Han}/u.test(text)) { stopInput(event); reportStatus('error', '此编辑窗口中的中文尚未翻译，已阻止发送。请先在聊天输入框翻译后再使用。'); }
+  };
   document.addEventListener('compositionstart', event => {
     const composer = getComposer(event.target);
     if (composer?.contains(event.target)) { composingEditors.add(composer); inputRevision++; }
@@ -890,21 +925,36 @@ export const whatsappInjectionScript = String.raw`
       setTimeout(() => nativeParagraphEditors.delete(composer), 0);
     }
   }, true);
-  document.addEventListener('keydown', (event) => {
+  window.addEventListener('keydown', (event) => {
     if(nativeEditor && event.isTrusted && (((event.key.toLowerCase()==='a'||event.key==='End') && event.ctrlKey)||event.key==='Backspace')) return;
     if (editorLocked) { stopInput(event); return; }
+    const auxiliary = auxiliaryEditor(event.target);
+    if (auxiliary && !auxiliary.closest('[data-rt-ui]')) {
+      if (event.key === 'Enter' && !(event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey)) {
+        if (event.isComposing || event.keyCode === 229) { event.stopPropagation(); event.stopImmediatePropagation(); }
+        else guardAuxiliary(event, auxiliary);
+      }
+      return;
+    }
     const composer = getComposer(event.target);
     if (!composer?.contains(event.target)) return;
     lastUserInputAt = Date.now();
-    if (event.isComposing || event.keyCode === 229 || composingEditors.has(composer)) { nativeParagraphEditors.add(composer); return; }
+    if (event.isComposing || event.keyCode === 229 || composingEditors.has(composer)) {
+      nativeParagraphEditors.add(composer);
+      if (event.key === 'Enter') { event.stopPropagation(); event.stopImmediatePropagation(); }
+      return;
+    }
     if (event.key !== 'Enter') { nativeParagraphEditors.delete(composer); return; }
-    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) { nativeParagraphEditors.add(composer); return; }
+    if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) { nativeParagraphEditors.add(composer); return; }
     nativeParagraphEditors.delete(composer);
     interceptSendNow(event, composer);
   }, true);
-  document.addEventListener('keyup', event => {
+  window.addEventListener('keyup', event => {
     const composer = getComposer(event.target);
-    if (composer?.contains(event.target)) nativeParagraphEditors.delete(composer);
+    if (composer?.contains(event.target)) {
+      nativeParagraphEditors.delete(composer);
+      if (event.key === 'Enter' && !(event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey)) stopInput(event);
+    }
   }, true);
   document.addEventListener('beforeinput', (event) => {
     if (event.inputType !== 'insertParagraph' || event.isComposing) return;
@@ -918,12 +968,19 @@ export const whatsappInjectionScript = String.raw`
       && !event.target?.closest?.('[data-rt-ui]')) navigationRevision += 1;
   }, true);
   for (const name of ['paste', 'drop']) document.addEventListener(name, (event) => { if (editorLocked) stopInput(event); }, true);
-  document.addEventListener('click', (event) => {
+  window.addEventListener('click', (event) => {
     if (nativeClick && (event.target === nativeClick || nativeClick.contains(event.target))) return;
     if (editorLocked) { stopInput(event); return; }
+    const auxiliary = auxiliaryEditor(event.target), button = (event.target instanceof Element ? event.target : event.target?.parentElement)?.closest('button,[role="button"]');
+    if (auxiliary && button && !auxiliary.closest('[data-rt-ui]')) {
+      if (/send|发送|save|保存|confirm|确认/i.test([button.getAttribute('aria-label'),button.getAttribute('data-testid'),button.getAttribute('data-icon')].join(' '))
+        || button.querySelector('[data-icon*="send"],[data-testid*="send"],[data-icon="checkmark"]')) guardAuxiliary(event, auxiliary);
+      return;
+    }
     if (!isSendTarget(event.target)) return;
     const composer = getComposer();
     if (composer) interceptSendNow(event, composer);
+    else { stopInput(event); reportStatus('error', '暂时无法确认发送内容，已阻止发送。请重新打开当前对话。'); }
   }, true);
 
   let restoredDraftTarget = '';

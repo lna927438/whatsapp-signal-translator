@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onShortcut: (callback: (value: any) => void) => { const fn = (_e: any, value: any) => callback(value); ipcRenderer.on('ui:shortcut', fn); return () => ipcRenderer.removeListener('ui:shortcut', fn) },
   authStatus: () => ipcRenderer.invoke('auth:status'),
   authSetOnlineSession: (identity: any) => ipcRenderer.invoke('auth:set-online-session', identity),
+  onAuthRefreshRequested: (callback: (request: { id: string; userId: string }) => void) => { const fn = (_event: any, request: any) => callback(request); ipcRenderer.on('auth:refresh-requested', fn); return () => ipcRenderer.removeListener('auth:refresh-requested', fn) },
+  completeAuthRefresh: (id: string, ok: boolean) => ipcRenderer.invoke('auth:refresh-complete', id, ok),
   authRegister: (input: any) => ipcRenderer.invoke('auth:register', input),
   authLogin: (input: any) => ipcRenderer.invoke('auth:login', input),
   authLogout: () => ipcRenderer.invoke('auth:logout'),

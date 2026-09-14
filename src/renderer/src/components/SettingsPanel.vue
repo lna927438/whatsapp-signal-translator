@@ -263,7 +263,7 @@ async function undo() {
       <div v-show="tab === 'translation'" class="toggles">
         <label><input v-model="settings.receiveAutoTranslate" type="checkbox" />{{ t(' 自动翻译收到的消息') }}</label>
         <label><input v-model="settings.sendAutoTranslate" type="checkbox" />{{ t(' 发送前自动翻译') }}</label>
-        <label class="important-toggle"><input v-model="settings.blockChineseSend" type="checkbox" />{{ t(' 禁止发送中文 ') }}<small>{{ t('开启后，如果翻译失败或输入框仍含中文，将直接阻止发送，避免中文原文误发。') }}</small></label>
+        <label class="important-toggle"><input type="checkbox" checked disabled />{{ t(' 禁止发送中文 ') }}<small>{{ t('强制保护：外语消息仍含中文时禁止发送。翻译失败、登录未恢复或没有可用字符时保留草稿。') }}</small></label>
       </div>
 
       <section v-show="tab === 'translation'" class="settings-group"><h3>{{ t('历史与发送体验') }}</h3>

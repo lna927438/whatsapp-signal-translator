@@ -14,6 +14,10 @@ const connectionError = ref('')
 let unsubscribe: (() => void) | undefined
 let disposed = false
 let authEvents = 0
+let refreshListener: (() => void) | undefined
+let refreshTimer: ReturnType<typeof setInterval> | undefined
+let currentAuthUser: string | null = null
+let authWork: Promise<void> | undefined
 
 const sessions = new SessionCoordinator(async session => {
   await window.desktopAPI.authSetOnlineSession(session ? {
@@ -31,6 +35,7 @@ const sessions = new SessionCoordinator(async session => {
 })
 
 function applySession(session: BridgedSession | null) {
+  currentAuthUser = signingOut ? null : session?.user.id || null
   void sessions.apply(signingOut ? null : session).catch(() => {
     if (!disposed) {
       connectionError.value = t('暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。')
@@ -39,7 +44,7 @@ function applySession(session: BridgedSession | null) {
   })
 }
 
-async function refreshAuth() {
+async function loadAuth() {
   if (!supabaseConfigured) { loading.value = false; return }
   const client = requireSupabase()
   if (!unsubscribe) {
@@ -48,20 +53,50 @@ async function refreshAuth() {
       applySession(session)
     })
     unsubscribe = () => data.subscription.unsubscribe()
+    // Electron keeps receiving messages while hidden; browser visibility must not stop token rotation.
+    void client.auth.startAutoRefresh().catch(() => {})
   }
   const observed = authEvents
   try {
     const { data, error } = await client.auth.getSession()
     if (error) throw error
-    if (!disposed && observed === authEvents) await sessions.apply(signingOut ? null : data.session)
+    if (!disposed && observed === authEvents) {
+      currentAuthUser = signingOut ? null : data.session?.user.id || null
+      await sessions.apply(signingOut ? null : data.session)
+    }
   } catch {
     if (!disposed && observed === authEvents) connectionError.value = t('暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。')
   } finally { if (!disposed) loading.value = false }
 }
+function refreshAuth() {
+  if (signingOut || disposed) return Promise.resolve()
+  return authWork ??= loadAuth().finally(() => { authWork = undefined })
+}
+async function refreshForRequest(request: { id: string; userId: string }) {
+  let ok = false
+  try {
+    if (disposed || signingOut || currentAuthUser !== request.userId) return
+    const { data, error } = await requireSupabase().auth.refreshSession()
+    if (error || !data.session || data.session.user.id !== request.userId || disposed || signingOut || currentAuthUser !== request.userId) return
+    await sessions.apply(data.session)
+    ok = !disposed && !signingOut && currentAuthUser === request.userId
+  } finally { await window.desktopAPI.completeAuthRefresh(request.id, ok).catch(() => {}) }
+}
+const onReconnect = () => { void refreshAuth() }
 
 const onLocalSignOut = () => { authEvents += 1; applySession(null) }
-onMounted(() => { window.addEventListener('translator:signout', onLocalSignOut); void refreshAuth() })
-onUnmounted(() => { disposed = true; unsubscribe?.(); window.removeEventListener('translator:signout', onLocalSignOut) })
+onMounted(() => {
+  window.addEventListener('translator:signout', onLocalSignOut)
+  window.addEventListener('online', onReconnect); window.addEventListener('focus', onReconnect)
+  refreshListener = window.desktopAPI.onAuthRefreshRequested?.((request: { id: string; userId: string }) => { void refreshForRequest(request).catch(() => {}) })
+  refreshTimer = setInterval(onReconnect, 30000)
+  void refreshAuth()
+})
+onUnmounted(() => {
+  disposed = true; unsubscribe?.(); refreshListener?.(); clearInterval(refreshTimer)
+  window.removeEventListener('translator:signout', onLocalSignOut)
+  window.removeEventListener('online', onReconnect); window.removeEventListener('focus', onReconnect)
+})
 </script>
 
 <template>

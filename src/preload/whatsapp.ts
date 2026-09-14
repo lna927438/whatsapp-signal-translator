@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { installSendBootstrapGuard } from './sendBootstrapGuard'
+
+let sendGuardReady = false
+ipcRenderer.on('translator:send-guard-ready', () => { sendGuardReady = true })
+installSendBootstrapGuard(() => sendGuardReady, () => ipcRenderer.send('translator:error', '翻译保护正在准备中，已阻止发送。请稍后重试，原文仍在输入框中。'))
 
 const accountArg = process.argv.find((value) => value.startsWith('--rt-account-id='))
 const accountId = accountArg?.slice('--rt-account-id='.length)

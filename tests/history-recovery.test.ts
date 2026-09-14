@@ -47,3 +47,26 @@ test('upgrading image emoji extraction reuses a completed message instead of cha
   await reopened.translateIncoming({...request,messageId:'different-message'});assert.equal(h.calls,2);
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
+
+test('after login recovery a confirmed missing request resumes with the exact original ID',async()=>{
+ const h=fixture();try{
+  const e=h.create(),prepared=await e.messageRequests.prepare({...request,cacheUserId:'owner'});
+  await e.receipts.prepare('owner','openai',prepared);await e.receipts.update('owner',prepared.requestId,{state:'pending'});
+  e.cloudProvider=()=>({status:async()=>({state:'not_found'})});
+  await e.translateIncoming(request);assert.equal(h.calls,1);assert.equal(h.ids[0],prepared.requestId);
+  await e.translateIncoming(request);assert.equal(h.calls,1);
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('missing-request recovery is bounded across restarts and never replays a processing request',async()=>{
+ const h=fixture();try{
+  let e=h.create();const prepared=await e.messageRequests.prepare({...request,cacheUserId:'owner'});
+  await e.receipts.prepare('owner','openai',prepared);await e.receipts.update('owner',prepared.requestId,{state:'pending'});
+  for(let i=0;i<4;i++){
+   e=h.create();e.cloudProvider=()=>({status:async()=>({state:i===0?'processing':'not_found'})});
+   e.createProvider=()=>({translate:async()=>{throw Error('offline before reply')}});
+   await assert.rejects(e.translateIncoming(request));
+  }
+  const receipt=await e.receipts.get('owner',prepared.requestId);assert.equal(receipt.missingRetries,2);assert.equal(receipt.state,'pending');
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})

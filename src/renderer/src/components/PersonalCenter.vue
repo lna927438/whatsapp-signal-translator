@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { lowCharacterBalance } from "../../../shared/characterQuota"
 import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -137,7 +138,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(po
         <div v-if="cloudError" class="api-message error">{{ t('账户暂未同步：') }}{{ cloudError }} <button :disabled="busy" @click="reload">{{ t('重新同步') }}</button></div>
 
         <div class="quota-hero">
-          <div><small>{{ (cloudError || syncing) ? t('上次确认的剩余字符数（待同步）') : t('云端剩余字符数') }}</small><strong>{{ cloudState ? formatChars(remaining) : t('未同步') }}</strong><span>{{ profile?.plan_code || '—' }}</span></div>
+          <div><small>{{ (cloudError || syncing) ? t('上次确认的剩余字符数（待同步）') : t('云端剩余字符数') }}</small><strong :class="{ 'quota-warning': cloudState && lowCharacterBalance(remaining) }">{{ cloudState ? formatChars(remaining) : t('未同步') }}</strong><p v-if="cloudState && lowCharacterBalance(remaining)" class="quota-warning" role="status">{{ t('剩余字符不足 50,000，请及时补充。字符用完后无法发送翻译消息。') }}</p><span>{{ profile?.plan_code || '—' }}</span></div>
           <div class="quota-ring" :style="{ '--quota-used': usedPercent + '%' }"><b>{{ cloudState ? (total > 0 ? 100 - usedPercent : 0) + '%' : '—' }}</b><small>{{ t('剩余') }}</small></div>
         </div>
         <div class="quota-progress"><i :style="{ width: usedPercent + '%' }"></i></div>

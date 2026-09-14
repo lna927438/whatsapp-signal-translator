@@ -21,5 +21,5 @@ export function alreadyInTargetLanguage(request: TranslationRequest): boolean {
 
 export function hasBlockedChinese(text: string, targetLanguage: string): boolean {
   // Chinese and Japanese are valid requested targets, even with this guard on.
-  return !/^(zh|ja)(?:-|$)/i.test(targetLanguage) && /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(text)
+  return !/^(zh|ja)(?:-|$)/i.test(targetLanguage) && /\p{Script=Han}/u.test(text)
 }

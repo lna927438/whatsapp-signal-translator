@@ -1,3 +1,4 @@
+import { authenticatedFetch, SessionUnavailableError, type TokenSource } from './sessionRefresh'
 export type CloudRoute = 'auto' | 'primary' | 'backup'
 export const CLOUD_ROUTES = [
   { id: 'primary', label: '主线路', base: 'https://api.hellodog.net' },
@@ -13,17 +14,16 @@ export function cloudBases(): string[] {
 }
 
 /** Read-only requests may fail over. Application errors must never change routes. */
-export async function cloudRead(path: string, token?: string): Promise<any> {
+export async function cloudRead(path: string, token?: TokenSource): Promise<any> {
   const bases = cloudBases()
   for (let i = 0; i < bases.length; i++) {
     let response: Response, payload: any
     try {
-      response = await fetch(`${bases[i]}${path}`, {
-        signal: AbortSignal.timeout(10000),
-        headers: token ? { Authorization: `Bearer ${token}`, Accept: 'application/json' } : { Accept: 'application/json' }
-      })
+      response = token ? await authenticatedFetch(token, `${bases[i]}${path}`, { headers: { Accept: 'application/json' } }, 10000)
+        : await fetch(`${bases[i]}${path}`, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/json' } })
       payload = await response.json()
-    } catch {
+    } catch (error) {
+      if (error instanceof SessionUnavailableError) throw error
       if (i + 1 < bases.length) continue
       throw new Error('暂时无法连接服务。请检查网络，或切换线路后重试。')
     }

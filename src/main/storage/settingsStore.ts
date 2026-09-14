@@ -134,7 +134,7 @@ export class SettingsStore {
       provider: s.provider,
       receiveAutoTranslate: s.receiveAutoTranslate,
       sendAutoTranslate: s.sendAutoTranslate,
-      blockChineseSend: s.blockChineseSend !== false,
+      blockChineseSend: true,
       groupTranslate: s.groupTranslate === true,
       fontSize: Number(s.fontSize || 13),
       translationColor: s.translationColor || '#c8d4e4'

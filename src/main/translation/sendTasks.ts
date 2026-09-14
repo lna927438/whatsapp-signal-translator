@@ -186,7 +186,7 @@ export class SendTasks {
       if (task.state === 'cancelled') throw new SendNotStartedError('此任务已取消。')
       if (task.state === 'uncertain' || task.state === 'submitting') throw new Error(uncertainSendMessage)
       if (task.translated === undefined) throw new SendNotStartedError('译文尚未确认，草稿已保留。')
-      if (task.blockChinese && hasBlockedChinese(task.translated, task.request.targetLanguage)) {
+      if (hasBlockedChinese(task.translated, task.request.targetLanguage)) {
         throw new SendNotStartedError('结果仍包含中文，已阻止发送并保留草稿。')
       }
       if (task.translate && task.translated.trim()) {

@@ -57,11 +57,19 @@ export async function translateHelloDogMessage(message: MessageModel, conversati
   if(editTimestamp&&!edit)throw new Error('Edited message unavailable');
   const saved = editTimestamp?prior.helloDogEditTranslations?.[String(editTimestamp)]:prior.helloDogTranslation;
   const original = (edit?edit.body:message.get('body')) || '';
-  if (saved && saved.translated === original) return;
+  if (saved && saved.translated === original) {
+    const approval = await requestHelloDogTranslation({ id:message.id,editTimestamp,conversationId:conversation.id,text:saved.original,
+      translated:saved.translated,requestId:saved.requestId,authorizationOnly:true,direction:'outgoing',expiresAt:deadline(message) });
+    if (approval?.authorized !== true) throw new Error('发送权限尚未确认，原消息已保留。');
+    if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original
+      || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during send authorization');
+    return;
+  }
   if (!original || !/\p{L}/u.test(original)) return;
   const ranges=(edit?edit.bodyRanges:message.get('bodyRanges'))||[];
   const result = await requestHelloDogTranslation({ id:message.id,editTimestamp,conversationId:conversation.id,text:original,direction:'outgoing',group:conversation.get('type')==='group',sentAt:editTimestamp||message.get('sent_at'),expiresAt:deadline(message) });
-  if (!result?.enabled) return;
+  if (result?.enabled === false) return;
+  if (result?.enabled !== true) throw new Error('发送权限尚未确认，原消息已保留。');
   if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('Translation returned no text');
   if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation');
   const extra: Translation = { original,translated:result.text,requestId:result.requestId };

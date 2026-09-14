@@ -3,6 +3,7 @@ import type { TranslationRequest } from '../../types'
 import type { TranslationProvider } from './provider'
 import { cloudBases } from '../../network/cloudConnection'
 import { qualityKey } from '../../../shared/translationPolicy'
+import { authenticatedFetch, SessionUnavailableError, type TokenSource } from '../../network/sessionRefresh'
 
 export interface CloudReceipt { requestId: string; translation: string; sourceCharacters: number; balanceAfter: number }
 export class TranslationOutcomeError extends Error {
@@ -33,22 +34,16 @@ export function validateCloudReceipt(payload: any, id: string, characters?: numb
 }
 
 export class CloudflareProvider implements TranslationProvider {
-  constructor(private readonly accessToken: string | (() => string), private readonly apiBase?: string,
+  constructor(private readonly accessToken: TokenSource, private readonly apiBase?: string,
     private readonly onReceipt?: (value: CloudReceipt) => Promise<void>) {}
-  private token() {
-    const token = (typeof this.accessToken === 'function' ? this.accessToken() : this.accessToken).trim()
-    if (!token) throw new Error('在线登录令牌缺失，请重新登录。')
-    return token
-  }
   async status(requestId: string, deadline = Date.now() + 20000): Promise<{ state: 'completed' | 'failed' | 'processing' | 'not_found'; response?: CloudReceipt; error?: string }> {
     const bases = this.apiBase ? [this.apiBase.replace(/\/$/, '')] : cloudBases()
     for (const base of bases) {
       if (Date.now() >= deadline) break
-      const token = this.token()
       let response: Response
-      try { response = await fetch(`${base}/api/translation-status?requestId=${encodeURIComponent(requestId)}`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(Math.max(1, Math.min(10000, deadline - Date.now())))
-      }) } catch { continue }
+      try { response = await authenticatedFetch(this.accessToken, `${base}/api/translation-status?requestId=${encodeURIComponent(requestId)}`, {
+        headers: { Accept: 'application/json' }, cache: 'no-store'
+      }, Math.min(10000, deadline - Date.now())) } catch (error) { if (error instanceof SessionUnavailableError) throw error; continue }
       const payload: any = await response.json().catch(() => null)
       if (response.ok && ['completed', 'failed', 'processing', 'not_found'].includes(payload?.state)) {
         if (payload.state === 'completed') payload.response = validateCloudReceipt(payload.response, requestId)
@@ -66,7 +61,6 @@ export class CloudflareProvider implements TranslationProvider {
       ...(request.quality ? { quality: request.quality } : {}) }
     const requestId = request.requestId || (request.messageId
       ? `message-${createHash('sha256').update(JSON.stringify([request.messageId, body])).digest('hex')}` : randomUUID())
-    const token = this.token()
     const base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
     if (qualityKey(request.quality)) {
       let supported: boolean
@@ -77,11 +71,11 @@ export class CloudflareProvider implements TranslationProvider {
     let response: Response | undefined
     let payload: any
     try {
-      response = await fetch(`${base}/api/translate`, { method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-request-id': requestId },
-        body: JSON.stringify({ ...body, requestId }), signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - Date.now()))) })
+      response = await authenticatedFetch(this.accessToken, `${base}/api/translate`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-request-id': requestId },
+        body: JSON.stringify({ ...body, requestId }) }, Math.min(30000, deadline - Date.now()))
       payload = await response.json()
-    } catch { /* Response lost: only query this ID. Never create another request. */ }
+    } catch (error) { if (error instanceof SessionUnavailableError) throw new TranslationOutcomeError(error.message); /* Response lost: only query this ID. */ }
     const finish = async (value: any) => {
       const receipt = validateCloudReceipt(value, requestId, Array.from(body.text).length)
       await this.onReceipt?.(receipt)
