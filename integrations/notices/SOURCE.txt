@@ -1,0 +1,20 @@
+HelloDog 0.5.8: modified Signal Desktop integration.
+This is not an official Signal distribution and is not endorsed by Signal.
+
+Upstream: https://github.com/signalapp/Signal-Desktop
+Tag: v8.27.0
+Commit: 1a1d65153be546836d5948cb50493d4d1d293d02
+License: AGPL-3.0-only; original copyright notices are retained.
+Runtime: Electron 43.5.0; libsignal 0.100.0; RingRTC 2.71.0.
+
+The patched corresponding source is supplied with the distribution artifacts:
+HelloDog-0.5.8-corresponding-source.zip
+Its checksum and this installer's checksum are in release-manifest.json.
+Build and patch instructions: hellodog/integrations/README.md in that archive.
+Patches: hellodog/integrations/hellodog-source and scripts/patch-signal-desktop.mjs.
+No user account profiles, keys or chat logs are included in the source archive.
+
+The core runs in its own account directory. It requires phone linking and does
+not open or migrate the installed Signal or signal-cli database. Core updates
+are managed by HelloDog packages. See this version's release notes for its
+publication and acceptance status.

@@ -12,6 +12,50 @@ function fixture() {
   return { storage, tasks: new SendTasks(storage) }
 }
 
+test('retention scrubs aged original aliases after task pruning without touching unfinished sends or another owner',async()=>{
+  const {tasks,storage}=fixture()
+  const task=await tasks.prepare('user',{...input,platform:'whatsapp',conversationId:'wa:fixture',targetKey:'peer:fixture@c.us'})
+  await tasks.translate('user',task.id,async()=> 'sent translation',allowed)
+  await tasks.submit('user',task.id,async()=>({messageId:'old-message',confirmed:true}),allowed)
+  const unfinished=await tasks.prepare('user',{...input,request:{...input.request,text:'unsent draft'}})
+  const other=await tasks.prepare('other',{...input,request:{...input.request,text:'other owner'}})
+  const data=await storage.read(),old=Date.now()-40*86400000
+  data.tasks=data.tasks.filter(item=>item.id!==task.id)
+  for(const item of data.tasks)item.updatedAt=old
+  for(const item of Object.values(data.originals||{}))item.at=old
+  await storage.write(data)
+  assert.equal(await tasks.originalForMessage('user','record-1','old-message','sent translation'),input.request.text)
+  await tasks.expireOlderContent('user',Date.now()-30*86400000)
+  assert.equal(await tasks.originalForMessage('user','record-1','old-message','sent translation'),undefined)
+  const remaining=await storage.read()
+  assert.equal(remaining.tasks.find(item=>item.id===unfinished.id)?.request.text,'unsent draft')
+  assert.equal(remaining.tasks.find(item=>item.id===other.id)?.request.text,'other owner')
+})
+
+test('WhatsApp originals survive completed-task pruning and restart, scoped to account and message ID', async () => {
+  const {tasks,storage}=fixture()
+  const task=await tasks.prepare('user',{...input,platform:'whatsapp',conversationId:'wa:fixture',targetKey:'peer:fixture@c.us'})
+  await tasks.translate('user',task.id,async()=> 'shared translated text',allowed)
+  await tasks.submit('user',task.id,async()=>({messageId:'true_fixture@c.us_first',confirmed:true}),allowed)
+  const journal=await storage.read();journal.tasks=[];await storage.write(journal)
+  const restarted=new SendTasks(storage)
+  assert.equal(await restarted.originalForMessage('user','record-1','true_fixture@c.us_first','shared translated text'),input.request.text)
+  assert.equal(await restarted.originalForMessage('other-user','record-1','true_fixture@c.us_first','shared translated text'),undefined)
+  assert.equal(await restarted.originalForMessage('user','other-account','true_fixture@c.us_first','shared translated text'),undefined)
+  assert.equal(await restarted.originalForMessage('user','record-1','true_fixture@c.us_second','shared translated text'),undefined)
+  assert.equal(await restarted.originalForMessage('user','record-1','true_fixture@c.us_first','edited after sending'),undefined)
+})
+
+test('late WhatsApp confirmation restores the original, but an unknown send has no fabricated original mapping',async()=>{
+  const {tasks,storage}=fixture()
+  const task=await tasks.prepare('user',{...input,platform:'whatsapp',conversationId:'wa:fixture'})
+  await tasks.translate('user',task.id,async()=> 'translated',allowed)
+  await assert.rejects(tasks.submit('user',task.id,async()=>{throw Error('unknown')},allowed))
+  assert.equal(await tasks.originalForMessage('user','record-1','true_fixture@c.us_late','translated'),undefined)
+  await tasks.resolveWithEvidence('user',task.id,{messageId:'3EB0000000000000000001'})
+  assert.equal(await new SendTasks(storage).originalForMessage('user','record-1','3EB0000000000000000001','translated'),input.request.text)
+})
+
 test('lost translation response and application restart retain request ID, language, context and original draft', async () => {
   const { tasks, storage } = fixture()
   const first = await tasks.prepare('user-1', input)
@@ -41,16 +85,33 @@ test('concurrent translation and submission coalesce, completed replay never dis
   assert.notEqual(intentionalNew.id, task.id)
 })
 
-test('timeout after dispatch and restart block both same-text retry and a changed-text bypass until user resolves outcome', async () => {
+test('different compose intents with identical text remain separate while one intent survives replay', async () => {
+  const {tasks,storage}=fixture()
+  const first=await tasks.prepare('user',{...input,intentId:'intent-first-123'})
+  const second=await tasks.prepare('user',{...input,intentId:'intent-second-123'})
+  assert.notEqual(first.id,second.id)
+  const restarted=new SendTasks(storage)
+  assert.equal((await restarted.prepare('user',{...input,intentId:'intent-first-123'})).id,first.id)
+  assert.equal((await restarted.prepare('user',{...input,intentId:'intent-second-123'})).id,second.id)
+  await restarted.translate('user',first.id,async()=> 'done',allowed)
+  await restarted.submit('user',first.id,async()=>({receipt:'one'}),allowed)
+  const completedReplay=await new SendTasks(storage).prepare('user',{...input,intentId:'intent-first-123'})
+  assert.equal(completedReplay.id,first.id);assert.equal(completedReplay.state,'sent')
+  await assert.rejects(restarted.prepare('user',{...input,intentId:'intent-first-123',recipient:'another-peer'}),/不一致/)
+})
+
+test('an unknown result keeps the original request without blocking a different next message', async () => {
   const { tasks, storage } = fixture()
   const task = await tasks.prepare('user', input)
   await tasks.translate('user', task.id, async () => 'test', allowed)
   let sends = 0
-  await assert.rejects(tasks.submit('user', task.id, async () => { sends++; throw new Error('RPC timeout') }, allowed), /未确认/)
+  await assert.rejects(tasks.submit('user', task.id, async () => { sends++; throw new Error('RPC timeout') }, allowed), /后台确认/)
   const restarted = new SendTasks(storage)
-  const retry = await restarted.prepare('user', { ...input, request: { ...input.request, text: 'different text' } })
+  const next = await restarted.prepare('user', { ...input, request: { ...input.request, text: 'different text' } })
+  assert.notEqual(next.id, task.id)
+  const retry = await restarted.prepare('user', input)
   assert.equal(retry.id, task.id)
-  await assert.rejects(restarted.submit('user', retry.id, async () => { sends++ }, allowed), /未确认/)
+  await assert.rejects(restarted.submit('user', retry.id, async () => { sends++ }, allowed), /后台确认/)
   assert.equal(sends, 1)
   await restarted.confirmNotSent('user', retry.id)
   await restarted.translate('user', retry.id, async () => { throw new Error('must reuse stored translation') }, allowed)

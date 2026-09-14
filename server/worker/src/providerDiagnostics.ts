@@ -1,5 +1,5 @@
 import { providerConfig, type ProviderEnv } from './providerConfig'
-export type ProviderCode = 'provider_auth' | 'provider_quota' | 'provider_model' | 'provider_permission' | 'provider_request' | 'provider_rate_limit' | 'provider_timeout' | 'provider_unavailable' | 'provider_empty'
+export type ProviderCode = 'provider_auth' | 'provider_quota' | 'provider_model' | 'provider_permission' | 'provider_request' | 'provider_rate_limit' | 'provider_timeout' | 'provider_unavailable' | 'provider_empty' | 'protected_literal_mismatch' | 'provider_wrong_language'
 
 export class ProviderFailure extends Error {
   constructor(readonly code: ProviderCode, readonly upstreamStatus?: number) { super(code) }
@@ -19,11 +19,13 @@ export function classifyProviderFailure(status: number, payload: any): ProviderF
 }
 
 export const providerMessages: Record<ProviderCode, string> = {
+  provider_wrong_language: '翻译服务未返回目标语言，本次未扣减字符，可稍后重试。',
   provider_auth: '翻译服务端凭据无效或已失效，请管理员更新服务端配置。本次未扣减字符。',
   provider_quota: '翻译服务的 API 额度不足或已达到用量上限，请管理员检查 API 账单。本次未扣减字符。',
   provider_model: '翻译服务当前项目无法访问配置的模型，请管理员核对模型权限。本次未扣减字符。',
   provider_permission: '翻译服务凭据缺少调用权限，请管理员检查项目和密钥权限。本次未扣减字符。',
   provider_request: '翻译服务的请求参数不被当前模型接受，请管理员修复调用配置。本次未扣减字符。',
+  protected_literal_mismatch: '译文中的号码、链接或术语未完整保留，本次未扣减字符，可稍后重试。',
   provider_rate_limit: '翻译服务暂时限流，请稍后重新测试。本次未扣减字符。',
   provider_timeout: '翻译服务响应超时，原请求不会自动重复调用。本次未扣减字符。',
   provider_unavailable: '翻译服务暂时不可用，请稍后重新测试。本次未扣减字符。',

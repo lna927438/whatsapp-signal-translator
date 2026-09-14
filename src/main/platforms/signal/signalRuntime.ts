@@ -42,26 +42,32 @@ interface RuntimeManifest {
 
 export class SignalRuntimeManager extends EventEmitter {
   private installing?: Promise<SignalRuntimeInfo>
+  private currentStatus: SignalRuntimeStatus = { state: 'missing', message: 'Signal 尚未准备。' }
 
   async status(): Promise<SignalRuntimeStatus> {
-    this.emitStatus({ state: 'checking', message: 'Checking Signal runtime…' })
-    const info = await this.locate()
-    if (!info) return { state: 'missing', message: 'Signal runtime is not installed.' }
-    return {
-      state: 'ready',
-      message: 'Signal runtime is ready.',
-      source: info.source,
-      signalCliPath: info.signalCliPath,
-      javaHome: info.javaHome
+    // Reading state must never leave event subscribers in a transient state.
+    if (this.installing) return { ...this.currentStatus }
+    try {
+      const info = await this.locate()
+      const status: SignalRuntimeStatus = info
+        ? { state: 'ready', message: 'Signal 已准备好。', ...info }
+        : { state: 'missing', message: '首次使用需要准备 Signal。' }
+      this.emitStatus(status)
+      return status
+    } catch {
+      const status: SignalRuntimeStatus = { state: 'error', message: 'Signal 检查未完成，请重试。' }
+      this.emitStatus(status)
+      return status
     }
   }
 
   async ensureReady(): Promise<SignalRuntimeInfo> {
+    if (this.installing) return this.installing
     const existing = await this.locate()
     if (existing) {
       this.emitStatus({
         state: 'ready',
-        message: 'Signal runtime is ready.',
+        message: 'Signal 已准备好。',
         source: existing.source,
         signalCliPath: existing.signalCliPath,
         javaHome: existing.javaHome
@@ -88,8 +94,7 @@ export class SignalRuntimeManager extends EventEmitter {
     }
     if (!this.installing) {
       this.installing = (async () => {
-        this.emitStatus({ state: 'checking', message: 'Repairing Signal runtime…' })
-        await rm(this.runtimeRoot(), { recursive: true, force: true })
+        this.emitStatus({ state: 'checking', message: '正在修复 Signal，已有账号会保留。' })
         return this.installWindowsRuntime()
       })().finally(() => { this.installing = undefined })
     }
@@ -101,6 +106,10 @@ export class SignalRuntimeManager extends EventEmitter {
     if (envPath && (existsSync(envPath) || !isAbsoluteLike(envPath))) {
       return { signalCliPath: envPath, source: 'env', javaHome: process.env.JAVA_HOME }
     }
+
+    // A completed repair/update is an explicit replacement for the bundled copy.
+    const managed = await this.readManagedManifest()
+    if (managed) return managed
 
     const bundled = process.platform === 'win32'
       ? join(process.resourcesPath, 'signal', 'bin', 'signal-cli.bat')
@@ -114,18 +123,18 @@ export class SignalRuntimeManager extends EventEmitter {
       const dev = process.platform === 'win32'
         ? join(process.cwd(), 'resources', 'signal', 'bin', 'signal-cli.bat')
         : join(process.cwd(), 'resources', 'signal', 'bin', 'signal-cli')
-      if (existsSync(dev)) return { signalCliPath: dev, source: 'bundled', javaHome: process.env.JAVA_HOME }
+      if (existsSync(dev)) {
+        const javaHome = join(process.cwd(), 'resources', 'signal', 'jre')
+        return { signalCliPath: dev, source: 'bundled', javaHome: existsSync(javaHome) ? javaHome : process.env.JAVA_HOME }
+      }
     }
 
-    const managed = await this.readManagedManifest()
-    if (managed) return managed
-
     if (process.platform === 'win32') {
-      const found = spawnSync('where.exe', ['signal-cli.bat'], { encoding: 'utf8', windowsHide: true })
+      const found = spawnSync('where.exe', ['signal-cli.bat'], { encoding: 'utf8', windowsHide: true, timeout: 2000 })
       const first = found.status === 0 ? found.stdout.split(/\r?\n/).map((v) => v.trim()).find(Boolean) : undefined
       if (first) return { signalCliPath: first, source: 'path', javaHome: process.env.JAVA_HOME }
     } else {
-      const found = spawnSync('which', ['signal-cli'], { encoding: 'utf8' })
+      const found = spawnSync('which', ['signal-cli'], { encoding: 'utf8', timeout: 2000 })
       const first = found.status === 0 ? found.stdout.trim() : undefined
       if (first) return { signalCliPath: first, source: 'path', javaHome: process.env.JAVA_HOME }
     }
@@ -163,7 +172,7 @@ export class SignalRuntimeManager extends EventEmitter {
     await mkdir(staging, { recursive: true })
 
     try {
-      this.emitStatus({ state: 'checking', message: 'Finding the latest Signal runtime…' })
+      this.emitStatus({ state: 'checking', message: '正在获取 Signal 组件信息…' })
       const signalRelease = await fetchJson<any>('https://api.github.com/repos/AsamK/signal-cli/releases/latest', {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'WhatsApp-Signal-Translator'
@@ -179,27 +188,28 @@ export class SignalRuntimeManager extends EventEmitter {
       const javaArchive = join(staging, 'temurin-jre25.zip')
 
       await downloadFile(signalAsset.browser_download_url, signalArchive, (progress) => {
-        this.emitStatus({ state: 'downloading-signal', message: 'Downloading Signal core…', progress })
+        this.emitStatus({ state: 'downloading-signal', message: '正在下载 Signal…', progress })
       })
       if (signalAsset.digest?.startsWith('sha256:')) {
         await verifySha256(signalArchive, signalAsset.digest.slice(7))
       }
 
       await downloadFile(javaPackage.link, javaArchive, (progress) => {
-        this.emitStatus({ state: 'downloading-java', message: 'Downloading Java runtime…', progress })
+        this.emitStatus({ state: 'downloading-java', message: '正在下载运行组件…', progress })
       })
       if (javaPackage.checksum) await verifySha256(javaArchive, javaPackage.checksum)
 
-      this.emitStatus({ state: 'installing', message: 'Installing Signal runtime…', progress: 0 })
-      const signalDir = join(root, 'signal-cli')
-      const javaDir = join(root, 'java')
-      await rm(signalDir, { recursive: true, force: true })
-      await rm(javaDir, { recursive: true, force: true })
+      this.emitStatus({ state: 'installing', message: '正在安装 Signal…', progress: 0 })
+      // Build a new generation before publishing the manifest. A failed repair
+      // must leave the previous runtime, and all account data, intact.
+      const generation = join(root, 'versions', String(Date.now()))
+      const signalDir = join(generation, 'signal-cli')
+      const javaDir = join(generation, 'java')
       await mkdir(signalDir, { recursive: true })
       await mkdir(javaDir, { recursive: true })
 
       await runProcess('tar.exe', ['-xzf', signalArchive, '-C', signalDir])
-      this.emitStatus({ state: 'installing', message: 'Installing Signal runtime…', progress: 55 })
+      this.emitStatus({ state: 'installing', message: '正在安装 Signal…', progress: 55 })
       await runProcess('tar.exe', ['-xf', javaArchive, '-C', javaDir])
 
       const signalCliPath = await findByName(signalDir, 'signal-cli.bat')
@@ -227,7 +237,7 @@ export class SignalRuntimeManager extends EventEmitter {
       }
       this.emitStatus({
         state: 'ready',
-        message: 'Signal runtime is ready.',
+        message: 'Signal 已准备好。',
         progress: 100,
         source: 'managed',
         signalCliPath: result.signalCliPath,
@@ -243,6 +253,7 @@ export class SignalRuntimeManager extends EventEmitter {
   }
 
   private emitStatus(status: SignalRuntimeStatus): void {
+    this.currentStatus = status
     this.emit('status', status)
   }
 }
@@ -260,24 +271,30 @@ async function getTemurinJreAssets(): Promise<any[]> {
 }
 
 async function fetchJson<T>(url: string, headers: Record<string, string> = {}): Promise<T> {
-  const response = await fetch(url, { headers })
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) })
   if (!response.ok) throw new Error(`HTTP ${response.status} while requesting ${url}`)
   return response.json() as Promise<T>
 }
 
 async function downloadFile(url: string, destination: string, onProgress: (value: number) => void): Promise<void> {
-  const response = await fetch(url, { redirect: 'follow' })
+  const controller = new AbortController()
+  let idle = setTimeout(() => controller.abort(), 30000)
+  const resetIdle = () => { clearTimeout(idle); idle = setTimeout(() => controller.abort(), 30000) }
+  try {
+  const response = await fetch(url, { redirect: 'follow', signal: controller.signal })
   if (!response.ok || !response.body) throw new Error(`Download failed (${response.status})`)
   const total = Number(response.headers.get('content-length') || 0)
   let received = 0
   const source = Readable.fromWeb(response.body as any)
   source.on('data', (chunk: Buffer) => {
+    resetIdle()
     received += chunk.length
     if (total > 0) onProgress(Math.min(99, Math.round((received / total) * 100)))
   })
   await mkdir(dirname(destination), { recursive: true })
   await pipeline(source, createWriteStream(destination))
   onProgress(100)
+  } finally { clearTimeout(idle) }
 }
 
 async function verifySha256(file: string, expected: string): Promise<void> {

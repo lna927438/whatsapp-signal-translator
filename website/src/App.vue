@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { requireSupabase, supabaseConfigured } from './lib/supabase'
 
 const router = useRouter()
+const route = useRoute()
+const isAdmin = computed(() => route.path === '/admin' || route.path.startsWith('/admin/'))
 const loggedIn = ref(false)
 const email = ref('')
 const menuOpen = ref(false)
@@ -28,6 +30,7 @@ async function logout() {
 }
 
 onMounted(async () => {
+  if (isAdmin.value) return
   if (supabaseConfigured) {
     const { data } = requireSupabase().auth.onAuthStateChange((_event, session) => {
       authRevision += 1
@@ -42,16 +45,18 @@ onUnmounted(() => unsubscribe?.())
 </script>
 
 <template>
-  <div class="site-shell">
+  <RouterView v-if="isAdmin" />
+  <div v-else class="site-shell">
     <header class="site-header">
       <RouterLink class="brand" to="/">
         <img class="brand-logo" src="/hellodog-icon.webp" alt="HelloDog" />
-        <span><b>HelloDog</b><small>让每一句，都被听懂。</small></span>
+        <span><b>HelloDog</b><small>HelloDog 翻译器 · 聊天更自在</small></span>
       </RouterLink>
       <button class="mobile-menu" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-label="网站导航">☰</button>
       <nav :class="{ open: menuOpen }" @click="menuOpen = false">
         <RouterLink to="/">认识 HelloDog</RouterLink><a href="/#features">功能</a>
         <RouterLink to="/download">下载</RouterLink>
+        <RouterLink to="/guide">使用指南</RouterLink>
         <RouterLink v-if="loggedIn" to="/account">用户中心</RouterLink>
         <RouterLink v-else to="/login">登录 / 注册</RouterLink>
       </nav>
@@ -65,8 +70,8 @@ onUnmounted(() => unsubscribe?.())
     <RouterView />
 
     <footer class="site-footer">
-      <div><b>HelloDog</b><span>你的跨语言聊天搭档 · WhatsApp + Signal</span></div>
-      <div class="footer-links"><RouterLink to="/download">Windows 下载</RouterLink><RouterLink to="/login">账号</RouterLink><span>© 2026</span></div>
+      <div><b>HelloDog</b><span>HelloDog 翻译器 · WhatsApp + Signal</span></div>
+      <div class="footer-links"><RouterLink to="/download">Windows 下载</RouterLink><RouterLink to="/guide">使用指南</RouterLink><RouterLink to="/updates">更新记录</RouterLink><a href="https://github.com/lna927438/whatsapp-signal-translator" target="_blank" rel="noopener noreferrer">GitHub 项目</a><RouterLink to="/login">账号</RouterLink><a href="https://admin.hellodog.net">管理后台</a><span>© 2026</span></div>
     </footer>
   </div>
 </template>

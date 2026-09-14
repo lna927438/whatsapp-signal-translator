@@ -1,0 +1,8 @@
+{
+  "keys": {
+    "hellodog-update-20260914": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAO6VMQNG1adCV/1Lo5ryGsWl30AfgXBLSPxDttG1L108=\n-----END PUBLIC KEY-----\n"
+  },
+  "windowsPublisherSubjects": [],
+  "windowsInstallerPolicy": "signed-manifest",
+  "status": "active-owner-authorized-unsigned-windows"
+}

@@ -1,17 +1,26 @@
+import type { SecurityWorkerBindings, ScheduledController } from '../worker-configuration'
 import { providerConfig, type ProviderEnv } from './providerConfig'
+import { boundedJson, rateKey, providerTokenBounds } from './requestSecurity'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
+import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
+import { wrongTargetScript } from '../../../src/shared/translationResult'
+import { handleAdmin, supabaseAdminServices } from './admin'
+import { noticeReceiptBody } from './clientNotices'
+import { providerReceipt, captureProviderReceipt, type ProviderReceipt } from './providerUsage'
 
 export interface Env extends ProviderEnv {
+  API_RATE_LIMITER: SecurityWorkerBindings['API_RATE_LIMITER']
   SUPABASE_URL: string
   SUPABASE_PUBLISHABLE_KEY: string
   SUPABASE_SECRET_KEY: string
-  OPENAI_API_KEY: string
+  OPENAI_API_KEY?: string
   OPENAI_MODEL: string
 }
 
 type User = { id: string; email?: string; user_metadata?: Record<string, unknown> }
 
 type TranslateBody = {
+  quality?: TranslationQuality
   text?: string
   sourceLanguage?: string
   targetLanguage?: string
@@ -26,6 +35,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, content-type, x-request-id',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Cache-Control': 'no-store'
+  , 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'
 }
 
 function json(data: unknown, status = 200): Response {
@@ -56,7 +66,7 @@ async function requireUser(request: Request, env: Env): Promise<User> {
     headers: {
       apikey: env.SUPABASE_PUBLISHABLE_KEY,
       Authorization: `Bearer ${token}`
-    }
+    }, signal: AbortSignal.timeout(8000)
   })
   if (!response.ok) throw new Response(JSON.stringify({ error: 'unauthorized', message: '登录状态无效或已过期。' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   return response.json() as Promise<User>
@@ -64,9 +74,9 @@ async function requireUser(request: Request, env: Env): Promise<User> {
 
 async function adminGet<T>(env: Env, path: string): Promise<T> {
   const response = await fetch(`${env.SUPABASE_URL}${path}`, {
-    headers: { apikey: env.SUPABASE_SECRET_KEY, Accept: 'application/json' }
+    headers: { apikey: env.SUPABASE_SECRET_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(10000)
   })
-  if (!response.ok) throw new Error(`Supabase GET failed: ${response.status} ${await response.text()}`)
+  if (!response.ok) throw new Error('database_error')
   return response.json() as Promise<T>
 }
 
@@ -79,11 +89,11 @@ async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: stri
       Accept: 'application/json',
       ...(prefer ? { Prefer: prefer } : {})
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body), signal: AbortSignal.timeout(15000)
   })
   if (!response.ok) {
     const error = await response.json().catch(() => ({})) as { message?: string }
-    const allowed = ['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request', 'request_not_found']
+    const allowed = ['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request', 'request_not_found', 'rate_limited', 'cost_limit', 'security_paused']
     throw new Error(allowed.includes(String(error.message)) ? error.message : 'database_error')
   }
   const text = await response.text()
@@ -106,22 +116,25 @@ async function getProfile(env: Env, userId: string) {
   return rows[0] || null
 }
 
-function translationInstructions(sourceLanguage: string, targetLanguage: string, context: TranslateBody['context']): string {
+function translationInstructions(sourceLanguage: string, targetLanguage: string, context: TranslateBody['context'], quality?: TranslationQuality): string {
   const recent = Array.isArray(context)
     ? context.slice(-4).map((item) => `${item?.role || 'message'}: ${String(item?.text || '').slice(0, 500)}`).join('\n')
     : ''
   return [
     `Translate the current message from ${sourceLanguage || 'auto-detected language'} to ${targetLanguage || 'the requested target language'}.`,
     'Return only the translation. Do not answer the message, explain it, summarize it, or add quotation marks.',
+    'Copy every __HDPROTECTED_0__ style placeholder exactly once and unchanged. They represent protected URLs, numbers, names or glossary terms.',
+    quality?.tone === 'business' ? 'Use clear professional business language without adding information.' : 'Use natural conversational language that matches the original tone.',
     'Preserve meaning, tone, slang, profanity, sarcasm, names, numbers, emojis, punctuation, and line breaks as naturally as possible.',
     'Short words, abbreviations, insults, and internet slang must be translated according to their conversational meaning when a natural equivalent exists.',
     recent ? `Recent conversation context (for disambiguation only; translate ONLY the current message):\n${recent}` : ''
   ].filter(Boolean).join('\n')
 }
 
-async function providerTranslate(env: Env, body: TranslateBody, text: string): Promise<{ translation: string; latencyMs: number; model: string }> {
+async function providerTranslate(env: Env, body: TranslateBody, text: string, receipt:ProviderReceipt): Promise<{ translation: string; latencyMs: number; model: string }> {
   const started = Date.now()
   const config = providerConfig(env)
+  const protectedText = protectLiterals(text, body.quality)
   if (!config.key) throw new ProviderFailure('provider_auth')
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
@@ -132,14 +145,16 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string): P
     },
     body: JSON.stringify({
       model: config.model,
-      instructions: translationInstructions(String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context),
-      input: text,
+      instructions: translationInstructions(String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context, body.quality),
+      input: protectedText.input,
+      max_output_tokens: providerTokenBounds(body.text || '', translationInstructions(String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context, body.quality)).output,
       reasoning: { effort: 'none' },
       store: false
     })
   })
 
   const payload: any = await response.json().catch(() => ({}))
+  captureProviderReceipt(receipt, payload, response, started)
   if (!response.ok) {
     throw classifyProviderFailure(response.status, payload)
   }
@@ -154,7 +169,11 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string): P
     }
     output = output.trim()
   }
-  if (!output) throw new ProviderFailure('provider_empty')
+  if (!output || (payload.status && payload.status !== 'completed')) throw new ProviderFailure('provider_empty')
+  try { output = protectedText.restore(output) } catch { throw new ProviderFailure('protected_literal_mismatch') }
+  let languageSample = output
+  for (const literal of [...protectedText.values].sort((a, b) => b.length - a.length)) languageSample = languageSample.split(literal).join(' ')
+  if (wrongTargetScript(languageSample, String(body.targetLanguage || ''))) throw new ProviderFailure('provider_wrong_language')
   return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || config.model) }
 }
 
@@ -169,10 +188,15 @@ function failure(code: string): Response {
     translation_failed: [502, '本次翻译失败，未扣减字符。'],
     translation_outcome_unknown: [409, '上次请求结果未能确认，未扣减字符；该请求不会自动再次调用翻译服务。'],
     settlement_pending: [503, '翻译结果正在确认，请使用同一请求编号重试。']
+    , rate_limited: [429, '请求较多，请稍后继续。原消息和草稿已保留。']
+    , cost_limit: [429, '今日翻译费用已达到保护上限，请联系管理员核对。']
+    , security_paused: [503, '翻译服务正在安全维护，原消息和草稿已保留。']
   }
   const providerMessage = providerMessages[code as keyof typeof providerMessages]
   const [status, message] = providerMessage ? [502, providerMessage] : errors[code] || [500, '服务器处理请求失败。']
-  return json({ error: code, message }, status)
+  const response = json({ error: code, message }, status)
+  if (status === 429) response.headers.set('Retry-After', code === 'cost_limit' ? '3600' : '60')
+  return response
 }
 
 function claimResponse(claim: Claim): Response {
@@ -185,7 +209,7 @@ function claimResponse(claim: Claim): Response {
   return failure(claim.error || 'translation_failed')
 }
 
-function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId'>> & { requestId?: string } {
+function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId' | 'quality'>> & Pick<TranslateBody, 'requestId' | 'quality'> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_request')
   const b = raw as TranslateBody
   if (typeof b.text !== 'string' || typeof b.targetLanguage !== 'string') throw new Error('invalid_request')
@@ -203,7 +227,7 @@ function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId'>>
   return {
     text, targetLanguage, sourceLanguage: safeId(b.sourceLanguage) || 'auto',
     accountId: safeId(b.accountId), conversationId: safeId(b.conversationId), context,
-    requestId: b.requestId
+    requestId: b.requestId, ...(b.quality ? { quality: normalizeQuality(b.quality) } : {})
   }
 }
 
@@ -212,36 +236,46 @@ async function requestHash(body: TranslateBody, model: string): Promise<string> 
   // Never include the request ID or access token in the content fingerprint.
   const input = JSON.stringify([
     'translation-v1', model, body.text, body.sourceLanguage, body.targetLanguage,
-    body.accountId, body.conversationId, body.context
+    body.accountId, body.conversationId, body.context, ...(body.quality ? [body.quality] : [])
   ])
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
   return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 async function translate(request: Request, env: Env, user: User): Promise<Response> {
-  const body = normalizeBody(await request.json().catch(() => null))
+  const body = normalizeBody(await boundedJson(request))
   // Old 0.4.3 clients sent different header/body IDs. Keep the body authoritative.
   const requestId = body.requestId || request.headers.get('x-request-id') || ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
   const claimToken = crypto.randomUUID()
   const config = providerConfig(env)
   const model = config.model
-  const claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
+  const bounds = providerTokenBounds(body.text, translationInstructions(body.sourceLanguage, body.targetLanguage, body.context, body.quality))
+  let claim: Claim
+  try { claim = await adminPost<Claim>(env, '/rest/v1/rpc/begin_translation', {
     p_user_id: user.id,
     p_request_id: requestId,
     p_payload_hash: await requestHash(body, model),
     p_characters: unicodeLength(body.text),
     p_claim_token: claimToken,
     p_metadata: {
+      metering_version: '1', requested_model: model,
+      security_input_token_bound: bounds.input, security_output_token_bound: bounds.output,
       provider: config.provider, account_id: body.accountId || null, conversation_id: body.conversationId || null,
       source_language: body.sourceLanguage, target_language: body.targetLanguage
     }
-  })
+  }) } catch (error) {
+    if (error instanceof Error && ['rate_limited','cost_limit','security_paused'].includes(error.message)) {
+      await adminPost(env, '/rest/v1/rpc/record_security_event', { p_actor: user.id, p_code: error.message }).catch(() => undefined)
+    }
+    throw error
+  }
   if (claim.state !== 'claimed') return claimResponse(claim)
 
   let translated: Awaited<ReturnType<typeof providerTranslate>>
+  const receipt=providerReceipt(model)
   try {
-    translated = await providerTranslate(env, body, body.text)
+    translated = await providerTranslate(env, body, body.text, receipt)
   } catch (error: any) {
     const failureCode = error instanceof ProviderFailure ? error.code
       : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'
@@ -249,9 +283,9 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
     // A provider timeout is ambiguous. Store a terminal outcome for this ID,
     // release its reservation, and never automatically call the provider again.
     try {
-      const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation', {
+      const failed = await adminPost<Claim>(env, '/rest/v1/rpc/fail_translation_metered', {
         p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
-        p_error_code: failureCode
+        p_error_code: failureCode, p_receipt: receipt
       })
       return claimResponse(failed)
     } catch {
@@ -263,10 +297,10 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
   // wallet and writes usage in ONE transaction, guarded by the claim token.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const completed = await adminPost<Claim>(env, '/rest/v1/rpc/complete_translation', {
+      const completed = await adminPost<Claim>(env, '/rest/v1/rpc/complete_translation_metered', {
         p_user_id: user.id, p_request_id: requestId, p_claim_token: claimToken,
         p_translation: translated.translation, p_model: translated.model,
-        p_latency_ms: translated.latencyMs
+        p_latency_ms: translated.latencyMs, p_receipt: receipt
       })
       return claimResponse(completed)
     } catch (error) {
@@ -280,25 +314,44 @@ async function translate(request: Request, env: Env, user: User): Promise<Respon
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
-  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-deepseek-v1', model: providerConfig(env).model })
-  if (request.method === 'GET' && url.pathname === '/health/translation') {
-    return json({ service: 'realtime-translator-api', release: 'hellodog-deepseek-v1', provider: await checkProviderReadiness(env) })
+  if (request.method !== 'OPTIONS' && !(request.method === 'GET' && url.pathname === '/health')) {
+    if (!env.API_RATE_LIMITER || !(await env.API_RATE_LIMITER.limit({ key: await rateKey(request) })).success) return failure('rate_limited')
   }
+  if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-security-0.5.8', model: providerConfig(env).model, features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-security-0.5.8', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)
   if (!profile || profile.status !== 'active') return failure('account_disabled')
+  if (!await adminPost<boolean>(env, '/rest/v1/rpc/security_rate_limit', { p_user_id: user.id, p_scope: 'api' })) return failure('rate_limited')
+
+  if (request.method === 'GET' && url.pathname === '/api/notices') return json(await adminPost(env, '/rest/v1/rpc/client_notices', { p_user_id:user.id }))
+  if (request.method === 'POST' && url.pathname === '/api/notices/receipt') {
+    const body=await noticeReceiptBody(request);if(!body)return failure('invalid_request')
+    return json(await adminPost(env,'/rest/v1/rpc/client_notice_receipt',{p_user_id:user.id,p_notice_id:body.id,p_revision:body.revision,p_state:body.state}))
+  }
 
   if (request.method === 'GET' && url.pathname === '/api/me') {
+    await adminPost(env,'/rest/v1/rpc/touch_client_presence',{p_user_id:user.id}).catch(()=>null)
     return json({ user: { id: user.id, email: user.email || null }, profile, wallet: await getWallet(env, user.id) })
   }
   if (request.method === 'GET' && url.pathname === '/api/wallet') {
     return json({ wallet: await getWallet(env, user.id) })
   }
   if (request.method === 'GET' && url.pathname === '/api/usage') {
-    const rows = await adminGet<any[]>(env, `/rest/v1/translation_usage?user_id=eq.${encodeURIComponent(user.id)}&select=request_id,source_characters,provider,model,latency_ms,created_at&order=created_at.desc&limit=50`)
+    const rows = await adminGet<any[]>(env, `/rest/v1/translation_usage?user_id=eq.${encodeURIComponent(user.id)}&select=request_id,source_characters,source_language,target_language,provider,model,latency_ms,created_at&order=created_at.desc&limit=50`)
     return json({ usage: rows })
+  }
+  if (request.method === 'GET' && url.pathname === '/api/translation-status') {
+    const requestId = url.searchParams.get('requestId') || ''
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
+    return json(await adminPost(env, '/rest/v1/rpc/translation_status', { p_user_id: user.id, p_request_id: requestId }))
+  }
+  if (request.method === 'GET' && url.pathname === '/api/account-snapshot') {
+    return json({ user: { id: user.id, email: user.email || null }, profile,
+      ...await adminPost<Record<string, unknown>>(env, '/rest/v1/rpc/account_snapshot', { p_user_id: user.id }) })
   }
   if (request.method === 'POST' && url.pathname === '/api/translate') return translate(request, env, user)
   return json({ error: 'not_found', message: 'API route not found.' }, 404)
@@ -311,10 +364,14 @@ export default {
     } catch (error) {
       if (error instanceof Response) return error
       const code = error instanceof Error ? error.message : 'internal_error'
-      if (['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request'].includes(code)) return failure(code)
+      if (['account_disabled', 'insufficient_characters', 'request_id_conflict', 'invalid_request', 'rate_limited', 'cost_limit', 'security_paused'].includes(code)) return failure(code)
       // Do not log provider responses, bearer tokens, source text or secret values.
       console.error('translation_gateway_error')
       return failure('internal_error')
     }
+  },
+  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    const result = await adminPost(env, '/rest/v1/rpc/security_housekeeping', {})
+    console.info(JSON.stringify({ event: 'security_housekeeping', result }))
   }
 }

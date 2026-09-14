@@ -1,57 +1,49 @@
-name: Windows test installer
+name: Windows local acceptance installer
 on:
-  push:
-    branches: ['fix/quiet-send-review']
-    paths:
-      - '.github/workflows/windows-preview.yml'
-      - 'package.json'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  regression:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm ci --prefix tests --ignore-scripts --no-audit --no-fund
-      - run: npm run typecheck --prefix tests
-      - run: npm test --prefix tests
   installer:
-    needs: regression
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     env:
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: Validate login configuration
+          node-version: '24.17.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.5.2'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir tests install --frozen-lockfile
+      - run: node scripts/release-gate.mjs --local
+      - run: pnpm --dir tests test
+      - run: node scripts/security-scan.mjs
+      - name: Build pinned native resources
+        shell: pwsh
+        run: ./scripts/build-pinned-resources.ps1
+      - name: Build explicitly unsigned prerelease for local acceptance
+        shell: pwsh
+        run: ./scripts/package-hellodog-release.ps1 -Prerelease -LocalUnsigned
+      - name: Record exact installer bytes
         shell: pwsh
         run: |
-          if (-not $env:VITE_SUPABASE_URL -or -not $env:VITE_SUPABASE_PUBLISHABLE_KEY) { throw 'Missing public login configuration' }
-      - run: npm install --no-audit --no-fund
-      - run: npm run typecheck
-      - run: npm run dist:win
-      - name: Record installer checksum and source
-        shell: pwsh
-        run: |
-          $files = Get-ChildItem release -Filter '*.exe'
-          if (-not $files) { throw 'No installer generated' }
-          $files | ForEach-Object { $hash = Get-FileHash $_.FullName -Algorithm SHA256; "$($hash.Hash.ToLower())  $($_.Name)" } | Set-Content release/SHA256SUMS.txt
-          "Source commit: $env:GITHUB_SHA`nTest build: 0.5.2-beta.1`nNo website or production deployment." | Set-Content release/BUILD-INFO.txt
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $output = Join-Path 'release' ('v' + $version)
+          $installer = Get-ChildItem -LiteralPath $output -File -Filter '*.exe'
+          if ($installer.Count -ne 1) { throw 'Exactly one installer is required' }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          @{version=$version;sha256=$hash;bytes=$installer.Length;source=$env:GITHUB_SHA;signed=$false;published=$false} | ConvertTo-Json | Set-Content (Join-Path $output 'LOCAL-BUILD.json')
       - uses: actions/upload-artifact@v4
         with:
-          name: HelloDog-0.5.2-beta.1-Windows
+          name: HelloDog-Windows-local-acceptance
           path: |
-            release/*.exe
-            release/SHA256SUMS.txt
-            release/BUILD-INFO.txt
+            release/v*/*.exe
+            release/v*/LOCAL-BUILD.json
           compression-level: 0
           if-no-files-found: error
           retention-days: 14

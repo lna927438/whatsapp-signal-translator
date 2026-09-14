@@ -1,7 +1,8 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.5.2-beta.1",
+  "version": "0.5.8",
   "private": true,
+  "packageManager": "pnpm@11.5.2",
   "author": "lna927438",
   "description": "HelloDog — a friendly workspace for cross-language chats",
   "main": "./out/main/index.js",
@@ -10,25 +11,35 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "vue-tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
-    "dist:win": "npm run build && electron-builder --win nsis --publish never"
+    "dist:win": "npm run build && node --require ./scripts/windows-build-paths.cjs ./node_modules/electron-builder/cli.js --win nsis --publish never",
+    "security:scan": "node scripts/security-scan.mjs",
+    "security:release-check": "node scripts/release-gate.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "latest",
-    "qrcode": "latest",
-    "vue": "latest"
+    "@supabase/supabase-js": "2.116.0",
+    "qrcode": "1.5.4",
+    "vue": "3.5.42"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/qrcode": "latest",
-    "@vitejs/plugin-vue": "latest",
-    "electron": "latest",
-    "electron-builder": "latest",
-    "electron-vite": "latest",
+    "@types/node": "22.20.2",
+    "@types/qrcode": "1.5.6",
+    "@vitejs/plugin-vue": "6.0.8",
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
     "typescript": "5.9.2",
-    "vite": "latest",
+    "vite": "7.3.6",
     "vue-tsc": "3.3.11"
   },
   "build": {
+    "forceCodeSigning": false,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "appId": "com.local.whatsappsignaltranslator",
     "productName": "HelloDog",
     "directories": {
@@ -37,9 +48,31 @@
     "files": [
       "out/**/*",
       "package.json",
+      "resources/security/**/*",
       "resources/brand/**/*"
     ],
     "extraResources": [
+      {
+        "from": "integrations/signal-desktop/release/hellodog-security-core/win-unpacked",
+        "to": "signal-desktop",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/native",
+        "to": "native",
+        "filter": [
+          "SignalWindowHost.exe"
+        ]
+      },
+      {
+        "from": "integrations/notices",
+        "to": "signal-source-notices",
+        "filter": [
+          "**/*"
+        ]
+      },
       {
         "from": "resources/signal",
         "to": "signal",

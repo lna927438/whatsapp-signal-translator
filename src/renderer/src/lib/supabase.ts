@@ -1,11 +1,11 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { AuthStorage } from './authStorage'
+import { SecureAuthStorage } from './secureAuthStorage'
 
 const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim()
 const supabasePublishableKey = String(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
 
 export const supabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey)
-export const authStorage = new AuthStorage(localStorage, sessionStorage)
+export const authStorage = new SecureAuthStorage(localStorage, sessionStorage, window.desktopAPI)
 export let signingOut = false
 
 export const supabase: SupabaseClient | null = supabaseConfigured
@@ -50,6 +50,6 @@ export async function signOutThisDevice(): Promise<void> {
       ])
     }
   } finally {
-    try { authStorage.clearSession() } finally { globalThis.location.reload() }
+    try { await authStorage.clearSession() } finally { globalThis.location.reload() }
   }
 }

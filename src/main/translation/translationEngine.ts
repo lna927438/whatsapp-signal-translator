@@ -1,4 +1,4 @@
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import type { AppSettings, TranslationMetrics, TranslationRequest } from '../types'
 import { SettingsStore } from '../storage/settingsStore'
 import { ProfileStore } from '../storage/profileStore'
@@ -6,12 +6,17 @@ import { ChargeRegistry } from '../storage/chargeRegistry'
 import { MessageRequests } from './messageRequests'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
-import { CloudflareProvider } from './providers/cloudflare'
+import { CloudflareProvider, TranslationOutcomeError, validateCloudReceipt } from './providers/cloudflare'
+import { TranslationReceipts } from './receipts'
+import { normalizeQuality, qualityKey, protectLiterals } from '../../shared/translationPolicy'
 import { DeepLProvider } from './providers/deepl'
 import { GoogleProvider } from './providers/google'
 import type { TranslationProvider } from './providers/provider'
+import { detectLanguageEvidence } from './languageDetection'
+import { TranslationContentPolicy, type ContentExpiry } from './contentPolicy'
 
 interface QueueJob {
+  interactive: boolean
   run: () => Promise<string>
   resolve: (value: string) => void
   reject: (reason?: unknown) => void
@@ -22,10 +27,27 @@ export class TranslationEngine {
   private readonly profile = new ProfileStore()
   private readonly charges = new ChargeRegistry()
   private readonly messageRequests = new MessageRequests()
+  private readonly receipts = new TranslationReceipts()
+  private readonly content = new TranslationContentPolicy()
+  private contentSweep?: Promise<void>
+  private cleanupContent?: (entry: ContentExpiry) => Promise<void>
+  private protectedContent?: (owner: string) => Promise<Set<string>>
+  private cleanupOlderContent?: (owner: string, cutoff: number) => Promise<void>
+  private retentionScanned = new Map<string, number>()
+  onContentCleanup(cleanup: (entry: ContentExpiry) => Promise<void>, protectedIds: (owner: string) => Promise<Set<string>>, cleanupOlder?: (owner: string, cutoff: number) => Promise<void>) { this.cleanupContent = cleanup; this.protectedContent = protectedIds; this.cleanupOlderContent = cleanupOlder }
+  private async retentionCandidates(owner: string, days: number) {
+    const protectedIds = await this.protectedContent?.(owner) || new Set<string>()
+    const cutoff = Date.now() - days * 86400000
+    return (await this.receipts.list(owner)).filter(item => days && !item.contentExpired && !['queued','pending'].includes(item.state) && item.createdAt < cutoff
+      && ![item.requestId,item.request.messageId].some(id => id && protectedIds.has(id)))
+  }
+  private recovering = false
+  private reconciliations = new Map<string, Promise<void>>()
   private readonly cache = new TranslationCache()
   private readonly inFlight = new Map<string, Promise<string>>()
   private readonly queue: QueueJob[] = []
-  private readonly maxConcurrent = 3
+  private readonly maxConcurrent = 4
+  private activeBackground = 0
   private activeRequests = 0
   private reservedCharacters = 0
   private latencyTotal = 0
@@ -74,11 +96,146 @@ export class TranslationEngine {
 
   cacheInfo() { return this.cache.stats(this.onlineUserId) }
   clearCache() { if (this.activeRequests || this.queue.length) throw new Error('请等待翻译完成后再清理缓存。'); return this.cache.clear(this.onlineUserId) }
+  async history() {
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    await this.sweepContent()
+    const records = await this.receipts.list(owner)
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+    return records
+  }
+
+  async translateIncoming(request: TranslationRequest, manual = false): Promise<string> {
+    const revision = this.sessionRevision
+    const settings = await this.settings.get()
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+    return this.translateWithSettings(request, settings, true, { manual })
+  }
+  async retentionInfo(days?: number) {
+    const owner = this.onlineUserId, current = await this.content.getRetention(owner)
+    const selected = days ?? current
+    if (![0,7,30,90].includes(selected)) throw new Error('无效的本机保留期。')
+    const count = (await this.retentionCandidates(owner, selected)).length
+    if (owner !== this.onlineUserId) throw new Error('登录状态已变化。')
+    return { days: current, affected: count }
+  }
+  async setRetention(days: number) { const owner = this.onlineUserId; await this.contentSweep; await this.content.setRetention(owner, days); this.retentionScanned.delete(owner); await this.sweepContent() }
+  async trackContent(updates: ContentExpiry[]) { await this.content.track(updates); await this.sweepContent() }
+  sweepContent(): Promise<void> {
+    if (this.contentSweep) return this.contentSweep
+    const owner = this.onlineUserId
+    this.contentSweep = (async () => {
+      const days = await this.content.getRetention(owner)
+      if (days && Date.now() - (this.retentionScanned.get(owner) || 0) >= 60000) {
+        const cutoff = Date.now() - days * 86400000
+        const entries = await this.retentionCandidates(owner, days)
+        if (entries.length) await this.content.track(entries.map(item => ({ owner, accountId: item.request.accountId || '', conversationId: item.request.conversationId || '', identity: item.request.messageId || item.requestId, expiresAt: cutoff, reason: 'retention' })))
+        await this.cleanupOlderContent?.(owner, cutoff)
+        this.retentionScanned.set(owner, Date.now())
+      }
+      for (;;) {
+        const due = await this.content.due()
+        if (!due.length) break
+        for (const entry of due) {
+          await this.cache.expire(entry.owner, entry.accountId, entry.identity)
+          await this.messageRequests.expireMessage(entry.owner, entry.accountId, entry.conversationId, entry.identity)
+          await this.receipts.expireMessage(entry.owner, entry.accountId, entry.conversationId, entry.identity,
+            entry.reason === 'retention' ? '本机内容已按保留期清理' : '消息已删除或过期')
+          await this.cleanupContent?.(entry)
+          await this.content.cleaned(entry)
+        }
+      }
+    })().finally(() => { this.contentSweep = undefined })
+    return this.contentSweep
+  }
+  async expireSignalMessage(owner: string, accountId: string, peer: string, identity: string) {
+    await this.trackContent([{ owner, accountId, conversationId: 'signal:' + peer, identity, expiresAt: Date.now(), reason: 'message' }])
+  }
+  async pendingCount() { return (await this.history()).filter(item => ['queued', 'pending'].includes(item.state)).length }
+  async flush() { await this.contentSweep; await Promise.all([this.receipts.flush(), this.cache.flush(), this.messageRequests.flush(), this.content.flush()]) }
+  async correct(requestId: string, text: string) {
+    const owner = this.onlineUserId
+    const receipt = await this.receipts.get(owner, requestId)
+    if (!receipt || receipt.contentExpired || !['charged', 'free', 'cached'].includes(receipt.state) || !text.trim() || text.length > 20000) throw new Error('仅可修正未过期的已完成译文。')
+    await this.cache.set(receipt.provider, receipt.request, text.trim())
+    await this.receipts.update(owner, requestId, { correction: text.trim(), lastAccess: 'correction' })
+    return true
+  }
+  async restoreCorrection(requestId: string) {
+    const owner = this.onlineUserId
+    const receipt = await this.receipts.get(owner, requestId)
+    if (!receipt || receipt.contentExpired || receipt.translated === undefined || !['charged','free','cached'].includes(receipt.state)) throw new Error('原译文已过期或尚未完成。')
+    await this.cache.set(receipt.provider, receipt.request, receipt.translated)
+    await this.receipts.update(owner, requestId, { correction: undefined, lastAccess: 'cache' })
+  }
+  async preserveOutgoingRequest(request: TranslationRequest): Promise<TranslationRequest> {
+    const previous = (await this.history()).find(item => item.requestId.startsWith('send-sd-') && item.request.accountId === request.accountId
+      && item.request.conversationId === request.conversationId && item.request.messageId === request.messageId && item.request.text === request.text)
+    return previous ? { ...previous.request } : request
+  }
+  async preserveIncomingRequest(request: TranslationRequest): Promise<TranslationRequest> {
+    if (!request.messageId) return request
+    const recovered = await this.messageRequests.lookup({ ...request, requestId: undefined, cacheUserId: this.onlineUserId })
+    if (recovered) return recovered
+    const prior=(await this.history()).find(item=>item.request.messageId===request.messageId && item.request.accountId===request.accountId
+      && (item.request.conversationId||'')===(request.conversationId||'') && item.request.text===request.text && item.request.targetLanguage===request.targetLanguage && (item.request.sourceLanguage||'auto')===(request.sourceLanguage||'auto'))
+    return prior ? {...prior.request} : request
+  }
+  async retryOriginal(requestId: string) {
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    const receipt = await this.receipts.get(owner, requestId)
+    if (!receipt || receipt.provider !== 'openai' || receipt.state !== 'pending') throw new Error('此请求不需要重试，请先核对结果。')
+    const result = await this.cloudProvider(revision, owner).status(requestId)
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+    if (result.state !== 'not_found') { await this.reconcilePending(requestId); throw new Error('云端已有此请求，已继续核对。不会重新发起翻译。') }
+    if (receipt.contentExpired || receipt.contextCleared) throw new Error('原请求包含已清理的内容，只能查询原结果，不能再次提交。')
+    await this.content.assertAvailable(receipt.request)
+    await this.receipts.update(owner, requestId, { state: 'queued', error: undefined })
+    return this.translateWithSettings(receipt.request, { ...await this.settings.get(), provider: 'openai' }, true)
+  }
+  async reconcilePending(requestId?: string) {
+    if ((!requestId && this.recovering) || !this.onlineUserId || !this.onlineAccessToken) return
+    if (!requestId) this.recovering = true
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    try {
+      await this.sweepContent()
+      const entries = (await this.receipts.list(owner)).filter(item => item.state === 'pending' && item.provider === 'openai' && (!requestId || item.requestId === requestId)).sort((a,b)=>a.updatedAt-b.updatedAt).slice(0,20)
+      for (const entry of entries) {
+        if (revision !== this.sessionRevision) return
+        const key = owner + ':' + entry.requestId
+        const existing = this.reconciliations.get(key)
+        if (existing) { await existing; continue }
+        const work = (async () => {
+        try {
+          const result = await this.cloudProvider(revision, owner).status(entry.requestId)
+          if (revision !== this.sessionRevision) return
+          if (result.state === 'completed') {
+            const receipt = validateCloudReceipt(result.response, entry.requestId, entry.sourceCharacters)
+            await this.receipts.update(owner, entry.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined })
+            const settled = await this.receipts.get(owner, entry.requestId)
+            if (!settled?.contentExpired) await this.cache.set(entry.provider, entry.request, receipt.translation)
+          } else if (result.state === 'failed') await this.receipts.update(owner, entry.requestId, { state: 'failed', chargedCharacters: 0, error: '云端已确认未扣费。' })
+          else await this.receipts.update(owner, entry.requestId, { error: result.state === 'not_found' ? '云端暂未查到此编号。可主动重试原编号，仍按同一请求处理。' : '云端仍在处理，稍后继续核对。' })
+        } catch (error) { await this.receipts.update(owner, entry.requestId, { error: error instanceof TranslationOutcomeError ? error.message : '暂时无法核对原请求，请恢复连接或重新登录。' }) }
+        })().finally(()=>this.reconciliations.delete(key))
+        this.reconciliations.set(key, work)
+        await work
+      }
+    } finally { if (!requestId) this.recovering = false; if (revision === this.sessionRevision) this.notifyBilling() }
+  }
   async cached(request: TranslationRequest): Promise<string | undefined> {
     const user = this.onlineUserId
-    const value = await this.cache.get('openai', { ...request, cacheUserId: user })
+    const incoming = { ...request, cacheUserId: user }
+    await this.sweepContent()
+    await this.content.assertAvailable(incoming)
+    const scoped = await this.messageRequests.lookup(incoming) || incoming
+    const value = await this.cache.get('openai', scoped)
     if (user !== this.onlineUserId) throw new Error('登录状态已变化。')
-    if (value !== undefined) this.metricsState.cacheHits += 1
+    if (value !== undefined) {
+      this.metricsState.cacheHits += 1
+      const prepared = await this.messageRequests.prepare(scoped)
+      if (prepared.requestId && await this.receipts.get(user, prepared.requestId)) await this.receipts.update(user, prepared.requestId, { lastAccess: 'cache' })
+    }
+    await this.content.assertAvailable(incoming)
     return value
   }
 
@@ -101,6 +258,7 @@ export class TranslationEngine {
       request.conversationId || '',
       request.messageId || '',
       request.requestId || '',
+      qualityKey(request.quality),
       request.text,
       context
     ].join('\u241f')).digest('hex')
@@ -108,7 +266,7 @@ export class TranslationEngine {
 
   private chargeFingerprint(request: TranslationRequest): string {
     return createHash('sha256').update([
-      'translation-charge-v1',
+      'translation-charge-v2', this.onlineUserId, request.accountId || '', request.messageId || request.requestId || '', qualityKey(request.quality),
       request.sourceLanguage || 'auto',
       request.targetLanguage,
       this.normalizeText(request.text)
@@ -119,15 +277,61 @@ export class TranslationEngine {
     return Array.from(text).length
   }
 
-  private async translateWithSettings(request: TranslationRequest, settings: AppSettings, useCache: boolean): Promise<string> {
+  private async translateWithSettings(request: TranslationRequest, settings: AppSettings, useCache: boolean, historyRecovery?: { manual: boolean }): Promise<string> {
     const revision = this.sessionRevision
+    const owner = this.onlineUserId
     const text = request.text.trim()
     if (!text) return request.text
     let normalized: TranslationRequest = {
       ...request,
       text,
       cacheUserId: this.onlineUserId,
+      quality: normalizeQuality(request.quality ?? settings.translationQuality),
       context: (request.context || []).filter((item) => item?.text?.trim()).slice(-4)
+    }
+    await this.sweepContent()
+    await this.content.assertAvailable(normalized)
+    if (useCache) normalized = await this.messageRequests.prepare(normalized)
+    if (!normalized.requestId) normalized.requestId = `manual-${randomUUID()}`
+    if (normalized.requestId.startsWith('send-')) {
+      const previous = await this.receipts.get(owner, normalized.requestId)
+      // Retain the original wire request on retries and upgrades. For new sends,
+      // use evidence from the text; a UI language preference is not detection.
+      const evidence = detectLanguageEvidence(normalized.text)
+      normalized.sourceLanguage = previous?.request.sourceLanguage ?? (evidence.confidence === 'high' ? evidence.language : 'auto')
+    }
+    if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+    const stored = await this.receipts.prepare(owner, settings.provider, normalized)
+    normalized = stored.request
+    await this.content.assertAvailable(normalized)
+    const concurrent = this.inFlight.get(this.requestKey(settings.provider, normalized))
+    if (concurrent) { this.metricsState.dedupHits += 1; return concurrent }
+    if (stored.state === 'pending') {
+      await this.reconcilePending(stored.requestId)
+      const reconciled = await this.receipts.get(owner, stored.requestId)
+      await this.content.assertAvailable(normalized)
+      if (reconciled?.state === 'charged' && reconciled.translated !== undefined) return reconciled.correction ?? reconciled.translated
+      throw new TranslationOutcomeError('原请求结果待确认，请在翻译记录中继续核对。不会自动重发。')
+    }
+    if (stored.state === 'failed') {
+      // Never replace a pending/unknown or settled request. Confirmed uncharged
+      // history failures get at most two automatic recovery attempts, durable
+      // across scrolling and restarts; further attempts require Retry.
+      if (historyRecovery && stored.chargedCharacters === 0 && !stored.contentExpired && !stored.contextCleared) {
+        const next = await this.messageRequests.recoverFailed(normalized, historyRecovery.manual ? Infinity : 2)
+        if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
+        if (next && next.requestId !== normalized.requestId) return this.translateWithSettings(next, settings, true)
+      }
+      throw new TranslationOutcomeError(stored.error || '此请求已失败，请重试此消息。', true)
+    }
+    if (stored.translated !== undefined) {
+      const restored = stored.correction ?? stored.translated
+      // History scrolling is read-only when the same durable translation is already cached.
+      if (useCache && await this.cache.get(settings.provider, normalized) !== restored) await this.cache.set(settings.provider, normalized, restored)
+      if (stored.lastAccess !== 'cache') await this.receipts.update(owner, stored.requestId, { lastAccess: 'cache' })
+      this.metricsState.cacheHits += 1
+      await this.content.assertAvailable(normalized)
+      return restored
     }
 
     this.metricsState.totalRequests += 1
@@ -135,10 +339,12 @@ export class TranslationEngine {
     this.metricsState.lastProvider = settings.provider
     this.metricsState.lastUpdatedAt = Date.now()
 
-    const deterministic = deterministicChatTranslation(normalized)
+    const deterministic = qualityKey(normalized.quality) ? undefined : deterministicChatTranslation(normalized)
     if (deterministic !== undefined) {
       if (useCache) await this.cache.set(settings.provider, normalized, deterministic)
+      await this.receipts.update(owner, normalized.requestId!, { state: 'free', translated: deterministic, chargedCharacters: 0 })
       this.metricsState.lastLatencyMs = 0
+      await this.content.assertAvailable(normalized)
       return deterministic
     }
 
@@ -149,11 +355,12 @@ export class TranslationEngine {
         this.metricsState.cacheHits += 1
         this.metricsState.lastLatencyMs = 0
         this.metricsState.lastUpdatedAt = Date.now()
+        await this.receipts.update(owner, normalized.requestId!, { state: 'cached', translated: cached, chargedCharacters: 0, lastAccess: 'cache' })
+        await this.content.assertAvailable(normalized)
         return cached
       }
     }
 
-    if (useCache) normalized = await this.messageRequests.prepare(normalized)
     if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
     const key = this.requestKey(settings.provider, normalized)
     const existing = this.inFlight.get(key)
@@ -162,13 +369,18 @@ export class TranslationEngine {
       return existing
     }
 
+    const queuedAt = Date.now()
     const promise = this.enqueue(async () => {
       const started = Date.now()
+      await this.receipts.update(owner, normalized.requestId!, { queueWaitMs: started - queuedAt })
       const charge = this.characterCount(text)
       const cloudManaged = settings.provider === 'openai'
       let reserved = false
       try {
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+        await this.content.assertAvailable(normalized)
+        const current = await this.receipts.get(owner, normalized.requestId!)
+        if (current?.contextCleared) throw new TranslationOutcomeError('请求上下文已清理，原任务不会自动重新提交。', true)
         if (useCache) { const cached = await this.cache.get(settings.provider, normalized); if (revision !== this.sessionRevision) throw new Error('登录状态已变化。'); if (cached !== undefined) { this.metricsState.cacheHits += 1; return cached } }
         if (!cloudManaged) {
           await this.profile.ensureAvailable(charge, this.reservedCharacters)
@@ -177,12 +389,17 @@ export class TranslationEngine {
         }
 
         this.metricsState.providerCalls += 1
-        const provider = this.createProvider(settings, revision)
+        const provider = this.createProvider(settings, revision, owner)
         if (cloudManaged) this.notifyBilling()
         let translated: string
-        try { translated = await provider.translate(normalized) }
+        await this.receipts.update(owner, normalized.requestId!, { state: 'pending' })
+        try {
+          if (cloudManaged) translated = await provider.translate(normalized)
+          else { const literals = protectLiterals(normalized.text, normalized.quality); translated = literals.restore(await provider.translate({ ...normalized, text: literals.input })) }
+        }
         finally { if (cloudManaged && revision === this.sessionRevision) this.notifyBilling() }
         const latency = Date.now() - started
+        await this.receipts.update(owner, normalized.requestId!, { providerMs: latency })
         this.recordLatency(latency)
         this.metricsState.lastError = undefined
 
@@ -211,19 +428,23 @@ export class TranslationEngine {
               note: 'API 翻译测试'
             })
           }
+          await this.receipts.update(owner, normalized.requestId!, { state: 'charged', translated, chargedCharacters: charge })
         }
 
+        await this.sweepContent()
+        await this.content.assertAvailable(normalized)
         return translated
       } catch (error: any) {
         const latency = Date.now() - started
         this.recordLatency(latency)
-        this.metricsState.lastError = String(error?.message || error)
+        this.metricsState.lastError = error instanceof TranslationOutcomeError ? error.message : '翻译未完成，请查看任务记录。'
+        if (error instanceof TranslationOutcomeError && error.confirmedFailure) await this.receipts.update(owner, normalized.requestId!, { state: 'failed', chargedCharacters: 0, error: error.message })
         throw error
       } finally {
         if (reserved) this.reservedCharacters = Math.max(0, this.reservedCharacters - charge)
         this.metricsState.lastUpdatedAt = Date.now()
       }
-    })
+    }, normalized.requestId?.startsWith('send-') === true)
 
     this.inFlight.set(key, promise)
     try {
@@ -240,9 +461,9 @@ export class TranslationEngine {
     this.metricsState.averageLatencyMs = Math.round(this.latencyTotal / this.latencySamples)
   }
 
-  private enqueue(run: () => Promise<string>): Promise<string> {
+  private enqueue(run: () => Promise<string>, interactive = false): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      this.queue.push({ run, resolve, reject })
+      this.queue.push({ run, resolve, reject, interactive })
       this.metricsState.queueDepth = this.queue.length
       void this.pump()
     })
@@ -250,7 +471,14 @@ export class TranslationEngine {
 
   private async pump(): Promise<void> {
     while (this.activeRequests < this.maxConcurrent && this.queue.length) {
-      const job = this.queue.shift()!
+      let index = this.queue.findIndex(job => job.interactive)
+      if (index < 0) {
+        // Keep two slots available for typing/sending, even during a history flood.
+        if (this.activeBackground >= 2) break
+        index = 0
+      }
+      const job = this.queue.splice(index, 1)[0]
+      if (!job.interactive) this.activeBackground += 1
       this.activeRequests += 1
       this.metricsState.activeRequests = this.activeRequests
       this.metricsState.queueDepth = this.queue.length
@@ -258,6 +486,7 @@ export class TranslationEngine {
         .then(job.resolve, job.reject)
         .finally(() => {
           this.activeRequests -= 1
+          if (!job.interactive) this.activeBackground -= 1
           this.metricsState.activeRequests = this.activeRequests
           this.metricsState.queueDepth = this.queue.length
           void this.pump()
@@ -265,13 +494,16 @@ export class TranslationEngine {
     }
   }
 
-  private createProvider(settings: AppSettings, revision = this.sessionRevision): TranslationProvider {
+  private cloudProvider(revision: number, owner: string) {
+    return new CloudflareProvider(() => {
+      if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
+      return this.onlineAccessToken
+    }, undefined, async receipt => { await this.receipts.update(owner, receipt.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined }) })
+  }
+  private createProvider(settings: AppSettings, revision = this.sessionRevision, owner = this.onlineUserId): TranslationProvider {
     if (settings.provider === 'openai') {
       if (!this.onlineAccessToken) throw new Error('在线登录令牌缺失，请重新登录。')
-      return new CloudflareProvider(() => {
-        if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
-        return this.onlineAccessToken
-      })
+      return this.cloudProvider(revision, owner)
     }
 
     if (settings.provider === 'deepl') {

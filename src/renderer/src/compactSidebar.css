@@ -1,0 +1,36 @@
+.app-shell.compact-shell .sidebar{display:flex;flex-direction:row;gap:0;padding:0;min-width:0;overflow:visible;position:relative}
+.compact-shell .platform-rail{display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 52px;width:52px;box-sizing:border-box;padding:8px 4px;background:#10161b;min-height:0;overflow-y:auto;scrollbar-width:thin}
+.compact-shell .platform-entry{position:relative;width:40px!important;height:42px!important;padding:5px!important}.compact-shell .platform-entry img{width:30px;height:30px}
+.app-shell.compact-shell .account-navigation .unread-badge{font-size:8px;height:13px;line-height:13px;min-width:8px;padding:0 2px;right:0;top:0;border-width:1px;transform:none;pointer-events:none}
+.app-shell.compact-shell .platform-entry .unread-badge{transform:none;right:-2px;top:0;max-width:26px;min-width:10px;padding:0 3px;height:14px;line-height:14px;border-width:1px}
+.compact-shell .account-switch:has(.unread-badge) .account-number{transform:translate(-3px,3px)}
+.compact-shell .workspace{min-height:0;overflow:hidden}.compact-shell .account-navigation.top{grid-row:auto}
+.compact-shell .utility-rail{display:flex;flex-direction:column;align-items:center;gap:6px;width:44px;flex:0 0 44px;padding:8px 3px;border-right:1px solid var(--border);box-sizing:border-box;background:#10161b}
+.compact-shell .utility-spacer{flex:1;min-height:12px}
+.app-shell.compact-shell .compact-tool{display:grid;place-items:center;flex:0 0 auto;width:36px;height:36px;min-width:0;min-height:0;padding:7px;border:0;border-radius:9px;background:transparent;color:var(--muted);cursor:pointer}
+.app-shell.compact-shell .compact-tool:hover,.app-shell.compact-shell .compact-tool.active{background:var(--accent-soft);color:var(--accent)}
+.app-shell.compact-shell .brand{padding:4px;margin:0 0 4px;height:38px;width:38px}
+.app-shell.compact-shell .brand img{height:30px;width:30px;border-radius:10px}
+.compact-shell .account-icon-rail{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 4px;width:52px;flex:1;min-width:0;box-sizing:border-box;overflow:hidden}
+.app-shell.compact-shell .account-list{display:flex;flex-direction:column;gap:6px;flex:1;align-self:stretch;overflow-y:auto;overflow-x:hidden;min-height:0;padding:2px 0;scrollbar-width:thin}
+.app-shell.compact-shell .account-row{position:relative;display:flex;flex:0 0 auto;width:42px;height:46px;min-height:46px;margin:0;border-radius:12px;border:1px solid transparent;padding:0;box-sizing:border-box}
+.app-shell.compact-shell .account-row.active{background:var(--accent-soft);border-color:var(--accent)}
+.app-shell.compact-shell .account{position:relative;display:grid;place-items:center;width:100%;height:100%;padding:0;gap:0;background:transparent;border:0;cursor:pointer;min-width:0}
+.app-shell.compact-shell .platform-avatar{width:32px;height:32px;border-radius:10px!important}
+.app-shell.compact-shell .platform-avatar img{height:26px;width:26px}
+.app-shell.compact-shell .unread-badge{position:absolute;left:auto;right:-1px;top:-2px;min-width:13px;max-width:32px;height:15px;line-height:15px;box-sizing:content-box;font-size:9px;border:2px solid #13191f;padding:0 3px;border-radius:9px;background:#db655c;color:white}
+.compact-shell .account-pin{position:absolute;bottom:1px;right:1px;width:5px;height:5px;border-radius:50%;background:var(--accent);border:1px solid #13191f}
+.compact-shell .account-rail-actions{display:flex;flex-direction:column;gap:5px;padding-top:7px;border-top:1px solid var(--border)}
+.compact-finder-backdrop{position:fixed;inset:0;display:flex;align-items:flex-start;justify-content:flex-start;padding:65px 0 24px 108px;background:#0007;z-index:50;box-sizing:border-box}
+.compact-finder{display:flex;flex-direction:column;gap:14px;width:min(430px,calc(100vw - 130px));max-height:100%;min-height:0;padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface);box-shadow:0 20px 70px #0008}
+.compact-finder header{display:flex;justify-content:space-between;align-items:center}.compact-finder header b{font-size:15px}
+.compact-finder .account-search{display:flex;gap:10px;padding:0 12px;flex-shrink:0}.compact-finder .account-search input{min-width:0;width:100%;border:0;background:transparent;outline:0}
+.compact-finder .account-filters{display:grid;grid-template-columns:1fr 1fr;gap:8px}.compact-finder select{min-width:0;border:1px solid var(--border);border-radius:7px;background:var(--field);color:var(--text);padding:8px;font-size:12px}
+.finder-accounts{display:flex;flex-direction:column;gap:4px;min-height:0;overflow:auto}.finder-accounts button{display:flex;align-items:center;gap:12px;text-align:left;border:0;border-radius:8px;background:transparent;color:var(--text);padding:10px;cursor:pointer}.finder-accounts button:hover{background:var(--raised)}.finder-accounts img{width:28px;height:28px}.finder-accounts small{display:block;font-size:11px;color:var(--muted);margin-top:5px}.finder-accounts p{font-size:12px;color:var(--muted)}
+.compact-finder footer{display:flex;gap:8px;border-top:1px solid var(--border);padding-top:13px}.compact-finder footer button{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;border:1px solid var(--border);background:var(--raised);color:var(--text);padding:9px 8px;border-radius:8px;cursor:pointer;font-size:12px}.compact-finder footer img{height:20px;width:20px}
+
+.app-shell.compact-shell .workspace-header.compact-workspace-header{min-height:42px;height:42px;padding:4px 9px;box-sizing:border-box;gap:10px}
+.compact-workspace-header h1{margin:0;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-shell.compact-shell .workspace-status{min-height:20px;height:20px;padding:0 9px;gap:8px;box-sizing:border-box;overflow:hidden;font-size:10px}
+.app-shell.compact-shell .account-navigation .tab-app-icon .unread-badge{right:-4px;top:-3px;border-width:1px;font-size:8px;height:12px;line-height:12px}
+.app-shell.compact-shell .account-navigation .account-add{height:28px;width:28px;padding:5px}

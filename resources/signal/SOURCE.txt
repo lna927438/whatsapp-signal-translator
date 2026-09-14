@@ -1,0 +1,5 @@
+signal-cli 0.14.7, GPL-3.0
+Source: https://github.com/AsamK/signal-cli/tree/v0.14.7
+Source archive: https://github.com/AsamK/signal-cli/archive/refs/tags/v0.14.7.tar.gz
+Java: Eclipse Temurin 25.0.4.1+1; notices and license files included in jre/legal.
+No Signal account keys or chat data are included.

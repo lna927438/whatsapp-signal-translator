@@ -1,0 +1,32 @@
+<script setup lang="ts">
+const releases = [
+  { version: '0.5.8', date: '2026-09-14', title: '安全与稳定性提升', points: [
+    '提升安全防护与运行稳定性。',
+    '修复 Signal 部分消息翻译、图片复制和保存问题，优化相册查看体验。'
+  ] },
+  { version: '0.5.7', date: '2026-09-13', title: '消息中心、版本提醒与聊天布局', points: [
+    '新增右下角版本提醒、管理员消息弹窗和消息中心。提醒不取得输入焦点，关闭后仍可在消息中心查看有效通知。',
+    '管理员可向全部用户或指定 HelloDog 登录邮箱发送通知，设置有效期并查看实际弹出和确认回执。',
+    '修复 WhatsApp 已归档页面遮挡聊天内容和聊天区域多余竖线的问题。'
+  ] },
+  { version: '0.5.6', date: '', title: '图片操作与译文显示', points: [
+    '补齐 WhatsApp 图片复制、图片另存为、链接复制和媒体保存等右键操作。',
+    '修正部分聊天列表宽度错位，补充图片说明等文字内容的提取方式。',
+    '修复联系人被误判为群聊，以及部分英文原文重复显示为中文译文的问题。'
+  ] },
+  { version: '0.5.5', date: '', title: '历史消息、回复与 Windows 图标', points: [
+    '改进历史消息、引用回复正文和带表情文字的翻译识别；为历史消息失败提供单条重试和恢复处理。',
+    '纯表情不调用付费翻译，已完成的消息译文继续复用原有记录。',
+    'HelloDog 管理的 Signal 组件统一使用 HelloDog 的系统图标与通知入口。独立安装的其他软件保留自己的图标。'
+  ] }
+]
+</script>
+<template>
+  <main class="knowledge-page updates-page">
+    <header class="knowledge-heading"><span class="eyebrow">HELLODOG · RELEASE NOTES</span><h1>HelloDog 翻译器<span class="knowledge-title-detail">更新记录</span></h1><p>已发布版本的主要改动与升级说明。当前可下载版本、文件大小和校验码以官方下载页为准。</p><div class="hero-actions"><RouterLink class="primary-button" to="/download">查看官方下载 <span>↓</span></RouterLink><RouterLink class="text-link" to="/guide">查看使用指南 →</RouterLink></div></header>
+    <section class="release-timeline" aria-label="已发布版本">
+      <article v-for="release in releases" :key="release.version" class="release-entry"><div class="release-label"><b>v{{ release.version }}</b><time v-if="release.date" :datetime="release.date">{{ release.date }}</time><span>Windows 桌面版</span></div><div><h2>{{ release.title }}</h2><ul><li v-for="point in release.points" :key="point">{{ point }}</li></ul></div></article>
+    </section>
+    <section class="upgrade-note"><h2>安装更新前</h2><p>先退出正在运行的 HelloDog，再运行官网安装程序。正式版沿用已有数据目录，保留账号资料与本地草稿。独立测试窗口的数据不会自动合并到正式版。</p><p>更新记录描述的是相应版本的改进，翻译结果仍需结合上下文判断。平台页面变化或网络异常可能影响使用，可以参照 <RouterLink to="/guide#troubleshooting">问题排查说明</RouterLink>处理。</p><p>对应版本的源代码与开源许可可从 <RouterLink to="/download">下载页</RouterLink>获取。HelloDog 并非 WhatsApp 或 Signal 的官方产品。</p></section>
+  </main>
+</template>

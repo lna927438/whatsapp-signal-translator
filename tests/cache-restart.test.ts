@@ -39,12 +39,12 @@ test('twenty engine calls use one provider call and reopening serves persistent 
   try {
     const {TranslationEngine}=h.load('src/main/translation/translationEngine.ts')
     let calls=0, billingEvents=0; const ids:string[]=[]
-    const create=()=>{const e=new TranslationEngine();e.onBillingChanged(()=>{billingEvents++});e.setOnlineSession('user-a','synthetic-token');e.settings.get=async()=>({provider:'openai'});e.createProvider=()=>({translate:async(r:any)=>{calls++;ids.push(r.requestId);await new Promise(resolve=>setTimeout(resolve,5));return '项目进展如何？'}});return e}
+    const create=()=>{const e=new TranslationEngine();e.onBillingChanged(()=>{billingEvents++});e.setOnlineSession('user-a','synthetic-token');e.settings.get=async()=>({provider:'openai'});e.createProvider=()=>({translate:async(r:any)=>{calls++;ids.push(r.requestId);await new Promise(resolve=>setTimeout(resolve,5));await e.receipts.update('user-a',r.requestId,{state:'charged',translated:'项目进展如何？',chargedCharacters:Array.from(r.text).length,balanceAfter:900});return '项目进展如何？'}});return e}
     const engine=create()
     await Promise.all(Array.from({length:20},()=>engine.translate({...request})))
     assert.equal(calls,1);assert.equal(billingEvents,2)
     const reopened=create();assert.equal(await reopened.translate({...request,conversationId:'wa:renamed',context:[]}), '项目进展如何？');assert.equal(calls,1);assert.equal(billingEvents,2)
     await reopened.clearCache();await reopened.translate({...request,conversationId:'wa:renamed',context:[]})
-    assert.equal(ids[0],ids[1]) // Upstream replay uses its original immutable payload, so the server can deduplicate it.
+    assert.equal(calls,1);assert.equal((await reopened.history())[0].state,'charged');assert.equal((await reopened.history())[0].lastAccess,'cache')
   } finally {rmSync(h.directory,{recursive:true,force:true})}
 })

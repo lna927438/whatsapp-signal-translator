@@ -1,9 +1,14 @@
 import { configureProxySession, normalizeProxy, proxyAuthMatches } from '../../network/accountProxy'
+import { installWebSecurity } from '../../webSecurity'
 import { app, net, session, Menu, BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { whatsappInjectionScript } from './inject/script'
-import { SendNotStartedError, type SendTask } from '../../translation/sendTasks'
+import { SendNotStartedError, SendPendingError, type SendTask } from '../../translation/sendTasks'
 import { clampViewBounds, type ViewBounds } from './viewBounds'
+import { markSwitch, setAccountState } from '../../runtimeHealth'
+import { boundedOperation } from '../../boundedOperation'
+import { whatsAppContextMenu } from './contextMenu'
 
 function chromeUserAgent(): string {
   const chromeVersion = process.versions.chrome || '140.0.0.0'
@@ -89,6 +94,8 @@ export class WhatsAppAdapter {
   }
 
   async focus(accountId: string): Promise<void> {
+    if (this.preferences.get(accountId)?.runtimeMode === 'paused') throw new Error('此账号已暂停，请先恢复收消息。')
+    const started = performance.now()
     if (!this.mainWindow) throw new Error('Main window is not attached')
     this.hideAll()
     const revision = this.focusRevision
@@ -117,6 +124,7 @@ export class WhatsAppAdapter {
     this.activeId = accountId
     view.setVisible(!this.overlayOpen)
     this.layout()
+    markSwitch(performance.now() - started)
   }
 
   hideAll(): void {
@@ -152,6 +160,43 @@ export class WhatsAppAdapter {
       if (!view.webContents.isDestroyed()) void view.webContents.executeJavaScript('window.__RT_RESUME_TRANSLATIONS__?.()').catch(() => {})
     }
   }
+  refreshTranslations(): void {
+    for (const view of this.views.values()) if (!view.webContents.isDestroyed()) void view.webContents.executeJavaScript('window.__RT_REFRESH_TRANSLATIONS__?.()').catch(() => undefined)
+  }
+
+  async prepareRestart(): Promise<void> {
+    for (const view of this.views.values()) {
+      const contents = view.webContents
+      if (contents.isDestroyed()) continue
+      const result = await contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()')
+      if (result?.editing) throw new Error('正在写入消息，请稍后重启。')
+      if (result?.media || result?.capturing) throw new Error('请先结束通话、录音或处理附件预览，再重启。')
+      // WebRTC and recording are owned by the platform; never interrupt them.
+      if (contents.isCurrentlyAudible()) throw new Error('聊天窗口正在使用音频，请先结束通话、录音或播放，再重启。')
+      await contents.session.flushStorageData()
+    }
+  }
+  private reloads = new Map<string, Promise<void>>()
+  reload(accountId: string): Promise<void> {
+    const existing = this.reloads.get(accountId)
+    if (existing) return existing
+    const work = boundedOperation((async () => {
+      const contents = this.contents(accountId)
+      if (!contents) { await this.focus(accountId); return }
+      const state = await contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()')
+      if (state?.busy || contents.isCurrentlyAudible()) { this.resumeTranslations(); return }
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => { cleanup(); resolve() }
+        const fail = () => { cleanup(); reject(new Error('页面刷新未完成，账号与草稿已保留。')) }
+        const cleanup = () => { contents.removeListener('did-finish-load', finish); contents.removeListener('did-fail-load', fail); clearTimeout(timer) }
+        const timer = setTimeout(fail, 18000)
+        contents.once('did-finish-load', finish); contents.once('did-fail-load', fail)
+        contents.reload()
+      })
+    })(), 20000, '页面刷新超时，账号和草稿已保留。').finally(() => this.reloads.delete(accountId))
+    this.reloads.set(accountId, work)
+    return work
+  }
 
   async submitTask(task: SendTask, authorized: () => boolean): Promise<{ queued: true }> {
     const view = this.views.get(task.accountId)
@@ -166,7 +211,7 @@ export class WhatsAppAdapter {
       // during native insertion; the final guard and button click share one JS turn.
       const selected = await view.webContents.executeJavaScript(`window.__RT_SEND_SELECT__?.(${args})`, true)
       if (!selected || !canSend()) throw new SendNotStartedError('对话或草稿已变化，译文已保存，请回原对话重试。')
-      await view.webContents.insertText(task.translated!)
+      if(!await this.editComposer(task.accountId,{token:randomUUID(),text:task.translated!,expected:selected.text,targetKey:task.targetKey,conversationId:task.conversationId})) throw new SendNotStartedError('输入框尚未准备好，译文已保留。')
       if (!canSend()) throw new SendNotStartedError('发送窗口已切换，译文已保存。')
       // If the renderer disappears during this call we cannot prove whether it
       // clicked Send. Persist uncertainty, never retry Enter/button automatically.
@@ -176,8 +221,8 @@ export class WhatsAppAdapter {
         dispatched = false
         throw new SendNotStartedError(result.message || '发送目标已变化，已阻止发送。')
       }
-      if (!result?.confirmed) throw new Error('未收到 WhatsApp 对话中的发送确认。')
-      return { queued: true }
+      if (!result?.confirmed) throw new SendPendingError(result)
+      return { queued: true, ...result }
     } catch (error: any) {
       if (!dispatched) throw new SendNotStartedError(String(error?.message || error))
       throw error
@@ -188,7 +233,48 @@ export class WhatsAppAdapter {
     }
   }
 
+  async editComposer(accountId: string, value: any): Promise<boolean> {
+    const contents=this.contents(accountId)
+    if(!contents||this.activeId!==accountId||this.overlayOpen||!this.mainWindow?.isFocused())return false
+    if(!value||typeof value.text!=='string'||value.text.length>10000||typeof value.expected!=='string'||value.expected.length>10000||! /^[\w-]{1,100}$/.test(value.token||'')||typeof value.targetKey!=='string'||typeof value.conversationId!=='string')return false
+    const token=JSON.stringify(value.token)
+    try {
+      const atomic = await contents.executeJavaScript(`window.__RT_EDIT_ATOMIC__?.(${JSON.stringify(value)})`, true)
+      if (typeof atomic === 'boolean') return atomic
+      if(!await contents.executeJavaScript(`window.__RT_EDIT_SELECT__?.(${JSON.stringify(value)})`,true))return false
+      contents.focus()
+      // Collapse any previous selection first. Repeating Ctrl+A on an already
+      // selected editor can select the entire page in Chromium.
+      contents.sendInputEvent({type:'keyDown',keyCode:'End',modifiers:['control']})
+      contents.sendInputEvent({type:'keyUp',keyCode:'End',modifiers:['control']})
+      contents.sendInputEvent({type:'keyDown',keyCode:'A',modifiers:['control']})
+      contents.sendInputEvent({type:'keyUp',keyCode:'A',modifiers:['control']})
+      contents.sendInputEvent({type:'keyUp',keyCode:'Control'})
+      if(!await contents.executeJavaScript(`window.__RT_EDIT_CHECK__?.(${token})`,true))return false
+      if(this.activeId!==accountId||this.overlayOpen||!this.mainWindow?.isFocused())return false
+      if(value.text) await contents.executeJavaScript(`window.__RT_EDIT_WRITE__?.(${token})`,true)
+      else {contents.sendInputEvent({type:'keyDown',keyCode:'Backspace'});contents.sendInputEvent({type:'keyUp',keyCode:'Backspace'})}
+      return Boolean(await contents.executeJavaScript(`window.__RT_EDIT_CHECK__?.(${token},true)`,true))
+    } finally {if(!contents.isDestroyed()) await contents.executeJavaScript(`window.__RT_EDIT_RELEASE__?.(${token})`).catch(()=>{})}
+  }
+
+  async reconcileTask(task: SendTask): Promise<unknown | null> {
+    const contents = this.views.get(task.accountId)?.webContents
+    const evidence = task.result as any
+    if (!contents || contents.isDestroyed() || !Array.isArray(evidence?.baseline) || !evidence?.targetKey) return null
+    return contents.executeJavaScript(`window.__RT_SEND_PROBE__?.(${JSON.stringify({ translated: task.translated, baseline: evidence.baseline, targetKey: evidence.targetKey })})`).catch(() => null)
+  }
+
+  async retryTask(task: SendTask): Promise<boolean> {
+    // The records dialog closes first; let its overlay update reach the host.
+    for(let n=0;n<30 && this.overlayOpen;n++) await new Promise(resolve=>setTimeout(resolve,20))
+    const contents=this.contents(task.accountId)
+    if(this.activeId!==task.accountId||this.overlayOpen||!contents)return false
+    return Boolean(await contents.executeJavaScript(`window.__RT_RETRY_QUEUED_SEND__?.(${JSON.stringify(task.id)})`,true))
+  }
+
   remove(accountId: string): void {
+    setAccountState(accountId, 'closed')
     const view = this.views.get(accountId)
     if (view && !view.webContents.isDestroyed()) {
       this.mainWindow?.contentView.removeChildView(view)
@@ -208,11 +294,21 @@ export class WhatsAppAdapter {
         contextIsolation: true,
         nodeIntegration: false,
         backgroundThrottling: false,
-        sandbox: false
+        sandbox: true
       }
     })
 
     const userAgent = chromeUserAgent()
+    setAccountState(accountId, 'loading')
+    view.webContents.on('did-fail-load', (_event, _code, _description, _url, isMain) => { if (isMain) setAccountState(accountId, 'disconnected') })
+    view.webContents.on('render-process-gone', () => setAccountState(accountId, 'disconnected'))
+    view.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && (input.key === 'F5' || input.control && input.key.toLowerCase() === 'r')) {
+        event.preventDefault(); void this.reload(accountId).catch(() => this.mainWindow?.webContents.send('translator:error', '刷新未完成，草稿已保留。')); return
+      }
+      // Editing/search shortcuts belong to WhatsApp while its view has focus.
+      // Host shortcuts are handled by the host renderer instead.
+    })
     view.webContents.setUserAgent(userAgent)
     view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
 
@@ -229,21 +325,18 @@ export class WhatsAppAdapter {
       }
     )
 
-    view.webContents.setWindowOpenHandler(({ url }) => {
-      void import('electron').then(({ shell }) => shell.openExternal(url))
-      return { action: 'deny' }
-    })
+    installWebSecurity(view.webContents, 'whatsapp')
     view.webContents.on('did-finish-load', async () => {
       try {
         await view.webContents.executeJavaScript(whatsappInjectionScript, true)
         await this.applyPreferences(accountId, this.preferences.get(accountId) || {})
       } catch (error) {
-        console.error('WhatsApp injection failed', error)
+        console.error('WhatsApp injection failed')
       }
     })
     view.webContents.on('context-menu', (_event, params) => {
-      if (params.isEditable) Menu.buildFromTemplate([{ role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { type: 'separator' }, { role: 'selectAll', label: '全选' }]).popup({ window: this.mainWindow })
-      else if (params.selectionText) Menu.buildFromTemplate([{ role: 'copy', label: '复制所选文字' }]).popup({ window: this.mainWindow })
+      const items = whatsAppContextMenu(view.webContents, params, () => this.mainWindow?.webContents.send('translator:error', '此操作未完成，请重试。'))
+      if (items.length) Menu.buildFromTemplate(items).popup({ window: this.mainWindow })
     })
     return view
   }

@@ -2,8 +2,6 @@ name: Publish Windows Release to R2
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['release/windows-v*']
 
 concurrency:
   group: windows-r2-release
@@ -14,31 +12,37 @@ permissions:
 
 jobs:
   publish:
+    environment: production
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     env:
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      AWS_DEFAULT_REGION: auto
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Enforce production hold and signing requirements
+        run: node scripts/release-gate.mjs
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: package.json
+          node-version: '24.17.0'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.5.2'
 
       - name: Install AWS CLI
         shell: powershell
         run: python -m pip install --disable-pip-version-check awscli
 
       - name: Validate R2 credentials before building
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         shell: powershell
         run: |
           $required = @('R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_ENDPOINT','R2_BUCKET')
@@ -73,10 +77,11 @@ jobs:
 
           "R2_ENDPOINT_NORMALIZED=$endpoint" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "R2_BUCKET_NORMALIZED=$bucket" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Check release version before building
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -101,15 +106,38 @@ jobs:
           }
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: pnpm install --frozen-lockfile
+
+      - name: Regression and secret checks
+        shell: pwsh
+        run: |
+          pnpm --dir tests install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Locked test dependencies failed' }
+          pnpm --dir tests test
+          if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed' }
+          node scripts/security-scan.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Secret scan failed' }
 
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Build and verify pinned native resources
+        shell: pwsh
+        run: ./scripts/build-pinned-resources.ps1
+
       - name: Build Windows installer
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: npm run dist:win
 
       - name: Publish installer and metadata to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          HELLODOG_RELEASE_KEY_B64: ${{ secrets.HELLODOG_RELEASE_KEY_B64 }}
+          HELLODOG_SIGNING_PASSPHRASE: ${{ secrets.HELLODOG_SIGNING_PASSPHRASE }}
+          HELLODOG_RELEASE_KEY_ID: ${{ vars.HELLODOG_RELEASE_KEY_ID }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -140,6 +168,20 @@ jobs:
           $versionKey = "windows/v$version/HelloDog-Setup-v$version.exe"
           $latestKey = 'windows/latest/WhatsApp-Signal-Translator-Setup.exe'
 
+          # Sign and validate the already built bytes before any upload. There is no unsigned fallback.
+          $inputPath = Join-Path $env:RUNNER_TEMP 'unsigned-manifest.json'
+          $keyPath = Join-Path $env:RUNNER_TEMP 'hellodog-release-key.pem'
+          $manifest = @{version=$version;versionKey=$versionKey;sha256=$sha256;size=$size;channel='stable';notes='安全与稳定性更新';sourceCommit=$env:GITHUB_SHA} | ConvertTo-Json
+          [IO.File]::WriteAllText($inputPath,$manifest,[Text.UTF8Encoding]::new($false))
+          try {
+            if (-not $env:HELLODOG_RELEASE_KEY_B64 -or -not $env:HELLODOG_RELEASE_KEY_ID) { throw 'Release signing identity is missing' }
+            [IO.File]::WriteAllBytes($keyPath,[Convert]::FromBase64String($env:HELLODOG_RELEASE_KEY_B64))
+            node scripts/sign-update.mjs --manifest $inputPath --installer $installer.FullName --key $keyPath --key-id $env:HELLODOG_RELEASE_KEY_ID --out version.json
+            if ($LASTEXITCODE -ne 0) { throw 'Manifest signing failed' }
+            node scripts/verify-release-artifact.mjs --manifest version.json --installer $installer.FullName --source-commit $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { throw 'Signed release verification failed' }
+          } finally { Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue }
+
           $objects = aws s3api list-objects-v2 --bucket $bucket --prefix $versionKey --endpoint-url $endpoint --region auto --output json | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the immutable installer key.' }
           if ($objects.Contents | Where-Object { $_.Key -eq $versionKey }) {
@@ -153,17 +195,6 @@ jobs:
           }
           Invoke-AwsUpload $installer.FullName "s3://$bucket/$latestKey" 'application/vnd.microsoft.portable-executable' 'no-cache'
 
-          $metadata = [ordered]@{
-            version = $version
-            platform = 'windows'
-            versionKey = $versionKey
-            latestKey = $latestKey
-            sha256 = $sha256
-            size = $size
-            sourceCommit = $env:GITHUB_SHA
-            releasedAt = (Get-Date).ToUniversalTime().ToString('o')
-          } | ConvertTo-Json -Depth 4
-
           Get-ChildItem -Path release -Recurse -File |
             Where-Object { $_.Extension -in '.yml', '.blockmap' } |
             ForEach-Object {
@@ -172,7 +203,6 @@ jobs:
               Invoke-AwsUpload $_.FullName "s3://$bucket/$key" $contentType 'no-cache'
             }
 
-          [System.IO.File]::WriteAllText((Join-Path $PWD 'version.json'), $metadata, [System.Text.UTF8Encoding]::new($false))
           Invoke-AwsUpload 'version.json' "s3://$bucket/metadata/version.json" 'application/json; charset=utf-8' 'no-cache'
 
           Write-Host "Published v$version to R2 bucket $bucket"

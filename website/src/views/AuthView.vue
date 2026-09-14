@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {authCaptcha} from '../lib/authChallenge'
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { requireSupabase, supabaseConfigured } from '../lib/supabase'
@@ -48,9 +49,9 @@ async function login() {
     if (!supabaseConfigured) throw new Error('网站尚未配置 Supabase 环境变量。')
     const clean = cleanEmail()
     validateEmail(clean)
-    if (password.value.length < 8) throw new Error('请输入正确的密码。')
+    if (password.value.length < 12) throw new Error('请输入正确的密码。')
     const client = requireSupabase()
-    const { error: authError } = await client.auth.signInWithPassword({ email: clean, password: password.value })
+    const { error: authError } = await client.auth.signInWithPassword({ email: clean, password: password.value, options: { captchaToken: await authCaptcha() } })
     if (authError) throw authError
     await router.push('/account')
   } catch (e: any) {
@@ -69,14 +70,14 @@ async function register() {
     const cleanUsername = username.value.trim()
     validateEmail(clean)
     if (cleanUsername.length < 3) throw new Error('用户名至少 3 个字符。')
-    if (password.value.length < 8) throw new Error('密码至少 8 个字符。')
+    if (password.value.length < 12) throw new Error('密码至少 12 个字符。')
     if (password.value !== confirmPassword.value) throw new Error('两次输入的密码不一致。')
 
     const client = requireSupabase()
     const { data, error: authError } = await client.auth.signUp({
       email: clean,
       password: password.value,
-      options: { data: { username: cleanUsername, display_name: cleanUsername } }
+      options: { captchaToken: await authCaptcha(), data: { username: cleanUsername, display_name: cleanUsername } }
     })
     if (authError) throw authError
 
@@ -123,7 +124,7 @@ async function resendSignup() {
     const clean = cleanEmail(pendingEmail.value)
     validateEmail(clean)
     const client = requireSupabase()
-    const { error: resendError } = await client.auth.resend({ type: 'signup', email: clean })
+    const { error: resendError } = await client.auth.resend({ type: 'signup', email: clean, options: { captchaToken: await authCaptcha() } })
     if (resendError) throw resendError
     message.value = '新的注册验证码已经发送，请查看邮箱。'
   } catch (e: any) {
@@ -146,7 +147,7 @@ async function requestRecovery() {
     const clean = cleanEmail(pendingEmail.value || email.value)
     validateEmail(clean)
     const client = requireSupabase()
-    const { error: resetError } = await client.auth.resetPasswordForEmail(clean)
+    const { error: resetError } = await client.auth.resetPasswordForEmail(clean, { captchaToken: await authCaptcha() })
     if (resetError) throw resetError
     pendingEmail.value = clean
     otp.value = ''
@@ -201,7 +202,7 @@ async function resendRecovery() {
     const clean = cleanEmail(pendingEmail.value)
     validateEmail(clean)
     const client = requireSupabase()
-    const { error: resetError } = await client.auth.resetPasswordForEmail(clean)
+    const { error: resetError } = await client.auth.resetPasswordForEmail(clean, { captchaToken: await authCaptcha() })
     if (resetError) throw resetError
     message.value = '新的账号安全验证码已经发送。'
   } catch (e: any) {
@@ -215,7 +216,7 @@ async function updatePassword() {
   busy.value = true
   clearStatus()
   try {
-    if (newPassword.value.length < 8) throw new Error('新密码至少 8 个字符。')
+    if (newPassword.value.length < 12) throw new Error('新密码至少 12 个字符。')
     if (newPassword.value !== confirmNewPassword.value) throw new Error('两次输入的新密码不一致。')
     const client = requireSupabase()
     const { error: updateError } = await client.auth.updateUser({ password: newPassword.value })
@@ -264,7 +265,7 @@ function backToLoginWithRecoveredUsername() {
 
         <div v-if="mode === 'login'" class="form-stack">
           <label>绑定邮箱<input v-model="email" type="email" placeholder="name@example.com" autocomplete="email" /></label>
-          <label>密码<input v-model="password" type="password" placeholder="至少 8 个字符" autocomplete="current-password" @keydown.enter="login" /></label>
+          <label>密码<input v-model="password" type="password" placeholder="至少 12 个字符" autocomplete="current-password" @keydown.enter="login" /></label>
           <button class="primary-button full" :disabled="busy" @click="login">{{ busy ? '登录中…' : '登录账号' }}</button>
           <div class="auth-link-row">
             <button type="button" @click="startRecovery('password')">忘记密码？</button>
@@ -275,7 +276,7 @@ function backToLoginWithRecoveredUsername() {
         <div v-else class="form-stack">
           <label>用户名<input v-model="username" placeholder="至少 3 个字符" autocomplete="username" /></label>
           <label>邮箱<input v-model="email" type="email" placeholder="用于验证码和账号找回" autocomplete="email" /></label>
-          <label>密码<input v-model="password" type="password" placeholder="至少 8 个字符" autocomplete="new-password" /></label>
+          <label>密码<input v-model="password" type="password" placeholder="至少 12 个字符" autocomplete="new-password" /></label>
           <label>确认密码<input v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" @keydown.enter="register" /></label>
           <button class="primary-button full" :disabled="busy" @click="register">{{ busy ? '处理中…' : '注册并发送邮箱验证码' }}</button>
           <p class="auth-helper">验证码验证成功后，邮箱才会正式绑定到该账号。</p>
@@ -334,7 +335,7 @@ function backToLoginWithRecoveredUsername() {
           <p>邮箱所有权已经确认。设置新密码后，官网和桌面客户端都会立即使用新密码。</p>
         </div>
         <div class="form-stack">
-          <label>新密码<input v-model="newPassword" type="password" minlength="8" placeholder="至少 8 个字符" autocomplete="new-password" /></label>
+          <label>新密码<input v-model="newPassword" type="password" minlength="8" placeholder="至少 12 个字符" autocomplete="new-password" /></label>
           <label>确认新密码<input v-model="confirmNewPassword" type="password" minlength="8" placeholder="再次输入新密码" autocomplete="new-password" @keydown.enter="updatePassword" /></label>
           <button class="primary-button full" :disabled="busy" @click="updatePassword">{{ busy ? '保存中…' : '确认重置密码' }}</button>
         </div>

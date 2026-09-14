@@ -6,3 +6,24 @@ release/
 .env
 .env.*
 !.env.example
+
+supabase/.temp/
+verification/
+tests/verification/
+
+website/dist/
+website/dist-admin-local/
+website/dist-admin-live/
+website/.prerender/
+website/.wrangler/
+server/worker/.wrangler/
+
+# Generated, verified offline Signal components
+resources/signal/bin/
+resources/signal/lib/
+resources/signal/jre/
+
+# Pinned upstream development checkout; only its built core is included in beta 6.
+/integrations/signal-desktop/
+/integrations/tools/
+/resources/native/*.exe

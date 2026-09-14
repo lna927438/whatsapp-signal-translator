@@ -102,7 +102,7 @@ onMounted(load)
         <div class="wallet-main">
           <span>云端剩余字符数</span>
           <strong>{{ fmt(balance) }}</strong>
-          <em>{{ profile?.plan_code || 'free' }}</em>
+          <em>字符额度</em>
         </div>
         <div class="wallet-ring" :style="{ '--remaining': remainingPct + '%' }"><b>{{ remainingPct }}%</b><small>剩余</small></div>
         <div class="wallet-stats"><span>累计使用 <b>{{ fmt(debited) }}</b></span><span>累计入账 <b>{{ fmt(credited) }}</b></span></div>
@@ -111,7 +111,7 @@ onMounted(load)
       <section class="account-grid">
         <article class="info-card"><span>用户名</span><b>{{ profile?.username || '未设置' }}</b></article>
         <article class="info-card"><span>邮箱</span><b>{{ user?.email || profile?.email || '—' }}</b></article>
-        <article class="info-card"><span>套餐</span><b>{{ profile?.plan_code || 'free' }}</b></article>
+        <article class="info-card"><span>额度方式</span><b>管理员添加</b></article>
         <article class="info-card"><span>账号状态</span><b>{{ profile?.status || 'active' }}</b></article>
         <article class="info-card"><span>注册时间</span><b>{{ date(profile?.created_at) }}</b></article>
         <article class="info-card"><span>云端服务</span><b class="online-dot">● 本次数据已同步</b></article>
@@ -133,8 +133,8 @@ onMounted(load)
       </section>
 
       <section class="plan-panel">
-        <div><span class="eyebrow">BILLING</span><h2>套餐与充值</h2><p>支付系统接入后，这里会直接创建订单并为云端钱包充值。</p></div>
-        <button class="primary-button" disabled>充值即将开放</button>
+        <div><span class="eyebrow">BILLING</span><h2>字符额度</h2><p>需要增加字符时，请联系管理员。余额与客户端共用，成功翻译后按原文字符扣减。</p></div>
+        <button class="ghost-button" @click="load">刷新字符余额</button>
       </section>
     </template>
   </main>

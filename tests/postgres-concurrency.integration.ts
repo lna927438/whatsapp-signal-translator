@@ -75,10 +75,11 @@ async function waitForLocks(minimum: number) {
   }
   throw new Error(`Did not observe ${minimum} simultaneous PostgreSQL lock waiters`)
 }
-async function contend<T>(operations: Array<() => Promise<T>>) {
+async function contend<T>(operations: Array<() => Promise<T>>, globalPolicy=false) {
   const blocker = await pool.connect()
   await blocker.query('begin')
-  await blocker.query('select 1 from public.wallets where user_id=$1 for update', [USER])
+  if(globalPolicy)await blocker.query('select 1 from translator_private.security_policy where singleton for update')
+  else await blocker.query('select 1 from public.wallets where user_id=$1 for update', [USER])
   const pending = Promise.allSettled(operations.map(run => run()))
   try { await waitForLocks(operations.length) }
   finally { await blocker.query('rollback'); blocker.release() }
@@ -105,6 +106,7 @@ before(async () => {
     create schema auth;
     grant usage on schema auth to authenticated, service_role;
     create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);
+    create table auth.sessions (id uuid primary key,user_id uuid not null references auth.users(id) on delete cascade,not_after timestamptz);
     create function auth.uid() returns uuid language sql stable as
       $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
     alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
@@ -120,6 +122,7 @@ beforeEach(async () => {
   await pool.query('insert into auth.users(id,email) values ($1,$2),($3,$4)',
     [USER, 'first@example.invalid', OTHER, 'second@example.invalid'])
   await pool.query('update public.wallets set balance=100,lifetime_credited=100')
+  await pool.query('update translator_private.security_policy set user_daily_usd=100000,global_daily_usd=1000000,user_requests_per_minute=600,user_concurrency=32')
   backendIds.clear()
 })
 after(async () => {
@@ -228,7 +231,7 @@ test('twenty gateway calls backed by real PostgreSQL invoke the model once', asy
   let entered!: () => void
   const started = new Promise<void>(r => { entered = r })
   const wait = new Promise<void>(r => { release = r })
-  const env: Env = { SUPABASE_URL: 'https://database.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public',
+  const env: Env = { API_RATE_LIMITER: { limit: async () => ({ success: true }) }, SUPABASE_URL: 'https://database.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public',
     SUPABASE_SECRET_KEY: 'test-service', OPENAI_API_KEY: 'test-provider', OPENAI_MODEL: 'test-model' }
   const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
   globalThis.fetch = async (input, init) => {
@@ -244,6 +247,9 @@ test('twenty gateway calls backed by real PostgreSQL invoke the model once', asy
     const a = JSON.parse(String(init?.body))
     const name = url.pathname.split('/').at(-1)
     try {
+      if (name === 'security_rate_limit') return reply((await service('select public.security_rate_limit($1,$2) as result',[a.p_user_id,a.p_scope])).rows[0].result)
+      if (name === 'record_security_event') return reply(null)
+      if (name === 'complete_translation_metered') return reply((await service('select public.complete_translation_metered($1,$2,$3,$4,$5,$6,$7) as result',[a.p_user_id,a.p_request_id,a.p_claim_token,a.p_translation,a.p_model,a.p_latency_ms,a.p_receipt])).rows[0].result)
       if (name === 'begin_translation') return reply((await service('select public.begin_translation($1,$2,$3,$4,$5,$6) as result',
         [a.p_user_id, a.p_request_id, a.p_payload_hash, a.p_characters, a.p_claim_token, a.p_metadata])).rows[0].result)
       if (name === 'complete_translation') return reply((await service('select public.complete_translation($1,$2,$3,$4,$5,$6) as result',
@@ -268,4 +274,12 @@ test('twenty gateway calls backed by real PostgreSQL invoke the model once', asy
     assert.equal(calls, 1)
     assert.deepEqual(await counts(), { debits: 1, usages: 1 })
   } finally { release(); await first; globalThis.fetch = originalFetch }
+})
+
+test('independent PostgreSQL connections enforce a global cost cap across different users',async()=>{
+  await pool.query('update translator_private.security_policy set global_daily_usd=1,user_daily_usd=5')
+  const attempts=await contend([()=>begin(claimArgs('cost-a',1,USER)),()=>begin(claimArgs('cost-b',1,OTHER))].map(run=>async()=>{try{await run();return 'accepted'}catch(error){assert.match(String(error),/cost_limit/);return 'rejected'}}),true)
+  assert.deepEqual(attempts.map(result=>{if(result.status!=='fulfilled')throw result.reason;return result.value}).sort(),['accepted','rejected'])
+  const result=await pool.query('select count(*)::int n from translator_private.cost_reservations')
+  assert.equal(result.rows[0].n,1);assert.deepEqual(await counts(),{debits:0,usages:0})
 })

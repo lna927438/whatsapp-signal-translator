@@ -2,69 +2,111 @@ import { createHash, randomUUID } from 'crypto'
 import type { TranslationRequest } from '../../types'
 import type { TranslationProvider } from './provider'
 import { cloudBases } from '../../network/cloudConnection'
+import { qualityKey } from '../../../shared/translationPolicy'
+
+export interface CloudReceipt { requestId: string; translation: string; sourceCharacters: number; balanceAfter: number }
+export class TranslationOutcomeError extends Error {
+  constructor(message: string, readonly confirmedFailure = false) { super(message) }
+}
+const terminalFailures = new Set(['translation_failed', 'translation_outcome_unknown', 'provider_auth', 'provider_quota', 'provider_rate_limit', 'provider_model', 'provider_permission', 'provider_request', 'provider_timeout', 'provider_unavailable', 'provider_empty', 'protected_literal_mismatch', 'provider_wrong_language'])
+const capabilityChecks = new Map<string, { until: number; work: Promise<boolean> }>()
+export function clearCloudCapabilityCache() { capabilityChecks.clear() }
+async function supportsQuality(base: string): Promise<boolean> {
+  const cached = capabilityChecks.get(base)
+  if (cached && cached.until > Date.now()) return cached.work
+  const work = (async () => {
+    const response = await fetch(`${base}/health`, { cache: 'no-store', signal: AbortSignal.timeout(10000) })
+    const value: any = await response.json()
+    return response.ok && value?.features?.translationQuality === true
+  })()
+  const entry = { until: Date.now() + 60000, work }; capabilityChecks.set(base, entry)
+  try { const result = await work; if (!result && capabilityChecks.get(base) === entry) capabilityChecks.delete(base); return result }
+  catch (error) { if (capabilityChecks.get(base) === entry) capabilityChecks.delete(base); throw error }
+}
+export function validateCloudReceipt(payload: any, id: string, characters?: number): CloudReceipt {
+  if(payload?.requestId===id&&payload.contentExpired===true)throw new TranslationOutcomeError('此历史译文已按保留期清理，原结算记录仍保留，不会自动重新翻译或扣费。')
+  if (payload?.requestId !== id || typeof payload.translation !== 'string' || !payload.translation.trim()
+    || !Number.isSafeInteger(payload.sourceCharacters) || payload.sourceCharacters < 1
+    || (characters !== undefined && payload.sourceCharacters !== characters)
+    || !Number.isSafeInteger(payload.balanceAfter) || payload.balanceAfter < 0) throw new TranslationOutcomeError('云端结算回执不完整，已保留原请求等待核对。')
+  return payload
+}
 
 export class CloudflareProvider implements TranslationProvider {
-  constructor(private readonly accessToken: string | (() => string), private readonly apiBase?: string) {}
-
-  async translate(request: TranslationRequest): Promise<string> {
-
-    const body = {
-      text: request.text.trim(),
-      sourceLanguage: request.sourceLanguage || 'auto',
-      targetLanguage: request.targetLanguage,
-      accountId: request.accountId || '',
-      conversationId: request.conversationId || '',
-      context: request.context || []
-    }
-    // Message identities survive a renderer retry/restart. A fresh manual test
-    // without a message ID is a new operation, unless its caller supplies an ID.
-    const requestId = request.requestId || (request.messageId
-      ? `message-${createHash('sha256').update(JSON.stringify([request.messageId, body])).digest('hex')}`
-      : randomUUID())
-    const encoded = JSON.stringify({ ...body, requestId })
-    const deadline = Date.now() + 75_000
+  constructor(private readonly accessToken: string | (() => string), private readonly apiBase?: string,
+    private readonly onReceipt?: (value: CloudReceipt) => Promise<void>) {}
+  private token() {
+    const token = (typeof this.accessToken === 'function' ? this.accessToken() : this.accessToken).trim()
+    if (!token) throw new Error('在线登录令牌缺失，请重新登录。')
+    return token
+  }
+  async status(requestId: string, deadline = Date.now() + 20000): Promise<{ state: 'completed' | 'failed' | 'processing' | 'not_found'; response?: CloudReceipt; error?: string }> {
     const bases = this.apiBase ? [this.apiBase.replace(/\/$/, '')] : cloudBases()
-    let routeIndex = 0
-
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (Date.now() >= deadline) throw new Error('云端响应未确认，原任务已保留，请稍后重试同一条消息。')
-      const token = (typeof this.accessToken === 'function' ? this.accessToken() : this.accessToken).trim()
-      if (!token) throw new Error('在线登录令牌缺失，请重新登录。')
+    for (const base of bases) {
+      if (Date.now() >= deadline) break
+      const token = this.token()
       let response: Response
-      let payload: any
-      try {
-        response = await fetch(`${bases[routeIndex]}/api/translate`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'x-request-id': requestId
-          },
-          body: encoded,
-          signal: AbortSignal.timeout(Math.max(1, Math.min(attempt === 0 && bases.length > 1 ? 15000 : 30000, deadline - Date.now())))
-        })
-        payload = await response.json()
-      } catch {
-        routeIndex = (routeIndex + 1) % bases.length
-        if (attempt === 4) throw new Error('云端响应未确认，请稍后重试同一条消息。')
-        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
-        continue
+      try { response = await fetch(`${base}/api/translation-status?requestId=${encodeURIComponent(requestId)}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(Math.max(1, Math.min(10000, deadline - Date.now())))
+      }) } catch { continue }
+      const payload: any = await response.json().catch(() => null)
+      if (response.ok && ['completed', 'failed', 'processing', 'not_found'].includes(payload?.state)) {
+        if (payload.state === 'completed') payload.response = validateCloudReceipt(payload.response, requestId)
+        return payload
       }
-      if (response.status === 202 || (response.status === 503 && payload?.error === 'settlement_pending')) {
-        if (attempt === 4) throw new Error('翻译仍在处理中，请稍后重试同一条消息。')
-        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
-        continue
-      }
-      if (!response.ok) {
-        if (response.status === 401) throw new Error('在线登录状态已过期，请重新登录。')
-        if (response.status === 403 && payload?.error === 'account_disabled') throw new Error('账号已停用，无法使用在线翻译。')
-        if (response.status === 402) throw new Error('可用字符余额不足，请等待正在处理的翻译完成或充值。')
-        throw new Error(String(payload?.message || `云端翻译失败 (${response.status})`))
-      }
-      const translated = String(payload?.translation || '').trim()
-      if (!translated) throw new Error('云端翻译返回为空。')
-      return translated
+      if (response.status === 401) throw new Error('在线登录状态已过期，请重新登录。')
+      if (response.status === 404) throw new TranslationOutcomeError('服务端尚未提供结果查询，原请求已保留。请在记录中核对，不要重新创建任务。')
     }
-    throw new Error('云端响应未确认。')
+    throw new TranslationOutcomeError('暂时无法核对原请求。恢复连接后继续查询。')
+  }
+  async translate(request: TranslationRequest): Promise<string> {
+    const deadline = Date.now() + 42000
+    const body = { text: request.text.trim(), sourceLanguage: request.sourceLanguage || 'auto', targetLanguage: request.targetLanguage,
+      accountId: request.accountId || '', conversationId: request.conversationId || '', context: request.context || [],
+      ...(request.quality ? { quality: request.quality } : {}) }
+    const requestId = request.requestId || (request.messageId
+      ? `message-${createHash('sha256').update(JSON.stringify([request.messageId, body])).digest('hex')}` : randomUUID())
+    const token = this.token()
+    const base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
+    if (qualityKey(request.quality)) {
+      let supported: boolean
+      try { supported = await supportsQuality(base) }
+      catch { throw new TranslationOutcomeError('尚未连通翻译选项服务，本次未发起翻译、未扣费。', true) }
+      if (!supported) throw new TranslationOutcomeError('服务端尚未启用语气与术语功能。本次未发起翻译、未扣费。', true)
+    }
+    let response: Response | undefined
+    let payload: any
+    try {
+      response = await fetch(`${base}/api/translate`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-request-id': requestId },
+        body: JSON.stringify({ ...body, requestId }), signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - Date.now()))) })
+      payload = await response.json()
+    } catch { /* Response lost: only query this ID. Never create another request. */ }
+    const finish = async (value: any) => {
+      const receipt = validateCloudReceipt(value, requestId, Array.from(body.text).length)
+      await this.onReceipt?.(receipt)
+      return receipt.translation
+    }
+    if (response?.ok && response.status !== 202 && payload?.translation) return finish(payload)
+    // Authentication or wallet rejection does not prove that an earlier attempt
+    // with this immutable ID was never settled. Retain the record for a lookup.
+    if (response?.status === 401) throw new TranslationOutcomeError('在线登录状态已过期，请重新登录后核对原请求。')
+    if (response?.status === 403) throw new TranslationOutcomeError('账号已停用，无法使用在线翻译。原请求仍需核对。')
+    if (response?.status === 402) throw new TranslationOutcomeError('可用字符余额不足。原请求已保留，结算以查询结果为准。')
+    if (response?.status === 429 || payload?.error === 'security_paused') {
+      const status = await this.status(requestId, deadline)
+      if (status.state === 'completed') return finish(status.response)
+      const message = payload?.error === 'cost_limit' ? '今日翻译费用已达到保护上限，请联系管理员核对。' : payload?.error === 'security_paused' ? '翻译正在安全维护，请稍后继续。' : '翻译请求较多，请稍后重试。'
+      throw new TranslationOutcomeError(message + '原消息和草稿已保留。', status.state === 'not_found' || status.state === 'failed')
+    }
+    if (terminalFailures.has(payload?.error)) throw new TranslationOutcomeError('本次翻译未成功，云端已确认未扣费。', true)
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (Date.now() + 300 * 2 ** attempt >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, 300 * 2 ** attempt))
+      const result = await this.status(requestId, deadline)
+      if (result.state === 'completed') return finish(result.response)
+      if (result.state === 'failed') throw new TranslationOutcomeError('云端已确认本次未扣费。请查看原任务。', true)
+    }
+    throw new TranslationOutcomeError('翻译结果待确认，原请求和草稿已保留。恢复连接后继续核对。')
   }
 }

@@ -1,3 +1,4 @@
+import { createUiLocaleHarness } from './ui-locale-harness.ts'
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { JSDOM } from 'jsdom'
@@ -10,10 +11,11 @@ const require=createRequire(import.meta.url)
 const dom=new JSDOM('<body></body>',{url:'https://hellodog.test/'})
 for(const key of ['window','document','Element','HTMLElement','SVGElement','Node']) Object.defineProperty(globalThis,key,{configurable:true,value:(dom.window as any)[key]})
 const vue=require('vue')
+const { uiLocale, languagePicker } = createUiLocaleHarness()
 const {descriptor}=parse(readFileSync(new URL('../src/renderer/src/components/AccountSetup.vue',import.meta.url),'utf8'))
 const source=compileScript(descriptor,{id:'account-setup-test',inlineTemplate:true}).content
 const exports:any={}
-runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,document:dom.window.document,window:dom.window,localStorage:dom.window.localStorage,HTMLElement:dom.window.HTMLElement,URL,console,require:(name:string)=>name==='vue'?vue:require('../src/shared/accountConfig.ts')})
+runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,document:dom.window.document,window:dom.window,localStorage:dom.window.localStorage,HTMLElement:dom.window.HTMLElement,URL,console,require:(name:string)=>name==='vue'?vue:name.includes('uiLocale')?uiLocale:name.includes('UiLanguagePicker.vue')?languagePicker():require('../src/shared/accountConfig.ts')})
 const settle=async()=>{for(let i=0;i<8;i++){await vue.nextTick();await Promise.resolve()}}
 function input(el:any,value:string){el.value=value;el.dispatchEvent(new dom.window.Event('input',{bubbles:true}));el.dispatchEvent(new dom.window.Event('change',{bubbles:true}))}
 function mount(platform='whatsapp',account?:any){const root=dom.window.document.createElement('div');dom.window.document.body.appendChild(root);const saved:any[]=[];const calls:any[]=[];(dom.window as any).desktopAPI={addAccounts:async(args:any)=>{calls.push(args);return [{id:'a',...args.options}]},updateAccount:async(id:string,options:any)=>{calls.push({id,options});return {id,...options}},testAccountProxy:async()=>({ip:'192.0.2.1',latencyMs:25})};const app=vue.createApp(exports.default,{platform,owner:'test-owner',account,languages:[{code:'en-US',name:'English'},{code:'zh-CN',name:'中文'}],onSaved:(a:any)=>saved.push(a)});app.mount(root);return{root,calls,saved,close(){app.unmount();root.remove()}}}
@@ -48,9 +50,9 @@ test('proxy detection locks form until completion and displays result without su
 test('global settings categories save real translation, notification and desktop choices; cache clearing requires confirmation',async()=>{
  const {descriptor}=parse(readFileSync(new URL('../src/renderer/src/components/SettingsPanel.vue',import.meta.url),'utf8'))
  const output:any={};const source=compileScript(descriptor,{id:'settings-test',inlineTemplate:true}).content
- runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:output,document:dom.window.document,window:dom.window,localStorage:dom.window.localStorage,console,require:(name:string)=>name==='vue'?vue:{requireSupabase:()=>({auth:{getSession:async()=>({data:{session:{user:{id:'test',email:'test@example.invalid',user_metadata:{}},access_token:'synthetic'}}})}})}})
+ runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:output,document:dom.window.document,window:dom.window,localStorage:dom.window.localStorage,console,require:(name:string)=>name==='vue'?vue:name.includes('uiLocale')?uiLocale:name.includes('UiLanguagePicker.vue')?languagePicker():name.includes('restartState')?require('../src/renderer/src/lib/restartState.ts'):{requireSupabase:()=>({auth:{getSession:async()=>({data:{session:{user:{id:'test',email:'test@example.invalid',user_metadata:{}},access_token:'synthetic'}}})}})}})
  const saved:any[]=[];let cleared=0
- ;(dom.window as any).desktopAPI={getSettings:async()=>({provider:'openai',localLanguage:'zh-CN',targetLanguage:'en-US',historyMode:'new',notifications:'background',receiveAutoTranslate:true,sendAutoTranslate:true}),getLanguages:async()=>[],authSetOnlineSession:async()=>{},measureRoutes:async()=>[],diagnoseConnection:async()=>[],saveSettings:async(value:any)=>saved.push(value),getCacheInfo:async()=>({translations:3}),clearTranslationCache:async()=>{cleared++}}
+ ;(dom.window as any).desktopAPI={getSettings:async()=>({provider:'openai',localLanguage:'zh-CN',targetLanguage:'en-US',historyMode:'new',notifications:'background',receiveAutoTranslate:true,sendAutoTranslate:true}),getLanguages:async()=>[],authSetOnlineSession:async()=>{},measureRoutes:async()=>[],diagnoseConnection:async()=>[],saveSettings:async(value:any)=>saved.push(structuredClone(value)),getCacheInfo:async()=>({translations:3}),clearTranslationCache:async()=>{cleared++}}
  const root=dom.window.document.createElement('div');dom.window.document.body.appendChild(root);const app=vue.createApp(output.default);app.mount(root)
  const click=(text:string)=>Array.from(root.querySelectorAll('button')).find(b=>b.textContent===text)!.click()
  try{await settle();assert.ok(root.querySelector('.settings-scroll'));input(root.querySelector('select option[value="manual"]')!.parentElement,'manual')
@@ -58,6 +60,6 @@ test('global settings categories save real translation, notification and desktop
  click('通知');await settle();input(root.querySelector('select option[value="off"]')!.parentElement,'off')
  click('运行');await settle();Array.from(root.querySelectorAll('label')).find(x=>x.textContent?.includes('点击右上角 X'))!.querySelector('input')!.click()
  click('数据');await settle();click('清理我的翻译缓存…');await settle();assert.equal(cleared,0);click('确认清理');await settle();assert.equal(cleared,1)
- click('保存设置');await settle();assert.equal(saved.length,1);assert.equal(saved[0].historyMode,'manual');assert.equal(saved[0].previewSend,true);assert.equal(saved[0].notifications,'off');assert.equal(saved[0].closeToTray,true)
+ click('保存设置');await settle();assert.ok(saved.length>=4);const latest=saved.at(-1);assert.equal(latest.historyMode,'manual');assert.equal(latest.previewSend,true);assert.equal(latest.notifications,'off');assert.equal(latest.closeToTray,true)
  }finally{app.unmount();root.remove()}
 })

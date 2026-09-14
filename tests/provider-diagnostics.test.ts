@@ -4,7 +4,7 @@ import worker, { type Env } from '../server/worker/src/index.ts'
 import { classifyProviderFailure, checkProviderReadiness } from '../server/worker/src/providerDiagnostics.ts'
 const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
-const env = (): Env => ({ SUPABASE_URL: 'https://db.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public', SUPABASE_SECRET_KEY: 'test-service', OPENAI_API_KEY: 'test-secret-never-returned', OPENAI_MODEL: 'test-model' })
+const env = (): Env => ({ API_RATE_LIMITER:{limit:async()=>({success:true})}, SUPABASE_URL: 'https://db.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public', SUPABASE_SECRET_KEY: 'test-service', OPENAI_API_KEY: 'test-secret-never-returned', OPENAI_MODEL: 'test-model' })
 
 test('provider failures distinguish authentication, billing quota, rate limits, model access and parameters without echoing payloads', () => {
   for (const [status, code, expected] of [[401, 'invalid_api_key', 'provider_auth'], [429, 'insufficient_quota', 'provider_quota'], [429, 'rate_limit_exceeded', 'provider_rate_limit'], [404, 'model_not_found', 'provider_model'], [403, '', 'provider_permission'], [400, 'unsupported_value', 'provider_request'], [503, '', 'provider_unavailable']] as const) {
@@ -28,7 +28,7 @@ test('readiness only retrieves model metadata, coalesces calls and never starts 
   const [first, second] = await Promise.all([checkProviderReadiness(settings), checkProviderReadiness(settings)])
   assert.deepEqual(first, second); assert.equal(requests, 1)
   assert.equal(first.status, 'available'); assert.equal(first.inferenceTested, false)
-  assert.ok(!JSON.stringify(first).includes(settings.OPENAI_API_KEY))
+  assert.ok(!JSON.stringify(first).includes(settings.OPENAI_API_KEY!))
 })
 
 test('model-read permission failure stays unverified instead of incorrectly declaring inference unavailable', async () => {
@@ -37,14 +37,13 @@ test('model-read permission failure stays unverified instead of incorrectly decl
   assert.equal(result.status, 'unverified'); assert.equal(result.code, 'provider_permission')
 })
 
-test('public readiness detects missing or invalid credentials but returns no credential content', async () => {
+test('public readiness never probes privileged provider APIs and returns no credential content', async () => {
   const settings = env()
-  globalThis.fetch = async () => new Response(JSON.stringify({ error: { code: 'invalid_api_key', message: settings.OPENAI_API_KEY } }), { status: 401 })
+  globalThis.fetch = async () => { assert.fail('public health must not trigger upstream work') }
   const response = await worker.fetch(new Request('https://worker.invalid/health/translation'), settings)
   const body = await response.json()
-  assert.equal(body.provider.code, 'provider_auth'); assert.equal(body.provider.status, 'attention')
-  assert.equal(body.provider.inferenceTested, false)
-  assert.ok(!JSON.stringify(body).includes(settings.OPENAI_API_KEY))
+  assert.equal(body.provider.configured, true); assert.equal(body.provider.liveProbe, false)
+  assert.ok(!JSON.stringify(body).includes(settings.OPENAI_API_KEY!))
   globalThis.fetch = async () => { assert.fail('missing key must not call upstream') }
   assert.equal((await checkProviderReadiness({ ...env(), OPENAI_API_KEY: '' })).code, 'provider_auth')
 })

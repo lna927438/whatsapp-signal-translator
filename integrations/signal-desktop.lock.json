@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/signalapp/Signal-Desktop.git",
+  "tag": "v8.27.0",
+  "commit": "1a1d65153be546836d5948cb50493d4d1d293d02",
+  "node": "24.17.0",
+  "packageManager": "pnpm@11.5.2",
+  "electron": "43.5.0",
+  "license": "AGPL-3.0-only",
+  "bundledInHelloDog": true,
+  "helloDogVersion": "0.5.8-beta.2",
+  "featureEntryPoints": {
+    "composer": "ts/components/CompositionArea.dom.tsx",
+    "emoji": "ts/components/fun/FunEmojiPicker.dom.tsx",
+    "stickers": "ts/components/fun/FunStickerPicker.dom.tsx",
+    "media": "ts/components/MediaEditor.dom.tsx",
+    "settings": "ts/components/Preferences.dom.tsx",
+    "calls": "ts/services/calling.preload.ts",
+    "callScreen": "ts/components/CallScreen.dom.tsx",
+    "sendQueue": "ts/jobs/helpers/createSendMessageJob.preload.ts"
+  },
+  "nativeDependencies": ["@signalapp/libsignal-client", "@signalapp/ringrtc", "@signalapp/sqlcipher", "@signalapp/windows-ucv", "@signalapp/mute-state-change"]
+}

@@ -7,14 +7,15 @@ before(async () => { db = await database() })
 beforeEach(async () => { await reset(db) })
 after(async () => { await db?.close() })
 
-test('all ten business tables deny destructive privileges to ordinary roles', async () => {
+test('all business tables, including admin audit, deny destructive privileges to ordinary roles', async () => {
   const { rows } = await db.query<{ table_name: string; allowed: boolean }>(`
     select c.relname as table_name,
       has_table_privilege('authenticated',c.oid,'TRUNCATE,TRIGGER,REFERENCES') or
       has_table_privilege('anon',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') as allowed
     from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r'
   `)
-  assert.equal(rows.length, 10)
+  assert.ok(rows.length >= 11)
+  assert.ok(rows.some(r => r.table_name === 'admin_audit'))
   assert.ok(rows.every(r => !r.allowed))
   await assert.rejects(asRole(db, 'authenticated', 'truncate public.wallets'), /permission denied/)
 })

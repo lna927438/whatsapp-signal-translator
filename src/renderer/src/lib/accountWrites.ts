@@ -3,6 +3,7 @@ export class AccountWrites {
   private sequence = 0
   private latest = new Map<string, number>()
   private chain: Promise<unknown> = Promise.resolve()
+  flush() { return this.chain }
 
   begin(id: string, patch: Record<string, unknown>) {
     const revision = ++this.sequence
@@ -15,7 +16,8 @@ export class AccountWrites {
 
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     const next = this.chain.then(task, task)
-    this.chain = next.catch(() => undefined)
+    this.chain = next
+    void next.catch(() => undefined)
     return next
   }
 }

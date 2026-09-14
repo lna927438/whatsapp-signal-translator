@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { t, uiLanguage, languageName, uiError } from './lib/uiLocale'
+
 import { onMounted, onUnmounted, ref } from 'vue'
 import App from './App.vue'
 import AuthView from './components/AuthView.vue'
@@ -31,7 +33,7 @@ const sessions = new SessionCoordinator(async session => {
 function applySession(session: BridgedSession | null) {
   void sessions.apply(signingOut ? null : session).catch(() => {
     if (!disposed) {
-      connectionError.value = '暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。'
+      connectionError.value = t('暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。')
       loading.value = false
     }
   })
@@ -53,7 +55,7 @@ async function refreshAuth() {
     if (error) throw error
     if (!disposed && observed === authEvents) await sessions.apply(signingOut ? null : data.session)
   } catch {
-    if (!disposed && observed === authEvents) connectionError.value = '暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。'
+    if (!disposed && observed === authEvents) connectionError.value = t('暂时无法同步登录状态。请检查网络后重试，本地草稿仍保留。')
   } finally { if (!disposed) loading.value = false }
 }
 
@@ -65,9 +67,9 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); window.removeEventListener
 <template>
   <div v-if="loading" class="auth-loading-screen">
     <div class="auth-loading-mark"><img src="/hellodog-icon.webp" alt="HelloDog" /></div>
-    <strong>正在连接在线账号…</strong>
+    <strong>{{ t('正在连接在线账号…') }}</strong>
   </div>
   <App v-else-if="userId" :key="workspaceKey" :user-id="userId" />
-  <div v-else-if="connectionError" class="auth-loading-screen"><p>{{ connectionError }}</p><button @click="refreshAuth">重试连接</button></div>
+  <div v-else-if="connectionError" class="auth-loading-screen"><p>{{ connectionError }}</p><button @click="refreshAuth">{{ t('重试连接') }}</button></div>
   <AuthView v-else @authenticated="applySession" />
 </template>

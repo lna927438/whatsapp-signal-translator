@@ -5,4 +5,6 @@ import './auth.css'
 import './auth-recovery.css'
 import './hellodog.css'
 import './workspace.css'
-createApp(Root).mount('#app')
+import './compactSidebar.css'
+import { initializeUiLanguage } from './lib/uiLocale'
+void initializeUiLanguage().finally(() => createApp(Root).mount('#app'))

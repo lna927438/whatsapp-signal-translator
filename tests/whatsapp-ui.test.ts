@@ -5,10 +5,12 @@ import { JSDOM } from 'jsdom'
 const { whatsappInjectionScript } = createRequire(import.meta.url)('../src/main/platforms/whatsapp/inject/script.ts') as typeof import('../src/main/platforms/whatsapp/inject/script')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function until(check: () => boolean) { for (let n = 0; n < 200; n++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 2)) }; assert.fail('UI did not settle') }
-function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string; historyMode?: 'new' | 'manual' | 'visible'; incomingResult?: string; cachedIncoming?: string; previewSend?: boolean } = {}) {
+function harness(options: { modernReceipt?: boolean; delayedMarker?: boolean; receiptStyle?: 'tail' | 'wds' | 'author' | 'quoted'; stallFirstPrepare?: boolean; wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string; historyMode?: 'new' | 'manual' | 'visible'; incomingResult?: string; cachedIncoming?: string; previewSend?: boolean } = {}) {
   const dom = new JSDOM('<div id="sidebar">other chat</div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header><div class="message-in" data-id="false_peer-a@c.us_old"><span class="selectable-text">hello</span></div><footer><div contenteditable="true" role="textbox">原文</div><button aria-label="Send">send</button></footer></div>', { url: 'https://web.whatsapp.com', runScripts: 'outside-only' })
   const win = dom.window as any
   const composer = win.document.querySelector('[contenteditable]')
+  win.document.execCommand=(command:string,_ui:boolean,text:string)=>{composer.textContent=command==='delete'?'':text;return true}
+  if (options.modernReceipt) { composer.setAttribute('contenteditable','plaintext-only');win.document.querySelector('.message-in').setAttribute('data-id','3EB0000000000000000000') }
   const button = win.document.querySelector('button')
   const statuses: any[] = [], prepared: any[] = []
   let submits = 0, nativeClicks = 0, incoming = 0, releaseTranslation!: () => void, lastTask: any
@@ -16,7 +18,7 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
   const intervals: Array<() => void> = []
   win.setInterval = (fn: () => void) => { intervals.push(fn); return intervals.length }
   const originalTimeout = win.setTimeout.bind(win)
-  win.setTimeout = (fn: () => void, delay: number) => originalTimeout(fn, delay === 100 ? 0 : delay)
+  win.setTimeout = (fn: () => void, delay: number) => originalTimeout(fn, delay === 100 ? 0 : options.stallFirstPrepare && delay === 8000 ? 5 : delay)
   win.realtimeTranslator = {
     getRuntimeSettings: async () => ({ receiveAutoTranslate: Boolean(options.incomingError || options.historyMode), groupTranslate: true, historyMode: options.historyMode, previewSend: options.previewSend }),
     reportConversation: () => {}, reportStatus: (status: any) => statuses.push(status),
@@ -24,6 +26,7 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
     translateIncoming: async () => { incoming++; if (options.incomingResult) return options.incomingResult; throw new Error(options.incomingError || 'offline') },
     prepareSend: async (payload: any) => {
       prepared.push(payload)
+      if (options.stallFirstPrepare && prepared.length === 1) return new Promise(() => {})
       lastTask = { ...payload, id: 'send-test', state: 'draft', request: { text: payload.text }, translated: 'translation' }
       return lastTask
     },
@@ -37,7 +40,7 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
       if (!win.__RT_SEND_SELECT__(args)) throw new Error('guard rejected')
       composer.textContent = lastTask.translated // Models Chromium insertText, not WhatsApp dispatch.
       const result = await win.__RT_SEND_COMMIT__(args)
-      win.__RT_SEND_RELEASE__(lastTask.id, result.dispatched === false)
+      await win.__RT_SEND_RELEASE__(lastTask.id, result.dispatched === false)
       if (!result.confirmed) { lastTask.state = 'uncertain'; throw new Error('发送结果未确认') }
       lastTask.state = 'sent'
       return lastTask
@@ -53,6 +56,15 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
       el.className = 'message-out'; el.setAttribute('data-id', 'true_peer-a@c.us_new-' + nativeClicks)
       el.innerHTML = options.directionalText ? '<div class="selectable-text">\u200etranslation\u200f</div>' : '<span class="selectable-text">translation</span>'
       if (!options.directionalText) el.querySelector('.selectable-text').textContent = lastTask.translated
+      if (options.modernReceipt) { el.className='';el.setAttribute('data-id','3EB000000000000000000'+nativeClicks);const marker=win.document.createElement('span');marker.setAttribute('data-icon','msg-check');el.appendChild(marker) }
+      if (options.receiptStyle) {
+        el.className='x1n2onr6';el.setAttribute('data-id','3EB000000000000000000'+nativeClicks);
+        el.querySelector('[data-icon="msg-check"]')?.remove();
+        const marker=win.document.createElement('div');
+        marker.innerHTML=options.receiptStyle==='tail'?'<span data-testid="tail-out" data-icon="tail-out"></span>':options.receiptStyle==='author'?'<span aria-label="你："></span>':'<div data-testid="msg-meta"><svg><title>wds-ic-read</title></svg></div>';
+        if(options.receiptStyle==='quoted'){marker.setAttribute('data-testid','quoted-message');marker.className='message-out';}
+        if(options.delayedMarker)win.setTimeout(()=>el.appendChild(marker),80);else el.appendChild(marker);
+      }
       let receipt = el
       if (options.wrappedReceipt) {
         receipt = win.document.createElement('div'); receipt.setAttribute('data-id', el.getAttribute('data-id'))
@@ -67,8 +79,38 @@ function harness(options: { wrappedReceipt?: boolean; rerender?: boolean; rename
   })
   win.eval(whatsappInjectionScript)
   const enter = () => composer.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
-  return { win, dom, composer, enter, statuses, prepared, intervals, release: () => releaseTranslation(), get submits() { return submits }, get nativeClicks() { return nativeClicks }, get incoming() { return incoming } }
+  return { win, dom, composer, enter, statuses, prepared, intervals, release: () => releaseTranslation(), get task() { return lastTask }, get submits() { return submits }, get nativeClicks() { return nativeClicks }, get incoming() { return incoming } }
 }
+
+test('WhatsApp opaque IDs and plaintext-only editors confirm one send without waiting indefinitely',async()=>{
+  const h=harness({modernReceipt:true})
+  try{h.enter();await until(()=>h.task?.state==='sent');assert.equal(h.nativeClicks,1);assert.equal(h.submits,1);assert.ok(h.statuses.some(item=>item.state==='success'))}
+  finally{h.dom.window.close()}
+})
+
+for (const receiptStyle of ['tail','wds','author'] as const) test('WhatsApp current '+receiptStyle+' receipt confirms one native send without reverse-translating it',async()=>{
+  const h=harness({modernReceipt:true,receiptStyle,historyMode:'new',incomingResult:'unwanted reverse translation'});
+  try{await tick();h.enter();await until(()=>h.task?.state==='sent');h.intervals.forEach(fn=>fn());await tick();
+    assert.equal(h.nativeClicks,1);assert.equal(h.submits,1);assert.equal(h.incoming,0);
+    const receipt=h.win.document.querySelector('[data-id="3EB0000000000000000001"]');
+    assert.equal(receipt.querySelector('.rt-translation')?.textContent,'原文');
+  }finally{h.dom.window.close();}
+});
+
+test('a pending native bubble is not reverse-translated before its outgoing marker appears',async()=>{
+ const h=harness({modernReceipt:true,receiptStyle:'wds',delayedMarker:true,historyMode:'new',incomingResult:'unwanted reverse translation'});
+ try{
+  await tick();h.enter();await until(()=>h.nativeClicks===1);
+  h.intervals.forEach(fn=>fn());await tick();assert.equal(h.incoming,0);
+  await until(()=>h.task?.state==='sent');assert.equal(h.incoming,0);assert.equal(h.submits,1);
+ }finally{h.dom.window.close();}
+});
+
+test('WhatsApp outgoing marks inside a quoted message cannot confirm an incoming echo as a send receipt',async()=>{
+ const h=harness({modernReceipt:true,receiptStyle:'quoted'});
+ try{h.enter();await until(()=>h.task?.state==='uncertain');assert.equal(h.nativeClicks,1);assert.ok(!h.statuses.some(s=>s.state==='success'));}
+ finally{h.dom.window.close();}
+});
 
 test('WhatsApp repeated Enter becomes one guarded submission and requires a new outgoing bubble', async () => {
   const h = harness({ delayTranslation: true })
@@ -78,6 +120,19 @@ test('WhatsApp repeated Enter becomes one guarded submission and requires a new 
     h.release()
     await until(() => h.statuses.some(item => item.state === 'success'))
     assert.equal(h.submits, 1); assert.equal(h.nativeClicks, 1)
+  } finally { h.dom.window.close() }
+})
+
+test('WhatsApp stalled local preparation releases the editor and allows a fresh attempt', async () => {
+  const h = harness({ stallFirstPrepare: true })
+  try {
+    h.enter()
+    await until(() => h.statuses.some(item => item.state === 'error'))
+    assert.equal(h.composer.textContent, '原文'); assert.equal(h.nativeClicks, 0)
+    assert.equal(h.win.document.querySelector('#rt-send-status'), null)
+    h.enter()
+    await until(() => h.statuses.some(item => item.state === 'success'))
+    assert.equal(h.prepared.length, 2); assert.equal(h.submits, 1); assert.equal(h.nativeClicks, 1)
   } finally { h.dom.window.close() }
 })
 
@@ -123,7 +178,7 @@ test('WhatsApp an empty composer without a new receipt is uncertain, never repor
   const h = harness({ receipt: false })
   try {
     h.enter()
-    await until(() => h.statuses.some(item => item.message.includes('未确认')))
+    await until(() => h.task?.state === 'uncertain')
     assert.equal(h.nativeClicks, 1)
     assert.ok(!h.statuses.some(item => item.state === 'success'))
   } finally { h.dom.window.close() }
@@ -136,7 +191,7 @@ test('WhatsApp an existing identical bubble cannot serve as a new send receipt',
     old.className = 'message-out'; old.setAttribute('data-id', 'true_peer-a@c.us_old-send'); old.innerHTML = '<span class="selectable-text">translation</span>'
     h.win.document.querySelector('#main').appendChild(old)
     h.enter()
-    await until(() => h.statuses.some(item => item.message.includes('未确认')))
+    await until(() => h.task?.state === 'uncertain')
     assert.ok(!h.statuses.some(item => item.state === 'success'))
   } finally { h.dom.window.close() }
 })
@@ -173,16 +228,13 @@ test('normal send progress and success never create a chat overlay or steal focu
   } finally { h.dom.window.close() }
 })
 
-test('uncertain sends keep recovery collapsed without resending and can be expanded explicitly', async () => {
+test('uncertain sends retain the task without creating any chat overlay or resending', async () => {
   const h = harness({ receipt: false })
   try {
-    h.enter(); await until(() => h.win.document.querySelector('#rt-send-status button'))
-    const box = h.win.document.getElementById('rt-send-status')
-    assert.equal(box.tagName, 'DETAILS'); assert.equal(box.open, false)
-    assert.equal(box.querySelectorAll('button').length, 2)
-    box.querySelector('summary').click(); assert.equal(box.open, true)
-    box.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    assert.equal(box.open, false); assert.equal(h.nativeClicks, 1)
+    h.enter(); await until(() => h.task?.state === 'uncertain')
+    assert.equal(h.win.document.getElementById('rt-send-status'), null)
+    h.enter(); await tick()
+    assert.equal(h.nativeClicks, 1)
     assert.ok(!h.statuses.some(item => item.state === 'success'))
   } finally { h.dom.window.close() }
 })
@@ -199,25 +251,21 @@ test('stable peer receipts survive contact title formatting and directional disp
 test('a different peer after dispatch cannot confirm an identical outgoing bubble', async () => {
   const h = harness({ changedPeer: true })
   try {
-    h.enter(); await until(() => h.statuses.some(item => item.message.includes('未确认')))
+    h.enter(); await until(() => h.task?.state === 'uncertain')
     assert.equal(h.nativeClicks, 1)
     assert.ok(!h.statuses.some(item => item.state === 'success'))
   } finally { h.dom.window.close() }
 })
 
-test('failed recovery actions remain available and never dispatch a second message', async () => {
+test('opening and scrolling a chat never surfaces persistent recovery information', async () => {
   const h = harness({ receipt: false })
   try {
-    h.win.realtimeTranslator.confirmNotSent = async () => { throw new Error('暂时无法读取任务') }
-    h.enter(); await until(() => h.win.document.querySelector('#rt-send-status button'))
-    const box = h.win.document.getElementById('rt-send-status')
-    box.querySelector('summary').click(); box.querySelector('button').click()
-    await until(() => box.textContent.includes('暂时无法读取任务'))
-    assert.equal(box.querySelectorAll('button:disabled').length, 0)
-    assert.equal(box.open, true); assert.equal(h.nativeClicks, 1)
+    h.enter(); await until(() => h.task?.state === 'uncertain')
+    h.intervals.forEach(fn => fn()); await tick()
+    assert.equal(h.win.document.getElementById('rt-send-status'), null)
+    assert.equal(h.nativeClicks, 1)
   } finally { h.dom.window.close() }
 })
-
 
 test('opening historical WhatsApp messages restores cache without paid requests', async () => {
  const h=harness({historyMode:'new',cachedIncoming:'历史译文'})

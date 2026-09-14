@@ -1,0 +1,11 @@
+{
+  "state": "release-preparation-owner-authorized-unsigned-windows",
+  "productionChangesAuthorized": true,
+  "ownerEmail": "lna927438@gmail.com",
+  "administrator": {"owners":1,"requiredAal":"aal2","writeMfaMaxAgeSeconds":600,"readMfaMaxAgeSeconds":28800,"requiresLiveSession":true},
+  "auth": {"minimumNewPasswordLength":12,"leakedPasswordProtection":"enable when supported by the existing plan; no purchase made","captchaProvider":"turnstile","captchaActivation":"after website and compatible clients are available; keep the direct Supabase Auth entry protected","captchaSiteKeyVariable":"VITE_TURNSTILE_SITE_KEY","clientCaptchaFlag":"VITE_AUTH_CAPTCHA_ENABLED","captchaSecretLocation":"Supabase Auth CAPTCHA configuration; never in a client build"},
+  "costProtection": {"userDailyUsd":5,"globalDailyUsd":50,"perUserConcurrency":8,"perUserNewRequestsPerMinute":60,"edgeRequestsPerMinute":180},
+  "retention": {"localCompletedTranslationDays":30,"cloudCompletedTranslationDays":30,"securityEventsDays":90,"financialLedger":"retain for reconciliation; no chat content required","backupDays":30},
+  "operations": {"databaseBackupTargetRpoHours":24,"databaseRestoreTargetRtoHours":4,"backupKey":"separate encrypted secret; store apart from archives","cloudPlatformMfa":"owner must enable and save recovery materials for email, GitHub, Cloudflare and Supabase","privateSecurityReports":"configure an owner-controlled private reporting channel before public release"},
+  "signing": {"certificate":"omitted by explicit owner instruction on 2026-09-14","releaseKeys":"Ed25519 production public key provisioned; private key encrypted outside repository on D drive","publicReleaseAllowed":true,"windowsPublisherVerified":false,"signedUpdateManifestRequired":true}
+}

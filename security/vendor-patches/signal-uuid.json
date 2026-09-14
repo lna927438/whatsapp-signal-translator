@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/uuidjs/uuid/commit/9d27ddf7046ce496ef39569ff84d948eeff9cb2a",
+  "upstreamCommit": "9d27ddf7046ce496ef39569ff84d948eeff9cb2a",
+  "reason": "Upstream buffer bounds fix backported without weakening pnpm provenance checks.",
+  "patchSha256": "488506fabe6c8be52e40a305c59d342396859996fef440c4f0a8755141a98c3d",
+  "package": "uuid@13.0.0",
+  "dependencyPatchSha256": "fa3077288f6a25774f448930bd108162e2bb4c5dcbe3070b6faddcc76b29eee4",
+  "signalCommit": "1a1d65153be546836d5948cb50493d4d1d293d02"
+}

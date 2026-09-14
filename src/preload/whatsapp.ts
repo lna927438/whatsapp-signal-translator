@@ -4,6 +4,10 @@ const accountArg = process.argv.find((value) => value.startsWith('--rt-account-i
 const accountId = accountArg?.slice('--rt-account-id='.length)
 
 contextBridge.exposeInMainWorld('realtimeTranslator', {
+  getDraft: (target: any) => ipcRenderer.invoke('draft:get', { ...target, accountId }),
+  saveDraft: (target: any, text: string) => ipcRenderer.invoke('draft:save', { ...target, accountId }, text),
+  editComposer: (value: any) => ipcRenderer.invoke('whatsapp:edit-composer', accountId, value),
+  reportConnection: (state: string) => ipcRenderer.send('whatsapp:connection', accountId, state),
   getRuntimeSettings: (conversationId?: string) => ipcRenderer.invoke('translator:get-runtime-settings', accountId, conversationId),
   cachedIncoming: (payload: any) => ipcRenderer.invoke('translator:cached-incoming', accountId, payload),
   translateIncoming: (payload: any) => ipcRenderer.invoke('translator:translate-incoming', accountId, payload),
@@ -11,6 +15,8 @@ contextBridge.exposeInMainWorld('realtimeTranslator', {
   reportUnread: (count: number) => ipcRenderer.send('whatsapp:unread', accountId, count),
   reportConversation: (info: any) => ipcRenderer.send('whatsapp:conversation', accountId, info),
   prepareSend: (payload: any) => ipcRenderer.invoke('send:prepare', { ...payload, platform: 'whatsapp', accountId }),
+  prepareQueuedSend: (payload: any) => ipcRenderer.invoke('send:prepare', { ...payload, platform: 'whatsapp', accountId }),
+  pendingSends: () => ipcRenderer.invoke('send:pending-list', accountId),
   editSendPreview: (id: string, text: string) => ipcRenderer.invoke('send:edit-preview', id, text),
   backTranslateSend: (id: string, text: string) => ipcRenderer.invoke('send:back-translate', id, text),
   translateSend: (id: string) => ipcRenderer.invoke('send:translate', id),

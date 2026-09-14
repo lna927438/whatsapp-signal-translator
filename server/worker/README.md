@@ -9,6 +9,10 @@ Backend gateway for the desktop translator.
 - `GET /api/wallet` — current character balance.
 - `GET /api/usage` — recent translation usage.
 - `POST /api/translate` — authenticated translation + atomic character debit.
+- `GET /api/admin/{session,overview,users,user,translations,orders,plans,versions,announcements,roles,audit,operation}` — role-gated administration.
+- `POST /api/admin/mutate` — validated, idempotent admin operations with an atomic audit entry.
+
+The admin console is deployed at https://admin.hellodog.net. The live database enforces one owner identity; every request is checked with Supabase Auth and the server-side admin policy. The local preview identity service is not in the Worker bundle. See `../../docs/product/admin-live-v1.md` for the live migration registry, actual provider usage accounting and authorization model. Packages and payments remain closed.
 
 All `/api/*` routes require `Authorization: Bearer <Supabase access token>`.
 
@@ -20,6 +24,7 @@ Configure these in Cloudflare Workers > Settings > Variables and Secrets as **Se
 - `SUPABASE_PUBLISHABLE_KEY`
 - `SUPABASE_SECRET_KEY`
 - `OPENAI_API_KEY`
+- `DEEPSEEK_API_KEY`
 
 `OPENAI_MODEL` is a normal non-secret variable and defaults to `gpt-5.6-luna` in `wrangler.jsonc`.
 

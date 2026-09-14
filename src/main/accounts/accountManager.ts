@@ -1,4 +1,5 @@
 import { accountNames } from '../../shared/accountConfig'
+import { normalizeQuality } from '../../shared/translationPolicy'
 import { safeStorage } from 'electron'
 import { normalizeProxy } from '../network/accountProxy'
 import { randomUUID } from 'crypto'
@@ -86,7 +87,7 @@ export class AccountManager {
       const existing = contactLanguages[key]
       // A manual choice always wins over automatic learning.
       if (source === 'auto' && existing?.source === 'manual') return this.publicRecord(accounts[i])
-      contactLanguages[key] = { language, name: name || existing?.name, source, updatedAt: Date.now() }
+      contactLanguages[key] = { ...existing, language, name: name || existing?.name, source, updatedAt: Date.now() }
       accounts[i] = { ...accounts[i], contactLanguages }
       await this.store.write(accounts)
       return this.publicRecord(accounts[i])
@@ -98,6 +99,19 @@ export class AccountManager {
     return { ...result, proxy: result.proxy ? { ...result.proxy, hasPassword: Boolean(proxySecret) } : undefined }
   }
 
+  async updateContactQuality(id: string, conversationId: string, quality: unknown): Promise<AccountRecord> {
+    const key = String(conversationId || '').trim()
+    if (!key || key.length > 300) throw new Error('请先选择联系人。')
+    const value = normalizeQuality(quality)
+    return this.serialized(async () => {
+      const rows = await this.store.read(), record = rows.find(item => item.id === id)
+      if (!record) throw new Error('账号不存在。')
+      record.contactLanguages = { ...record.contactLanguages, [key]: { ...record.contactLanguages?.[key], translationQuality: value, updatedAt: Date.now() } }
+      await this.store.write(rows)
+      return this.publicRecord(record)
+    })
+  }
+
   async proxyPassword(id: string): Promise<string> {
     const record = (await this.store.read()).find(item => item.id === id)
     if (!record?.proxySecret) return ''
@@ -106,9 +120,17 @@ export class AccountManager {
 
   private preparePatch(input: any): Partial<AccountRecord> & { proxySecret?: string } {
     const out: any = {}
+    if (input.signalEngine !== undefined) { if (!['cli','desktop'].includes(input.signalEngine)) throw new Error('Signal 客户端类型无效。'); out.signalEngine = input.signalEngine }
+    if (input.translationQuality !== undefined) out.translationQuality = normalizeQuality(input.translationQuality)
+    if ('historyMode' in input) out.historyMode = ['new','manual','visible'].includes(input.historyMode as string) ? input.historyMode : undefined
+    if (input.runtimeMode !== undefined) {
+      if (!['receiving', 'paused'].includes(input.runtimeMode)) throw new Error('运行模式无效。')
+      out.runtimeMode = input.runtimeMode
+    }
     for (const key of ['pinned','group','label','signalAccount','localLanguage','targetLanguage','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','translationsVisible','zoomFactor','toolbarCollapsed']) {
       if (input[key] !== undefined) out[key] = input[key]
     }
+    if (input.note !== undefined) { if (typeof input.note !== 'string' || input.note.length > 80) throw new Error('账号备注最多 80 个字符。'); out.note = input.note.trim() }
     if (out.group !== undefined) out.group = String(out.group).trim().slice(0, 30)
     if (out.pinned !== undefined) out.pinned = out.pinned === true
     if (out.label !== undefined) { out.label = String(out.label).trim().slice(0, 60); if (!out.label) throw new Error('请输入账号名称。') }

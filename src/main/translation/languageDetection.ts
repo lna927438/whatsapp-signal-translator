@@ -12,24 +12,30 @@ function wordHits(text: string, words: string[]): number {
   return words.reduce((count, word) => count + (padded.includes(` ${word} `) ? 1 : 0), 0)
 }
 
-export function detectContactLanguage(text: string): string | undefined {
-  const value = String(text || '').trim()
-  if (value.length < 2) return undefined
-  if (/[\u3040-\u30ff]/.test(value)) return 'ja'
-  if (/[\uac00-\ud7af]/.test(value)) return 'ko'
-  if (/[\u0e00-\u0e7f]/.test(value)) return 'th'
-  if (/[\u0600-\u06ff]/.test(value)) return 'ar'
-  if (/[\u0400-\u04ff]/.test(value)) return 'ru'
-  if (/[\u3400-\u4dbf\u4e00-\u9fff]/.test(value)) return 'zh-CN'
-
-  let best: { language: string; hits: number } | undefined
-  for (const [language, words] of Object.entries(COMMON)) {
-    const hits = wordHits(value, words)
-    if (!best || hits > best.hits) best = { language, hits }
+export interface LanguageEvidence { language?: string; confidence: 'high' | 'low'; reason: 'script' | 'words' | 'mixed' | 'ambiguous' }
+export function detectLanguageEvidence(text: string): LanguageEvidence {
+  const value = String(text || '').replace(/https?:\/\/\S+|www\.\S+|\S+@\S+\.\S+/g, ' ').trim()
+  const letters = value.match(/\p{L}/gu) || []
+  if (letters.length < 2) return { confidence: 'low', reason: 'ambiguous' }
+  const scripts: Array<[string, RegExp]> = [['ja', /[\u3040-\u30ff]/g], ['ko', /[\uac00-\ud7af]/g], ['th', /[\u0e00-\u0e7f]/g], ['zh-CN', /[\u3400-\u4dbf\u4e00-\u9fff]/g]]
+  for (const [language, pattern] of scripts) {
+    const count = value.match(pattern)?.length || 0
+    if (count < 2) continue
+    const latin = value.match(/[a-z]/gi)?.length || 0
+    if (latin > 0 && count < letters.length * .8) return { confidence: 'low', reason: 'mixed' }
+    if (language === 'zh-CN' && new Set(value.match(/[的了我你是吗在这不有和请]/g) || []).size < 2) return { confidence:'low', reason:'ambiguous' }
+    if (language === 'ja' || count / letters.length > .85) return { language, confidence: 'high', reason: 'script' }
   }
+  const candidates = Object.entries(COMMON).map(([language, words]) => ({ language, hits: wordHits(value, words) })).sort((a,b) => b.hits-a.hits)
+  const [best, second] = candidates
+  // Several distinct words and a clear lead are required; names, abbreviations
+  // and shared Romance-language words are delegated to provider auto-detection.
+  if (!best || best.hits < 3 || best.hits - second.hits < 2 || second.hits >= 2 || /[^\p{Script=Latin}\p{N}\p{P}\p{Z}\p{S}\s]/u.test(value)) return { confidence:'low', reason: second?.hits >= 2 ? 'mixed' : 'ambiguous' }
+  return { language: best.language, confidence:'high', reason:'words' }
+}
 
-  // Avoid learning a contact language from ambiguous one-word messages.
-  const wordCount = value.split(/\s+/).filter(Boolean).length
-  if (!best || best.hits < (wordCount <= 3 ? 2 : 1)) return undefined
-  return best.language
+export function detectContactLanguage(text: string): string | undefined {
+  const evidence = detectLanguageEvidence(text)
+  if (evidence.confidence === 'high') return evidence.language
+  return undefined
 }

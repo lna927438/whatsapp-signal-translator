@@ -1,0 +1,62 @@
+.hello-hero .hero-tagline { display:block; margin-top:14px; font-size:.63em; letter-spacing:-1px; line-height:1.65; }
+.site-footer .footer-links { flex-wrap:wrap; justify-content:flex-end; row-gap:14px; }
+.knowledge-page { max-width:1180px; margin:auto; padding:76px 35px 96px; color:#214d36; }
+.knowledge-heading { max-width:800px; margin-bottom:65px; }
+.knowledge-heading h1 { font-size:clamp(30px,3.5vw,46px); line-height:1.35; letter-spacing:-1.3px; margin:18px 0 22px; }
+.knowledge-heading>p { font-size:16px; line-height:1.9; color:#577166; max-width:720px; }
+.knowledge-heading .hero-actions { display:flex; flex-wrap:wrap; }
+.knowledge-layout { display:grid; grid-template-columns:190px minmax(0,1fr); gap:65px; align-items:start; }
+.knowledge-toc { display:flex; flex-direction:column; gap:6px; position:sticky; top:110px; border-left:1px solid #d9e3cd; padding-left:20px; }
+.knowledge-toc b { font-size:13px; margin-bottom:15px; }
+.knowledge-toc a { color:#577166; font-size:14px; padding:8px 0; }
+.knowledge-toc a:hover { color:#214d36; text-decoration:underline; }
+.knowledge-body { min-width:0; }
+.guide-section { scroll-margin-top:110px; margin-bottom:58px; padding-bottom:36px; border-bottom:1px solid #dce5d2; }
+.guide-section h2,.upgrade-note h2 { font-size:26px; line-height:1.5; font-weight:600; margin:12px 0 23px; }
+.knowledge-page p,.knowledge-page li,.guide-definitions dd { font-size:15px; line-height:1.9; color:#496657; }
+.knowledge-page li { padding-left:5px; margin:12px 0; }
+.knowledge-page ol,.knowledge-page ul { padding-left:24px; }
+.knowledge-body a,.upgrade-note a { color:#2b663e; text-decoration:underline; text-underline-offset:3px; }
+.knowledge-note { background:#eef2e1; border-left:3px solid #8ca75f; padding:17px 20px; border-radius:0 9px 9px 0; }
+.guide-platforms { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.guide-platforms article { border:1px solid #dce5d2; border-radius:15px; padding:23px; background:#fdfdf7; }
+.guide-platforms img { width:34px; height:34px; border-radius:10px; background:#248759; padding:5px; }
+.guide-platforms h3 { font-size:20px; margin:13px 0; }
+.guide-platforms p { font-size:14px; }
+.guide-definitions { margin:20px 0; }
+.guide-definitions>div { padding:17px 0; border-top:1px solid #dce5d2; }
+.guide-definitions dt { font-weight:600; margin-bottom:5px; }
+.guide-definitions dd { margin:0; }
+.guide-section details { padding:20px 0; border-top:1px solid #dce5d2; }
+.guide-section summary { cursor:pointer; font-size:16px; font-weight:600; line-height:1.7; }
+.release-timeline { border-top:1px solid #dce5d2; }
+.release-entry { display:grid; grid-template-columns:180px minmax(0,1fr); gap:40px; padding:40px 0; border-bottom:1px solid #dce5d2; }
+.release-label { display:flex; flex-direction:column; gap:11px; font-size:13px; color:#577166; }
+.release-label b { font-size:27px; color:#214d36; }
+.release-entry h2 { margin:0 0 20px; font-size:25px; line-height:1.4; }
+.release-entry ul { margin:0; }
+.upgrade-note { padding:28px 32px; margin-top:50px; background:#eef2e1; border-radius:16px; }
+.upgrade-note h2 { margin-top:0; }
+@media(max-width:850px) {
+  .knowledge-page { padding:50px 25px 65px; }
+  .knowledge-layout { grid-template-columns:1fr; gap:36px; }
+  .knowledge-toc { position:static; flex-direction:row; flex-wrap:wrap; column-gap:22px; }
+  .knowledge-toc b { width:100%; margin:0; }
+  .knowledge-heading { margin-bottom:40px; }
+}
+@media(max-width:580px) {
+  .knowledge-page { padding:36px 20px 48px; }
+  .knowledge-heading h1 { font-size:30px; letter-spacing:-.6px; }
+  .knowledge-title-detail { display:block; }
+  .knowledge-heading>p { font-size:14px; }
+  .knowledge-page p,.knowledge-page li,.guide-definitions dd { font-size:14px; }
+  .guide-platforms,.release-entry { grid-template-columns:1fr; }
+  .guide-platforms { gap:15px; }
+  .guide-section { margin-bottom:38px; }
+  .guide-section h2,.release-entry h2 { font-size:23px; }
+  .release-entry { gap:22px; padding:30px 0; }
+  .release-label { flex-direction:row; align-items:center; flex-wrap:wrap; }
+  .release-label b { font-size:23px; margin-right:auto; }
+  .upgrade-note { padding:24px; }
+  .site-footer .footer-links { justify-content:flex-start; }
+}

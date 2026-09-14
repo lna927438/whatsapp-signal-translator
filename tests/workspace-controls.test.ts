@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
@@ -20,10 +21,10 @@ test('collapsed sidebar enlarges native chat bounds and smaller windows cannot o
 })
 
 test('HelloDog rename preserves installed legacy user data and uses one stable path for new installs', () => {
-  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/WhatsApp Signal Translator/accounts.json'), '/appdata/WhatsApp Signal Translator')
-  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/whatsapp-signal-translator/outgoing-tasks-v1.json'), '/appdata/whatsapp-signal-translator')
-  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === '/appdata/WhatsApp Signal Translator/Local Storage' || path === '/appdata/whatsapp-signal-translator/accounts.json'), '/appdata/whatsapp-signal-translator')
-  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', () => false), '/appdata/whatsapp-signal-translator')
+  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === join('/appdata','WhatsApp Signal Translator','accounts.json')), join('/appdata','WhatsApp Signal Translator'))
+  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === join('/appdata','whatsapp-signal-translator','outgoing-tasks-v1.json')), join('/appdata','whatsapp-signal-translator'))
+  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', path => path === join('/appdata','WhatsApp Signal Translator','Local Storage') || path === join('/appdata','whatsapp-signal-translator','accounts.json')), join('/appdata','whatsapp-signal-translator'))
+  assert.equal(legacyUserDataPath('/appdata', '/appdata/HelloDog', () => false), join('/appdata','whatsapp-signal-translator'))
 })
 
 test('translation route failover retains the same request and never repeats a provider-auth failure', async () => {
@@ -31,16 +32,16 @@ test('translation route failover retains the same request and never repeats a pr
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), body: init?.body, id: new Headers(init?.headers).get('x-request-id') })
     if (calls.length === 1) throw new TypeError('offline')
-    return Response.json({ translation: '你好' })
+    if (calls.length === 2) throw new TypeError('route unavailable'); return Response.json({state:'completed',response:{requestId:'same-request',translation:'你好',sourceCharacters:5,balanceAfter:95}})
   }
   assert.equal(await new CloudflareProvider('test').translate({ text: 'Hello', targetLanguage: 'zh-CN', requestId: 'same-request' }), '你好')
-  assert.equal(calls.length, 2)
+  assert.equal(calls.length, 3)
   assert.match(calls[0].url, /^https:\/\/api.hellodog.net\//)
-  assert.match(calls[1].url, /^https:\/\/realtime-translator-api.lna927438.workers.dev\//)
-  assert.equal(calls[0].body, calls[1].body); assert.equal(calls[0].id, calls[1].id)
+  assert.match(calls[2].url, /^https:\/\/realtime-translator-api.lna927438.workers.dev\//)
+  assert.equal(calls[1].body,undefined);assert.equal(calls[2].body,undefined);assert.match(calls[2].url,/translation-status\?requestId=same-request/)
   let failures = 0
   globalThis.fetch = async () => { failures++; return Response.json({ error: 'provider_auth', message: '服务端凭据无效' }, { status: 502 }) }
-  await assert.rejects(new CloudflareProvider('test').translate({ text: 'Hello', targetLanguage: 'zh-CN' }), /凭据无效/)
+  await assert.rejects(new CloudflareProvider('test').translate({ text: 'Hello', targetLanguage: 'zh-CN' }), /未扣费/)
   assert.equal(failures, 1)
 })
 

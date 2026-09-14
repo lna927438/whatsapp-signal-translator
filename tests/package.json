@@ -1,11 +1,13 @@
 {
   "name": "translator-regression-tests",
   "private": true,
+  "packageManager": "pnpm@11.5.2",
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --import tsx --test --test-concurrency=1 *.test.ts",
-    "test:postgres": "node --import tsx --test postgres-concurrency.integration.ts"
+    "test:postgres": "node --import tsx --test postgres-concurrency.integration.ts",
+    "test:admin-browser": "node admin-security-browser.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",

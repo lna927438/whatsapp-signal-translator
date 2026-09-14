@@ -37,6 +37,13 @@ export async function cloudRead(path: string, token?: string): Promise<any> {
   }
 }
 
+/** Only for idempotent notification receipts; never used for billing or sends. */
+export async function postNoticeReceipt(token:string,body:{id:string;revision:number;state:string}) {
+  const response=await fetch(cloudBases()[0]+'/api/notices/receipt',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(10000)})
+  if(!response.ok)throw new Error('通知回执暂未同步。')
+  return response.json()
+}
+
 export async function measureCloudRoutes() {
   return Promise.all(CLOUD_ROUTES.map(async item => {
     const start = performance.now()

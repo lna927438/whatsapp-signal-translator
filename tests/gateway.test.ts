@@ -5,10 +5,11 @@ import { database, reset, asRole, rpc, wallet, USER, OTHER } from './fixture.ts'
 
 let db: Awaited<ReturnType<typeof database>>
 let providerCalls = 0
+let providerBody: any
 let provider: () => Promise<Response>
 let loseCompletionResponse = false
 const originalFetch = globalThis.fetch
-const env: Env = { SUPABASE_URL: 'https://database.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public',
+const env: Env = { API_RATE_LIMITER: { limit: async () => ({ success: true }) }, SUPABASE_URL: 'https://database.invalid', SUPABASE_PUBLISHABLE_KEY: 'test-public',
   SUPABASE_SECRET_KEY: 'test-service', OPENAI_API_KEY: 'test-provider', OPENAI_MODEL: 'test-model' }
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
@@ -18,6 +19,7 @@ before(async () => {
     const url = new URL(String(input))
     if ((url.origin === 'https://api.openai.com' && url.pathname === '/v1/responses') || (url.origin === 'https://api.deepseek.com' && url.pathname === '/responses')) {
       providerCalls += 1
+      providerBody = JSON.parse(String(init?.body))
       if (env.TRANSLATION_PROVIDER === 'deepseek') {
         assert.equal(url.origin, 'https://api.deepseek.com')
         assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-deepseek')
@@ -46,7 +48,7 @@ before(async () => {
       let result
       try { result = await rpc(db, name, JSON.parse(String(init?.body))) }
       catch (error: any) { return reply({ message: error.message }, 400) }
-      if (name === 'complete_translation' && loseCompletionResponse) {
+      if (name === 'complete_translation_metered' && loseCompletionResponse) {
         loseCompletionResponse = false
         throw new TypeError('Simulated lost response after successful commit')
       }
@@ -239,4 +241,38 @@ test('DeepSeek insufficient balance is terminal and releases characters without 
   assert.equal(providerCalls, 1)
   assert.deepEqual(await counts(), { debits: 0, usages: 0 })
   assert.deepEqual(await wallet(db), { balance: 100, reserved_characters: 0, lifetime_debited: 0 })
+})
+
+test('quality terms and URL protection settle the original character count and replay without a second debit',async()=>{
+ const text='Acme https://x.test/7'
+ provider=async()=>reply({output_text:providerBody.input,model:'test-model'})
+ const patch={text,quality:{tone:'business',glossary:[{source:'Acme',target:'艾克米'}]}}
+ const first=await request('protected-quality',patch)
+ assert.equal(first.status,200)
+ const result:any=await first.json();assert.equal(result.translation,'艾克米 https://x.test/7');assert.equal(result.sourceCharacters,Array.from(text).length)
+ assert.ok(providerBody.instructions.includes('business'));assert.ok(!providerBody.input.includes('https://'))
+ assert.equal((await request('protected-quality',patch)).status,200);assert.equal(providerCalls,1)
+ assert.deepEqual(await counts(),{debits:1,usages:1})
+ const status=await worker.fetch(new Request('https://worker.invalid/api/translation-status?requestId=protected-quality',{headers:{Authorization:'Bearer test-user'}}),env)
+ assert.equal((await status.json() as any).response.requestId,'protected-quality')
+ const snapshot=await worker.fetch(new Request('https://worker.invalid/api/account-snapshot',{headers:{Authorization:'Bearer test-user'}}),env)
+ const data:any=await snapshot.json();assert.equal(data.reconciliation.translationDebit,Array.from(text).length);assert.equal(data.reconciliation.duplicateDebits,0)
+})
+
+test('provider dropping a protected number fails the request without any debit',async()=>{
+ const first=await request('dropped-number',{text:'Please call 5551234'})
+ assert.equal(first.status,502);assert.deepEqual(await counts(),{debits:0,usages:0})
+ assert.equal((await wallet(db)).balance,100);assert.equal((await wallet(db)).reserved_characters,0)
+})
+
+test('an untranslated English sentence is rejected before character settlement and replay cannot debit it',async()=>{
+ provider=async()=>reply({output_text:"You're very direct, George!",model:'test-model',usage:{input_tokens:20,output_tokens:8,total_tokens:28}});
+ const body={text:"You're very direct, George!",targetLanguage:'zh-CN'};
+ assert.equal((await request('wrong-language',body)).status,502);
+ assert.deepEqual(await counts(),{debits:0,usages:0});
+ assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0});
+ assert.equal((await request('wrong-language',body)).status,502);assert.equal(providerCalls,1);
+ provider=async()=>reply({output_text:'你很直接，George！',model:'test-model'});
+ assert.equal((await request('recovered-language',body)).status,200);
+ assert.deepEqual(await counts(),{debits:1,usages:1});
 })
