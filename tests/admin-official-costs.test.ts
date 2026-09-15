@@ -1,0 +1,150 @@
+import {test,before} from 'node:test'
+import assert from 'node:assert/strict'
+import {JSDOM} from 'jsdom'
+import {currentBillPeriod,officialBillSummary,sumOfficialAmounts,type BillPeriod} from '../website/src/admin/officialBills.ts'
+import {adminCostsBundle,balanceFixture,costsFixture,officialBillFixture} from './admin-costs-fixture.ts'
+const period:BillPeriod={from:'2026-09-01',to:'2026-09-15',timezone:'UTC',provider:''}
+function fixture(selected=period){const data=costsFixture(selected);data.officialBills=[officialBillFixture('openai','0.0329117',data),officialBillFixture('deepseek','0.000000000009',data)];return data}
+test('official totals add exact decimal strings, including zero and credits, without Number rounding',()=>{
+  assert.equal(sumOfficialAmounts(['999999999.999999999999','0.000000000001']),'1000000000')
+  assert.equal(sumOfficialAmounts(['0.0329117','0.000000000009']),'0.032911700009')
+  assert.equal(sumOfficialAmounts(['0.1','0.2','-0.3']),'0')
+  assert.equal(sumOfficialAmounts(['-0.000000000001','0']),'-0.000000000001')
+  for(const invalid of [0.1,'1e-12','NaN','0.0000000000001',null,undefined])assert.equal(sumOfficialAmounts(['1',invalid]),null)
+  assert.equal(sumOfficialAmounts([]),null)
+})
+test('complete official total requires all selected providers, and an actual zero snapshot is different from missing',()=>{
+  const data=fixture();assert.equal(officialBillSummary(data,period).total,'0.032911700009')
+  data.officialBills.pop();assert.deepEqual(officialBillSummary(data,period).missing,['deepseek']);assert.equal(officialBillSummary(data,period).total,null);assert.equal(officialBillSummary(data,period).partial,'0.0329117')
+  data.officialBills[0].official_usd_exact='0';assert.equal(officialBillSummary(data,period).partial,'0');assert.equal(officialBillSummary(data,period).complete,false)
+  data.officialBills.push(officialBillFixture('deepseek','0',data));assert.equal(officialBillSummary(data,period).total,'0');assert.equal(officialBillSummary(data,period).complete,true)
+  assert.equal(officialBillSummary({...data,officialBills:[]},period).partial,null)
+})
+test('provider filtering never combines the unselected provider or local token estimates',()=>{
+  const data=fixture()
+  assert.equal(officialBillSummary(data,{...period,provider:'openai'}).total,'0.0329117')
+  assert.equal(officialBillSummary(data,{...period,provider:'deepseek'}).total,'0.000000000009')
+  data.officialBills[0].official_usd_exact=undefined;assert.equal(officialBillSummary(data,{...period,provider:'openai'}).total,null)
+})
+test('native provider boundaries use the same calendar dates; business timezone and nearby periods cannot relabel an official bill',()=>{
+  const china={...period,timezone:'Asia/Shanghai'},data=fixture(china)
+  assert.equal(data.from,'2026-08-31T16:00:00.000Z');assert.equal(data.toExclusive,'2026-09-15T16:00:00.000Z')
+  assert.equal(data.officialBills[0].period_from,'2026-09-01T00:00:00.000Z');assert.equal(data.officialBills[1].period_from,'2026-08-31T16:00:00.000Z')
+  assert.equal(officialBillSummary(data,china).complete,true)
+  assert.equal(officialBillSummary(data,period).partial,null)
+  data.officialBills[0].period_from='2026-08-31T16:00:00Z';assert.deepEqual(officialBillSummary(data,china).missing,['openai'])
+  data.officialBills[1].timezone='UTC';assert.equal(officialBillSummary(data,china).partial,null)
+  assert.equal(officialBillSummary(fixture(),{...period,to:'2026-09-14'}).partial,null)
+  assert.equal(officialBillSummary(fixture(),{...period,from:'2026-02-30'}).partial,null)
+  const equivalent=fixture();equivalent.officialBills[0].period_from='2026-09-01T00:00:00+00:00';assert.equal(officialBillSummary(equivalent,period).complete,true)
+  const wrongBasis=fixture();wrongBasis.officialBillingBasis.from='2026-08-01';assert.equal(officialBillSummary(wrongBasis,period).partial,null)
+  const wrongZone=fixture();wrongZone.officialBillingBasis.timezones.deepseek='UTC';assert.equal(officialBillSummary(wrongZone,period).partial,null)
+})
+test('old account, unverified scope, incomplete period, wrong currency, duplicates or missing timestamps never become official totals',()=>{
+  for(const field of ['currentAccount','periodComplete','currency','fetched_at']){
+    const data=fixture();delete data.officialBills[0][field];assert.deepEqual(officialBillSummary(data,period).missing,['openai'])
+  }
+  for(const changes of [{currentAccount:false},{periodComplete:false},{currency:'CNY'},{fetched_at:'yesterday'},{source:'local_estimate'}]){
+    const data=fixture();Object.assign(data.officialBills[0],changes);assert.deepEqual(officialBillSummary(data,period).missing,['openai'])
+  }
+  const duplicate=fixture();duplicate.officialBills.push({...duplicate.officialBills[0]});assert.equal(officialBillSummary(duplicate,period).total,null)
+})
+
+let bundle:string;before(async()=>{bundle=await adminCostsBundle()})
+const tick=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0))}
+async function mount(options:{access?:boolean;now?:()=>number;request?:(path:string,body?:unknown)=>unknown}={}){
+  const dom=new JSDOM('<!doctype html><html><head></head><body><div id="app"></div></body></html>',{url:'https://admin.example.invalid/admin/costs',runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window as any,calls:string[]=[],timers=new Map<number,{fn:()=>void;ms:number}>();let timerId=0
+  if(options.now){const RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[options.now!()]))}static now(){return options.now!()}}}
+  w.__officialAccess=options.access!==false;w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id)
+  Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
+  w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
+  w.eval(bundle);await tick()
+  return {w,calls,card:()=>w.document.querySelector('.adm-official-cost'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
+}
+test('main card displays only official totals; missing provider shows partial and local evidence stays collapsed',async()=>{
+  const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data)]
+  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  try{
+    assert.match(h.card().textContent,/尚缺官方账单/);assert.match(h.card().textContent,/已同步部分：\$0\.0329117/);assert.match(h.card().textContent,/待同步：DeepSeek/)
+    assert.doesNotMatch(h.card().textContent,/0\.123456789012|987654321/)
+    assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/0\.123456789012/)
+    assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/官方账单不能直接分摊到每个用户/)
+    data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(10000);await tick()
+    assert.match(h.card().textContent,/\$0\.032911700009/);assert.doesNotMatch(h.card().textContent,/尚缺官方账单/);assert.match(h.body(),/官方账单 · 手动录入/)
+    data.officialBills=[];h.run(10000);await tick();assert.match(h.card().textContent,/尚缺官方账单/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
+  }finally{h.close()}
+})
+test('official sync refreshes the primary card immediately even when a background read is already in flight',async()=>{
+  let resolveSync!:(value:unknown)=>void,resolveRead!:(value:unknown)=>void,count=0
+  const old=costsFixture();old.officialBills=[officialBillFixture('openai','0.1',old)]
+  const updated=costsFixture();updated.officialBills=[officialBillFixture('openai','0.2',updated),officialBillFixture('deepseek','0.000000000001',updated)]
+  const h=await mount({request:path=>path.startsWith('costs?')?(++count===1?old:count===2?new Promise(resolve=>{resolveRead=resolve}):updated):path==='billing-sync'?new Promise(resolve=>{resolveSync=resolve}):path==='provider-balance'?balanceFixture():{configured:true}})
+  try{
+    const button=[...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单') as HTMLButtonElement
+    button.click();await tick();h.run(10000);await tick();resolveSync({message:'已同步'});await tick();resolveRead(old);await tick()
+    assert.equal(count,3);assert.match(h.card().textContent,/\$0\.200000000001/);assert.doesNotMatch(h.card().textContent,/尚缺官方账单/)
+  }finally{h.close()}
+})
+test('default current-month queries follow UTC midnight and month rollover; manually chosen periods stay fixed',async()=>{
+  let now=Date.parse('2026-09-30T23:59:58Z')
+  assert.deepEqual(currentBillPeriod('Asia/Shanghai',now),{from:'2026-10-01',to:'2026-10-01'})
+  const h=await mount({now:()=>now});try{
+    assert.match(h.calls.find(path=>path.startsWith('costs?'))!,/from=2026-09-01&to=2026-09-30/)
+    const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+    assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-09-01&to=2026-09-30/,'A business timezone change cannot move the default official calendar month')
+    now=Date.parse('2026-10-01T00:00:03Z');h.run(10000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-10-01&to=2026-10-01/)
+    const inputs=h.w.document.querySelectorAll('input[type=date]');inputs[0].value='2026-08-01';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[1].value='2026-08-31';inputs[1].dispatchEvent(new h.w.Event('input',{bubbles:true}))
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+    now=Date.parse('2026-10-02T00:00:03Z');h.run(10000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-08-01&to=2026-08-31/)
+  }finally{h.close()}
+})
+test('OpenAI current-day sync delay remains visible after GMT+8 midnight under a GMT+8 business filter',async()=>{
+  const now=Date.parse('2026-09-15T16:30:00Z')
+  const h=await mount({now:()=>now,request:path=>{
+    if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(now):{configured:true}
+    const query=new URLSearchParams(path.slice(6)),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!});data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.3',data)];data.officialBills.forEach(bill=>{bill.fetched_at=new Date(now-11*60000).toISOString()});return data
+  }})
+  try{
+    const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+    assert.match(h.card().textContent,/\$0\.50/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/to=2026-09-15/)
+  }finally{h.close()}
+})
+test('future samples are rejected, and an old current-period API snapshot is visibly delayed rather than called current',async()=>{
+  const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.3',data)]
+  const selected={from:data.from.slice(0,10),to:new Date(Date.parse(data.toExclusive)-86400000).toISOString().slice(0,10),timezone:'UTC',provider:''}
+  data.officialBills[0].fetched_at=new Date(Date.now()+120000).toISOString();assert.equal(officialBillSummary(data,selected).total,null)
+  data.officialBills[0].fetched_at=data.snapshotAt;assert.equal(officialBillSummary(data,selected,Date.now()-86400000).total,'0.5','Use the server snapshot clock when the local computer clock is behind')
+  data.officialBills[0].fetched_at=new Date(Date.now()-11*60000).toISOString()
+  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  try{assert.match(h.card().textContent,/\$0\.50/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.card().textContent,/本次汇总最早采集/)}finally{h.close()}
+})
+test('provider query updates the official card only after that query succeeds and excludes other channels',async()=>{
+  const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data),officialBillFixture('deepseek','0.000000000009',data)]
+  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  try{
+    const select=h.w.document.querySelectorAll('select')[1];select.value='deepseek';select.dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
+    assert.match(h.card().textContent,/\$0\.032911700009/)
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.card().textContent,/\$0\.000000000009/);assert.doesNotMatch(h.card().textContent,/OpenAI \+ DeepSeek/)
+  }finally{h.close()}
+})
+test('non-owner cannot see official billing cards or fetch owner endpoints, including after an access change',async()=>{
+  const data=costsFixture();data.officialBills=[officialBillFixture('openai','18.1',data),officialBillFixture('deepseek','18.2',data)]
+  const h=await mount({access:false,request:path=>path.startsWith('costs?')?data:{configured:true}})
+  try{assert.equal(h.card(),null);assert.doesNotMatch(h.body(),/官方账单明细|\$36\.30/);assert.ok(h.calls.every(path=>path.startsWith('costs?')))}finally{h.close()}
+  const owner=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  try{assert.match(owner.card().textContent,/\$36\.30/);owner.w.__setAccess(false);await tick();assert.equal(owner.card(),null);assert.doesNotMatch(owner.body(),/\$36\.30/)}finally{owner.close()}
+})
+test('business GMT+8 filtering does not disable native UTC sync or change each platform manual billing timezone',async()=>{
+  const h=await mount({request:path=>{
+    if(path.startsWith('costs?')){const query=new URLSearchParams(path.slice(6));return costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})}
+    return path==='provider-balance'?balanceFixture():{configured:true}
+  }})
+  try{
+    const select=h.w.document.querySelectorAll('select')[0];select.value='Asia/Shanghai';select.dispatchEvent(new h.w.Event('change',{bubbles:true}))
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+    const sync=[...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单') as HTMLButtonElement;assert.equal(sync.disabled,false)
+    const manual=[...h.w.document.querySelectorAll('button')].filter((button:any)=>button.textContent==='录入账单核对') as HTMLButtonElement[]
+    manual[0].click();await tick();assert.equal(h.w.__reconciled.timezone,'UTC');manual[1].click();await tick();assert.equal(h.w.__reconciled.timezone,'Asia/Shanghai')
+    assert.match(h.body(),/实际时间边界不同/);assert.doesNotMatch(h.body(),/切换为 UTC 后/)
+  }finally{h.close()}
+})

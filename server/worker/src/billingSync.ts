@@ -22,6 +22,10 @@ function configured(env:BillingSyncEnv){
   const reason=!adminKey?'admin_key_missing':!projectPattern.test(projectId)||!apiKeyIds.length||apiKeyIds.length>20||apiKeyIds.some(id=>!keyPattern.test(id))?'scope_missing':null
   return {projectId,apiKeyIds,adminKey,reason}
 }
+export function currentOpenAIBillingScope(env:BillingSyncEnv){
+  const scope=configured(env)
+  return scope.reason?null:{projectId:scope.projectId,apiKeyIds:scope.apiKeyIds}
+}
 export function billingSyncStatus(env:BillingSyncEnv){
   const c=configured(env)
   return {provider:'openai',configured:c.reason===null,reason:c.reason,timezone:'UTC',

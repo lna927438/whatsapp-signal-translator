@@ -30,6 +30,12 @@ export function parseDeepSeekBalance(data:unknown){
  return {available:payload.is_available,balances}
 }
 
+export async function deepSeekCredentialDigest(keyValue:string|undefined):Promise<string|null>{
+ const key=String(keyValue||'').trim();if(!key)return null
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('deepseek-balance-v1:'+key))
+ return Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('')
+}
+
 async function balanceRpc(env:BillingSyncEnv,name:string,args:Record<string,unknown>){
  const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},
   body:JSON.stringify(args),redirect:'manual',signal:AbortSignal.timeout(5000)})
@@ -47,8 +53,7 @@ export async function refreshDeepSeekBalance(env:BillingSyncEnv):Promise<DeepSee
  const key=String(env.DEEPSEEK_API_KEY||'').trim();if(!key)return emptyStatus()
  // A credential change invalidates the displayed account snapshot. The digest
  // stays in the private ledger and is never returned to an admin browser.
- const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('deepseek-balance-v1:'+key))
- const scope=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join(''),token=crypto.randomUUID()
+ const scope=await deepSeekCredentialDigest(key),token=crypto.randomUUID()
  const args={p_scope:scope,p_token:token}
  const claim=await balanceRpc(env,'claim_deepseek_balance_refresh',args)
  if(!claim.claimed)return publicStatus(claim)

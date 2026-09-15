@@ -1,6 +1,7 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
 import { billingSyncStatus, syncOfficialCosts, BillingSyncError, type BillingSyncEnv } from './billingSync'
 import {refreshDeepSeekBalance} from './deepseekBalance'
+import {currentOfficialBillScopes,officialReportingBasis} from './officialBillScopes'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
@@ -62,14 +63,14 @@ export function validateMutation(body: unknown) {
   if (!uuid.test(operationId)) fail()
   const d=body.data
   const keys:Record<string,string[]>={
-    'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference','timezone'],
+    'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference','timezone','provisional'],
     'wallet.adjust':['amount','expectedBalance'], 'translation.refund':[],
     'user.update':['status','plan_code'], 'user.note':['note','expectedRevision'], 'order.create':['plan_code'], 'order.settle':['reference'], 'order.cancel':[],
     'plan.save':['name','characters','price','currency','active'], 'role.set':['role'],
     'version.save':['channel','url','sha256','notes','active'], 'announcement.save':['title','body','level','active','starts_at','ends_at'],
     'notice.save':['title','body','level','active','starts_at','ends_at','popup','audience','recipient','action','expectedRevision']
   }
-  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&k==='timezone'))) fail()
+  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&['timezone','provisional'].includes(k)))) fail()
   if (!['plan.save','version.save','cost.reconcile'].includes(action) && !uuid.test(target)) fail()
   if ('active' in d && typeof d.active !== 'boolean') fail()
   if ('plan_code' in d && !/^[a-z][a-z0-9_-]{0,39}$/.test(string(d.plan_code,1,40))) fail()
@@ -77,7 +78,8 @@ export function validateMutation(body: unknown) {
     case 'wallet.add': integer(d.amount,1,1000000000);break
     case 'cost.reconcile':
       choice(target,['deepseek','openai']);string(d.reference,3,200)
-      if(d.timezone!==undefined)choice(d.timezone,['UTC','Asia/Shanghai'])
+      if(d.timezone!==undefined)choice(d.timezone,[target==='openai'?'UTC':'Asia/Shanghai'])
+      if(d.provisional!==undefined)choice(d.provisional,[true,false])
       if(!/^-?\d{1,9}(\.\d{1,12})?$/.test(string(d.officialUsd,1,24)))fail()
       for(const k of ['from','to'])if(!/^\d{4}-\d{2}-\d{2}$/.test(string(d[k],10,10))||!Number.isFinite(Date.parse(String(d[k]))))fail()
       if(String(d.to)<String(d.from))fail()
@@ -193,6 +195,15 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
 }
 
 export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_KEY:string;DEEPSEEK_API_KEY?:string}):AdminServices {
+  async function call(name:string,args:JsonObject){
+    const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify(args),redirect:'manual',signal:AbortSignal.timeout(15000)})
+    if(!result.ok){
+      const error=await result.json().catch(()=>({})) as {message?:string;code?:string}
+      if(error.code==='23505')throw new AdminError('duplicate_reference')
+      throw new AdminError(error.message && adminErrors[error.message]?error.message:'unavailable')
+    }
+    return result.json()
+  }
   return {
     origins:['https://admin.hellodog.net','https://hellodog.net','https://www.hellodog.net'],
     billingStatus(){return billingSyncStatus(env)},
@@ -222,13 +233,25 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
       return identity
     },
     async rpc(name,args){
-      const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(15000)})
-      if(!result.ok){
-        const error=await result.json().catch(()=>({})) as {message?:string;code?:string}
-        if(error.code==='23505')throw new AdminError('duplicate_reference')
-        throw new AdminError(error.message && adminErrors[error.message]?error.message:'unavailable')
+      if(name==='admin_mutate'&&args.p_action==='cost.reconcile'){
+        const scopes=await currentOfficialBillScopes(env),provider=args.p_target
+        if(provider!=='openai'&&provider!=='deepseek')throw new AdminError('invalid_request')
+        if(!scopes[provider])throw new AdminError('billing_not_configured')
+        const timezone=provider==='openai'?'UTC':'Asia/Shanghai',statement=args.p_data
+        if(!object(statement)||(statement.timezone!==undefined&&statement.timezone!==timezone))throw new AdminError('invalid_request')
+        return call('record_scoped_official_statement',{p_actor:args.p_actor,p_operation:args.p_operation,p_provider:provider,p_reason:args.p_reason,p_data:{...statement,timezone},p_scope:scopes[provider]})
       }
-      return result.json()
+      const data=await call(name,args)
+      if(name==='admin_read'&&args.p_kind==='costs'&&object(data)&&'officialBills' in data){
+        const filter=object(args.p_filter)?args.p_filter:{},basis=officialReportingBasis(filter),scopes=await currentOfficialBillScopes(env)
+        // Provider statements use their native reporting day boundaries. This
+        // is an explicitly labelled calendar-period sum, not one UTC interval.
+        const selected=(['openai','deepseek'] as const).filter(provider=>!filter.userId&&(!filter.provider||filter.provider===provider)&&scopes[provider])
+        const bills=await Promise.all(selected.map(provider=>call('read_current_official_bills',{p_actor:args.p_actor,
+          p_filter:{from:basis.from,to:basis.to,provider,timezone:basis.timezones[provider]},p_scopes:scopes})))
+        return {...data,officialBills:bills.flat(),officialBillingBasis:basis}
+      }
+      return data
     }
   }
 }

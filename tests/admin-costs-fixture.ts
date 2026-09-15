@@ -10,7 +10,7 @@ export async function adminCostsBundle():Promise<string> {
   const result=await build({stdin:{sourcefile:'admin-costs-fixture.ts',resolveDir:admin,contents:`
     import {createApp,h,reactive} from 'vue';import AdminCosts from './AdminCosts.vue';
     const props=reactive({officialAccess:window.__officialAccess!==false});
-    const app=createApp({render:()=>h(AdminCosts,props)});app.mount('#app');
+    const app=createApp({render:()=>h(AdminCosts,{...props,onReconcile:value=>window.__reconciled=value})});app.mount('#app');
     window.__setAccess=value=>props.officialAccess=value;window.__dispose=()=>app.unmount();
   `},bundle:true,write:false,format:'iife',platform:'browser',target:'es2022',define:{'process.env.NODE_ENV':'"production"','__VUE_OPTIONS_API__':'true','__VUE_PROD_DEVTOOLS__':'false','__VUE_PROD_HYDRATION_MISMATCH_DETAILS__':'false'},plugins:[{
     name:'real-admin-costs-with-fake-api',setup(build:any){
@@ -36,4 +36,11 @@ export function balanceFixture(now=Date.now()) {
   return {provider:'deepseek',available:true,balances:[{currency:'USD',total:'1234.123456789012',granted:'0.000000000001',paid:'1234.123456789011'},{currency:'CNY',total:'0.000000000009',granted:'0',paid:'0.000000000009'}],fetchedAt:new Date(now).toISOString(),snapshotAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),stale:false,
     sync:{status:'fresh',lastAttemptAt:new Date(now).toISOString(),lastError:null,lastErrorAt:null,nextRefreshAt:new Date(now+30000).toISOString(),refreshIntervalSeconds:30,staleAfterSeconds:120}}
 }
-export function costsFixture(){return {snapshotAt:new Date().toISOString(),totals:{charged_characters:23541,refunded_characters:0,known_cost_usd_exact:'0.123456789012',unpriced_requests:0},users:[],days:[],providers:[{provider:'openai',known_cost_usd_exact:'0.123456789011'},{provider:'deepseek',known_cost_usd_exact:'0.000000000001'}],officialBills:[],providerBalance:{balances:[{currency:'USD',total:'999999999999'}],fetched_at:'2020-01-01T00:00:00Z'}}}
+export function costsFixture(period?:{from:string;to:string;timezone:string}){
+  const today=new Date().toISOString().slice(0,10),selected=period||{from:today.slice(0,8)+'01',to:today,timezone:'UTC'},offset=selected.timezone==='Asia/Shanghai'?28800000:0
+  return {from:new Date(Date.parse(selected.from+'T00:00:00Z')-offset).toISOString(),toExclusive:new Date(Date.parse(selected.to+'T00:00:00Z')+86400000-offset).toISOString(),timezone:selected.timezone,snapshotAt:new Date().toISOString(),officialBillingBasis:{kind:'provider_reporting_period',from:selected.from,to:selected.to,timezones:{openai:'UTC',deepseek:'Asia/Shanghai'}},totals:{charged_characters:23541,refunded_characters:0,known_cost_usd_exact:'0.123456789012',unpriced_requests:0},users:[],days:[],providers:[{provider:'openai',known_cost_usd_exact:'0.123456789011'},{provider:'deepseek',known_cost_usd_exact:'0.000000000001'}],officialBills:[] as Record<string,unknown>[],providerBalance:{balances:[{currency:'USD',total:'999999999999'}],fetched_at:'2020-01-01T00:00:00Z'}}
+}
+export function officialBillFixture(provider:'openai'|'deepseek',amount:string,period=costsFixture()){
+  const offset=provider==='deepseek'?28800000:0,basis=period.officialBillingBasis
+  return {id:provider+'-fixture',provider,official_usd_exact:amount,official_usd:987654321,period_from:new Date(Date.parse(basis.from+'T00:00:00Z')-offset).toISOString(),period_to:new Date(Date.parse(basis.to+'T00:00:00Z')+86400000-offset).toISOString(),timezone:provider==='openai'?'UTC':'Asia/Shanghai',source:provider==='openai'?'openai_costs_api':'manual_statement',fetched_at:new Date().toISOString(),provisional:true,currentAccount:true,periodComplete:true,currency:'USD'}
+}
