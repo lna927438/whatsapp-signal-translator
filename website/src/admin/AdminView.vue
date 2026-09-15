@@ -7,6 +7,7 @@ import { request, readPage, login, logout, localPreview, sections, roleNames, ca
   ApiError,savePending,loadPending,clearPending,adminMfaStatus,type AdminSession,type Row,type Operation } from './client'
 import './admin.css'
 import AdminCosts from './AdminCosts.vue'
+import AdminOverviewBilling from './AdminOverviewBilling.vue'
 import AdminAccount from './AdminAccount.vue'
 import AdminMfa from './AdminMfa.vue'
 import AdminSecurity from './AdminSecurity.vue'
@@ -27,6 +28,7 @@ const rows=ref<Row[]>([]),overview=ref<Row>({}),snapshot=ref(''),hasMore=ref(fal
 const detail=ref<Row|null>(null),detailBusy=ref(false),detailError=ref('')
 const profile=computed(()=>detail.value?.profile as Row||{}),wallet=computed(()=>detail.value?.wallet as Row||{})
 const pending=ref<Operation|null>(null)
+const overviewBilling=ref<InstanceType<typeof AdminOverviewBilling>|null>(null)
 let loadRevision=0,detailRevision=0
 let refreshTimer:ReturnType<typeof setInterval>|undefined
 const write=(scope:'users'|'billing'|'content'|'roles')=>Boolean(session.value&&canWrite(session.value.role,scope))
@@ -55,7 +57,7 @@ async function load(){
   if(!canView(session.value.role,active.value)||!workingSections.includes(active.value)){await router.replace('/admin/overview');return}
   if(['costs','account','security'].includes(active.value)){busy.value=false;return}
   try{
-    if(active.value==='overview'){const data=await request<Row>('overview');if(revision===loadRevision){overview.value=data;snapshot.value=s(data,'snapshotAt')}}
+    if(active.value==='overview'){const [data]=await Promise.all([request<Row>('overview'),overviewBilling.value?.refresh()]);if(revision===loadRevision){overview.value=data;snapshot.value=s(data,'snapshotAt')}}
     else {const data=await readPage(active.value,{q:query.value,status:status.value,offset:offset.value});if(revision===loadRevision){rows.value=data.rows;hasMore.value=data.hasMore;snapshot.value=data.snapshotAt}}
   }catch(e){if(revision===loadRevision){error.value=message(e);if(e instanceof ApiError&&['unauthorized','admin_forbidden'].includes(e.code)){session.value=null;rows.value=[];overview.value={};detail.value=null;loginError.value=message(e)}}}
   finally{if(revision===loadRevision)busy.value=false}
@@ -212,10 +214,10 @@ onUnmounted(()=>{++loadRevision;++detailRevision;clearInterval(refreshTimer);win
           <p v-if="notice" class="adm-notice" role="status">{{ notice }}<button aria-label="关闭提示" @click="notice=''">×</button></p>
           <div v-if="error" class="adm-error" role="alert">{{ error }}<button class="adm-button" @click="load">重新加载</button><small v-if="snapshot">下方是上次成功读取的数据：{{ date(snapshot) }}</small></div>
           <template v-if="active==='overview'">
-            <section class="adm-stat-grid"><article><span>客户端用户</span><strong>{{ fmt(overview.users) }}</strong><small>{{fmt(overview.recentClients)}} 位在最近 2 分钟联机</small></article><article><span>今日已扣字符</span><strong>{{fmt(overview.todayCharacters)}}</strong><small>GMT+8 · 云端实际流水</small></article><article><span>实际 API Tokens</span><strong>{{tokens((overview.costs as Row)?.total_tokens)}}</strong><small>{{fmt((overview.costs as Row)?.metered_requests)}} 条请求有用量回执</small></article><article><span>已核算 API 成本 · USD</span><strong class="adm-cost-value">{{usd((overview.costs as Row)?.known_cost_usd_exact??(overview.costs as Row)?.known_cost_usd??(overview.costs as Row)?.cost_usd)}}</strong><small>{{fmt((overview.costs as Row)?.unpriced_requests)}} 条尚未核算</small></article></section>
-            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink to="/admin/costs">查看 Tokens 与费用 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>每 5 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{fmt(overview.pendingTranslations)}} 条</dd></div><div><dt>翻译对账异常</dt><dd>{{fmt((overview.costs as Row)?.mismatches)}} 条</dd></div></dl><p class="adm-help">费用缺少完整用量时显示未核算。套餐与支付暂不启用。</p></article></section>
+            <section class="adm-stat-grid"><article><span>客户端用户</span><strong>{{ fmt(overview.users) }}</strong><small>{{fmt(overview.recentClients)}} 位在最近 2 分钟联机</small></article><article><span>今日已扣字符</span><strong>{{fmt(overview.todayCharacters)}}</strong><small>今日 GMT+8 · 云端实际流水</small></article><AdminOverviewBilling ref="overviewBilling" :key="session.id+':'+session.role" :identity="session.id+':'+session.role" :can-read-costs="canView(session.role,'costs')" :official-access="session.role==='owner'" /></section>
+            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink v-if="canView(session.role,'costs')" to="/admin/costs">查看用量与官方费用 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>每 5 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{fmt(overview.pendingTranslations)}} 条</dd></div><div><dt>翻译对账异常</dt><dd>{{fmt((overview.costs as Row)?.mismatches)}} 条</dd></div></dl><p class="adm-help">今日字符按 GMT+8 统计；本月字符按 UTC 统计。官方金额按各平台原生账期汇总，缺少账单不会按零补齐。</p></article></section>
           </template>
-          <AdminCosts v-else-if="active==='costs'" :official-access="session.role==='owner'" @reconcile="reconcile" />
+          <AdminCosts v-else-if="active==='costs'" :key="session.id+':'+session.role" :official-access="session.role==='owner'" @reconcile="reconcile" />
           <AdminAccount v-else-if="active==='account'" :session="session" />
           <AdminSecurity v-else-if="active==='security'" />
           <section v-else class="adm-card adm-list-card" :aria-busy="busy">

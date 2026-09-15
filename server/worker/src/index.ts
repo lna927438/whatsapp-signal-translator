@@ -520,7 +520,8 @@ export default {
       // detailed statements. Billing is separate from translation requests.
       console.info(JSON.stringify({ event: 'billing_sync', providers: Object.entries(result).map(([provider, value]) => ({ provider,
         ok: provider === 'deepseek' && 'sync' in value ? value.sync.status === 'fresh' : !('error' in value),
-        skipped: 'skipped' in value || (provider === 'deepseek' && 'sync' in value && value.sync.status === 'not_configured') })) }))
+        skipped: 'skipped' in value || (provider === 'deepseek' && 'sync' in value && value.sync.status === 'not_configured'),
+        errorCode: 'error' in value ? value.error : provider === 'deepseek' && 'sync' in value ? value.sync.lastError : null })) }))
       return
     }
     // Ignore retired or unexpected triggers while cloud configuration propagates.

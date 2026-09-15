@@ -10,7 +10,7 @@ export interface BillingSyncEnv {
   SUPABASE_SECRET_KEY: string
 }
 export class BillingSyncError extends Error {
-  constructor(readonly code: 'billing_not_configured'|'billing_permission'|'billing_data_incomplete'|'billing_unavailable'|'invalid_request') { super(code) }
+  constructor(readonly code: 'billing_not_configured'|'billing_account_deactivated'|'billing_permission'|'billing_data_incomplete'|'billing_unavailable'|'invalid_request') { super(code) }
 }
 const invalid = (): never => { throw new BillingSyncError('billing_data_incomplete') }
 const projectPattern=/^proj_[A-Za-z0-9_-]{1,160}$/
@@ -31,6 +31,31 @@ export function billingSyncStatus(env:BillingSyncEnv){
   return {provider:'openai',configured:c.reason===null,reason:c.reason,timezone:'UTC',
     officialSource:'https://platform.openai.com/usage',provisional:true,
     message:c.reason==='admin_key_missing'?'尚未连接官方账单读取权限。':c.reason==='scope_missing'?'尚未指定 HelloDog 的账单范围。':'已连接账单读取配置，实际权限将在同步时核验。'}
+}
+const syncMessages={
+ billing_account_deactivated:'OpenAI 官方账单账号已停用，无法同步。请通过官方申诉恢复；保留上次金额。',
+ billing_permission:'OpenAI 官方账单读取权限不足，请核对权限；保留上次金额。',
+ billing_data_incomplete:'OpenAI 官方账单数据尚不完整，保留上次金额，稍后再同步。',
+ billing_unavailable:'OpenAI 官方账单暂时无法同步，保留上次金额。'
+} as const
+async function syncStateRpc(env:BillingSyncEnv,name:string,body:unknown){
+ const response=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},
+  body:JSON.stringify(body),redirect:'manual',signal:AbortSignal.timeout(3000)})
+ if(!response.ok)throw new BillingSyncError('billing_unavailable')
+ return response.json() as Promise<Record<string,unknown>>
+}
+export async function billingSyncStatusWithHistory(env:BillingSyncEnv){
+ const status=billingSyncStatus(env),scope=currentOpenAIBillingScope(env)
+ const unknown={status:'unknown',lastAttemptAt:null,lastSuccessAt:null,errorCode:null,message:status.configured?'同步状态暂时无法读取。':status.message}
+ if(!scope)return {...status,sync:unknown}
+ try{
+  const sync=await syncStateRpc(env,'read_openai_billing_sync',{p_scope:scope})
+  const code=typeof sync.errorCode==='string'&&Object.hasOwn(syncMessages,sync.errorCode)?sync.errorCode as keyof typeof syncMessages:null
+  if(!['fresh','error','unknown'].includes(String(sync.status))||(sync.status==='error')!==(code!==null))throw new BillingSyncError('billing_unavailable')
+  const time=(value:unknown)=>typeof value==='string'&&Number.isFinite(Date.parse(value))?value:null
+  return {...status,sync:{status:sync.status,lastAttemptAt:time(sync.lastAttemptAt),lastSuccessAt:time(sync.lastSuccessAt),errorCode:code,
+   message:code?syncMessages[code]:sync.status==='fresh'?'最近一次官方账单同步成功。':'尚未记录本账号的同步尝试。'}}
+ }catch{return {...status,sync:unknown}}
 }
 export function billingRange(value:unknown,now=Date.now()){
   if(!value||typeof value!=='object'||Array.isArray(value))throw new BillingSyncError('invalid_request')
@@ -71,7 +96,11 @@ export async function syncOfficialCosts(env:BillingSyncEnv,rangeValue:unknown,no
     let response:Response
     // workerd supports manual/follow only; reject redirects without forwarding credentials.
     try{response=await fetch(url,{headers:{Authorization:`Bearer ${scope.adminKey}`},redirect:'manual',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
-    if(response.status===401||response.status===403)throw new BillingSyncError('billing_permission')
+    if(response.status===401||response.status===403){
+      let deactivated=false
+      try{const failure=await response.json() as {error?:{code?:unknown}};deactivated=failure?.error?.code==='account_deactivated'}catch{/* Never expose raw provider errors. */}
+      throw new BillingSyncError(deactivated?'billing_account_deactivated':'billing_permission')
+    }
     if(!response.ok)throw new BillingSyncError('billing_unavailable')
     const raw=await response.text();if(raw.length>2_000_000)return invalid()
     let payload:any
@@ -108,7 +137,26 @@ export async function syncOfficialCosts(env:BillingSyncEnv,rangeValue:unknown,no
 export async function syncRecentOfficialCosts(env:BillingSyncEnv,now=Date.now()){
   if(!billingSyncStatus(env).configured)return {skipped:true,reason:'not_configured'}
   const to=new Date(now).toISOString().slice(0,10)
-  return syncOfficialCosts(env,{from:to.slice(0,8)+'01',to},now)
+  return syncOfficialCostsWithStatus(env,{from:to.slice(0,8)+'01',to},now)
+}
+
+/** Both manual and scheduled production entrypoints persist only safe health
+ * metadata. Invalid caller ranges and absent configuration are not provider outages. */
+export async function syncOfficialCostsWithStatus(env:BillingSyncEnv,rangeValue:unknown,now=Date.now()){
+ billingRange(rangeValue,now)
+ const scope=currentOpenAIBillingScope(env)
+ if(!scope)throw new BillingSyncError('billing_not_configured')
+ const attempt=crypto.randomUUID(),startedAt=new Date().toISOString()
+ let error:keyof typeof syncMessages|null=null
+ try{return await syncOfficialCosts(env,rangeValue,now)}catch(cause){
+  error=cause instanceof BillingSyncError&&Object.hasOwn(syncMessages,cause.code)?cause.code as keyof typeof syncMessages:'billing_unavailable'
+  throw cause
+ }finally{
+  const body={p_scope:scope,p_attempt:attempt,p_started_at:startedAt,p_finished_at:new Date().toISOString(),p_error:error}
+  for(let retry=0;retry<2;retry++)try{await syncStateRpc(env,'record_openai_billing_sync',body);break}catch{
+   if(retry===1)console.warn('billing_sync_status_unavailable')
+  }
+ }
 }
 
 export async function syncDeepSeekBalance(env:BillingSyncEnv){

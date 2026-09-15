@@ -1,5 +1,5 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
-import { billingSyncStatus, syncOfficialCosts, BillingSyncError, type BillingSyncEnv } from './billingSync'
+import { billingSyncStatusWithHistory, syncOfficialCostsWithStatus, BillingSyncError, type BillingSyncEnv } from './billingSync'
 import {refreshDeepSeekBalance} from './deepseekBalance'
 import {currentOfficialBillScopes,officialReportingBasis} from './officialBillScopes'
 type JsonObject = Record<string, unknown>
@@ -17,6 +17,7 @@ export const adminErrors: Record<string, [number, string]> = {
   unauthorized: [401, '登录已失效，请重新登录。'],
   billing_not_configured:[503,'尚未连接官方账单读取权限或指定 HelloDog 的账单范围。'],
   billing_permission:[403,'官方账单读取权限不足，请管理员核对账单专用密钥。'],
+  billing_account_deactivated:[503,'OpenAI 官方账单账号已停用，请通过官方申诉恢复；已保留上次金额。'],
   billing_data_incomplete:[503,'官方账单数据尚不完整，已保留上次同步结果，请稍后再试。'],
   billing_unavailable:[503,'官方账单暂时无法同步，已保留上次结果。'],
   mfa_required: [403, '请先完成管理员二次验证。'],
@@ -158,7 +159,7 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
     if((kind==='billing-status'&&request.method==='GET')||(kind==='billing-sync'&&request.method==='POST')){
       const session=await services.rpc('admin_read',{p_actor:actor,p_kind:'session',p_filter:{}}) as {role?:string}
       if(session.role!=='owner')throw new AdminError('admin_forbidden')
-      if(kind==='billing-status')return json(services.billingStatus?.()||{configured:false,message:'尚未连接官方账单同步。'})
+      if(kind==='billing-status')return json(await services.billingStatus?.()||{configured:false,message:'尚未连接官方账单同步。'})
       if(!services.syncBilling)throw new AdminError('billing_not_configured')
       return json(await services.syncBilling(await boundedJson(request)))
     }
@@ -206,8 +207,8 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
   }
   return {
     origins:['https://admin.hellodog.net','https://hellodog.net','https://www.hellodog.net'],
-    billingStatus(){return billingSyncStatus(env)},
-    syncBilling(range){return syncOfficialCosts(env,range)},
+    billingStatus(){return billingSyncStatusWithHistory(env)},
+    syncBilling(range){return syncOfficialCostsWithStatus(env,range)},
     async securityEvent(actor,code){
       await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_security_event`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_actor:actor,p_code:code}),signal:AbortSignal.timeout(5000)})
     },

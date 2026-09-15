@@ -114,9 +114,10 @@ test('a failed OpenAI sync cannot prevent DeepSeek balance synchronization or ca
   const url=String(input);calls.push(url)
   if(url.startsWith('https://api.openai.com'))return json({},403)
   if(url==='https://api.deepseek.com/user/balance')return json({is_available:true,balance_infos:[{currency:'USD',total_balance:'3',granted_balance:'1',topped_up_balance:'2'}]})
+  if(url.endsWith('/record_openai_billing_sync'))return json({recorded:true})
   const database=balanceRpcResponse(url,String(init?.body));assert.ok(database);return database
  })
- const result=await syncBillingSnapshots(env,now);assert.deepEqual(result.openai,{error:'billing_permission'});assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls.length,4)
+ const result=await syncBillingSnapshots(env,now);assert.deepEqual(result.openai,{error:'billing_permission'});assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls.length,5)
 })
 test('DeepSeek still synchronizes before OpenAI admin key configuration',async t=>{
  let calls=0;t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{calls++;assert.ok(!String(input).includes('openai.com'));return balanceRpcResponse(String(input),String(init?.body))||json({is_available:true,balance_infos:[{currency:'USD',total_balance:'1',granted_balance:'0',topped_up_balance:'1'}]})})

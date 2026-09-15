@@ -16,13 +16,14 @@ for(const cron of ['*/5 * * * *','17 * * * *'])test(`scheduled billing dispatch 
    const start=Number(url.searchParams.get('start_time')),end=Number(url.searchParams.get('end_time'))
    return Response.json({object:'page',has_more:false,data:Array.from({length:(end-start)/86400},(_,i)=>({object:'bucket',start_time:start+i*86400,end_time:start+(i+1)*86400,results:[]}))})
   }
-  assert.ok(['/rest/v1/rpc/record_official_bill','/rest/v1/rpc/security_housekeeping'].includes(url.pathname),'No character or translation mutations')
+  assert.ok(['/rest/v1/rpc/record_official_bill','/rest/v1/rpc/record_openai_billing_sync','/rest/v1/rpc/security_housekeeping'].includes(url.pathname),'No character or translation mutations')
   return Response.json({})
  })
  await worker.scheduled({cron} as any,env)
  assert.equal(calls.some(path=>path.startsWith('api.openai.com')),cron==='*/5 * * * *')
  assert.equal(calls.some(path=>path.startsWith('api.deepseek.com')),cron!=='17 * * * *')
  assert.equal(calls.some(path=>path.endsWith('/security_housekeeping')),cron==='17 * * * *')
+ assert.equal(calls.filter(path=>path.endsWith('/record_openai_billing_sync')).length,cron==='*/5 * * * *'?1:0)
  assert.equal(logs.length,1);assert.ok(!JSON.stringify(logs).includes('3.00'),'Logs contain no balance amounts')
 })
 test('billing cron reports failed balance refresh instead of a cached balance as successful',async t=>{

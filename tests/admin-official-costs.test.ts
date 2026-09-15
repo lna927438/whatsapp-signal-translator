@@ -148,3 +148,39 @@ test('business GMT+8 filtering does not disable native UTC sync or change each p
     assert.match(h.body(),/实际时间边界不同/);assert.doesNotMatch(h.body(),/切换为 UTC 后/)
   }finally{h.close()}
 })
+
+test('a failed manual sync clears only after a newer matching OpenAI API snapshot, not a DeepSeek balance or statement update',async()=>{
+  let now=Date.now()
+  const data=costsFixture();data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.19',data)];data.officialBills.forEach(b=>{b.fetched_at=new Date(now-5000).toISOString()})
+  const h=await mount({now:()=>now,request:path=>{if(path==='billing-sync')throw Error('unavailable');return path.startsWith('costs?')?structuredClone(data):path==='provider-balance'?balanceFixture(now):{configured:true,sync:{status:'fresh'}}}})
+  try{
+    const button=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement
+    button.click();await tick();assert.match(h.body(),/同步未完成，已保留上次结果/)
+    now+=2000;data.snapshotAt=new Date(now).toISOString();data.officialBills[1].fetched_at=new Date(now).toISOString();h.run(10000);await tick()
+    assert.match(h.body(),/同步未完成，已保留上次结果/)
+    now+=2000;data.snapshotAt=new Date(now).toISOString();data.officialBills[0].fetched_at=new Date(now).toISOString();h.run(10000);await tick()
+    assert.doesNotMatch(h.body(),/同步未完成，已保留上次结果/);assert.match(h.body(),/OpenAI 官方账单已恢复同步/)
+    assert.match(h.card().textContent,/\$0\.39/)
+  }finally{h.close()}
+})
+
+test('account-deactivation status is explicit and an automatic successful status read removes it',async()=>{
+  let now=Date.now(),failed=true
+  const data=costsFixture();data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.19',data)]
+  const h=await mount({now:()=>now,request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture(now):{configured:true,sync:failed?{status:'error',errorCode:'billing_account_deactivated',message:'OpenAI 账单账号已停用，请通过官方支持恢复账号。保留上次金额。'}:{status:'fresh'}}})
+  try{
+    assert.match(h.card().textContent,/账单账号已停用/);assert.match(h.card().textContent,/\$0\.39/)
+    failed=false;now+=61000;h.run(30000);await tick();assert.doesNotMatch(h.body(),/账单账号已停用/)
+  }finally{h.close()}
+})
+
+test('late failed manual sync cannot restore status or text after official-access changes',async()=>{
+  let rejectSync!:(error:Error)=>void
+  const h=await mount({request:path=>path==='billing-sync'?new Promise((_,reject)=>{rejectSync=reject}):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true}})
+  try{
+    const button=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement
+    button.click();await tick();h.w.__setAccess(false);await tick();rejectSync(new Error('old-account-error'));await tick();h.w.__setAccess(true);await tick()
+    assert.doesNotMatch(h.body(),/old-account-error|同步未完成，已保留上次结果/)
+    const sync=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement;assert.equal(sync.disabled,false)
+  }finally{h.close()}
+})

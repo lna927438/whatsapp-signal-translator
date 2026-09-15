@@ -5,6 +5,12 @@ export type OfficialBill={provider:BillProvider;amount:string;fetchedAt:string;s
 export type OfficialBillSummary={complete:boolean;total:string|null;partial:string|null;missing:BillProvider[];items:OfficialBill[]}
 const scale=1000000000000n
 
+/** Only automatically collected current-period bills have a freshness deadline.
+ * A manual DeepSeek statement must never be described as an automatic sync. */
+export function officialBillDelayed(summary:OfficialBillSummary,period:BillPeriod,now=Date.now()):boolean {
+  return summary.items.some(item=>item.source==='openai_costs_api'&&period.to>=currentBillPeriod(item.timezone,now).to&&now-Date.parse(item.fetchedAt)>10*60000)
+}
+
 export function currentBillPeriod(timezone:string,now=Date.now()):{from:string;to:string}{
   const to=new Date(now+(timezone==='Asia/Shanghai'?28800000:0)).toISOString().slice(0,10)
   return {from:to.slice(0,8)+'01',to}
