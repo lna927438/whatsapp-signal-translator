@@ -4,7 +4,7 @@ import AdminTable,{type Column} from './AdminTable.vue'
 import {request,fmt,tokens,usd,localPreview,type Row} from './client'
 import {currencyAmount} from './money'
 import {parseProviderBalance,balanceState,utcTimestamp,type ProviderBalance} from './providerBalance'
-import {currentBillPeriod,officialBillSummary,officialBillDelayed} from './officialBills'
+import {currentBillPeriod,officialBillSummary,officialBillDelayed,enabledBillProviders,selectedBillProviders} from './officialBills'
 const props=defineProps<{officialAccess:boolean}>()
 const emit=defineEmits<{reconcile:[data:Row]}>()
 const to=ref(new Date().toISOString().slice(0,10)),from=ref(to.value.slice(0,8)+'01'),provider=ref(''),timezone=ref('UTC')
@@ -18,10 +18,18 @@ const billingClock=computed(()=>{const snapshot=Date.parse(String(data.value.sna
 const balanceStatus=computed(()=>balanceState(balance.value,balanceError.value,clock.value))
 const totals=computed(()=>data.value.totals as Row||{}),users=computed(()=>data.value.users as Row[]||[]),days=computed(()=>data.value.days as Row[]||[])
 const providers=computed(()=>data.value.providers as Row[]||[])
-const official=computed(()=>officialBillSummary(props.officialAccess?data.value:{},queried.value,clock.value))
+const enabledProviders=computed(()=>{
+  const available=enabledBillProviders(Object.hasOwn(data.value,'enabledProviders')?data.value:syncInfo.value)
+  return Object.hasOwn(syncInfo.value,'enabledProviders')?available.filter(name=>enabledBillProviders(syncInfo.value).includes(name)):available
+})
+const officialProviders=computed(()=>selectedBillProviders({enabledProviders:enabledProviders.value},queried.value))
+const retiredProvider=computed(()=>Boolean(queried.value.provider&&!enabledProviders.value.includes(queried.value.provider as 'openai'|'deepseek')))
+const officialZones=computed(()=>officialProviders.value.map(name=>name==='openai'?'OpenAI UTC':'DeepSeek GMT+8').join(' · '))
+const openaiEnabled=computed(()=>enabledProviders.value.includes('openai'))
+const official=computed(()=>officialBillSummary(props.officialAccess?{...data.value,enabledProviders:enabledProviders.value}:{},queried.value,clock.value))
 const oldestOfficial=computed(()=>official.value.items.map(item=>item.fetchedAt).sort((a,b)=>Date.parse(a)-Date.parse(b))[0])
 const officialDelayed=computed(()=>officialBillDelayed(official.value,queried.value,billingClock.value))
-const billingIssue=computed(()=>{const state=syncInfo.value.sync as Row|undefined;return state?.status==='error'?String(state.message||'OpenAI 官方账单暂时无法同步，保留上次金额。'):''})
+const billingIssue=computed(()=>{if(!openaiEnabled.value)return '';const state=syncInfo.value.sync as Row|undefined;return state?.status==='error'?String(state.message||'OpenAI 官方账单暂时无法同步，保留上次金额。'):''})
 const incomplete=computed(()=>Number(totals.value.unpriced_requests)>0)
 const known=(row:Row)=>row.known_cost_usd_exact??row.known_cost_usd??row.cost_usd
 const bill=(name:string)=>official.value.items.find(b=>b.provider===name)
@@ -37,7 +45,7 @@ async function load(applyFilters=false){if(disposed)return;if(busy.value){if(!ap
   const result=await request<Row>('costs?'+new URLSearchParams(selected));if(version===revision){data.value=props.officialAccess&&accessVersion===accessRevision?result:{...result,officialBills:[]};costsReadAt.value=Date.now();queried.value=selected}
 }catch(e){if(version===revision)error.value=e instanceof Error?e.message:'暂时无法读取。'}finally{if(version===revision){busy.value=false;if(refreshAfterLoad&&!disposed){refreshAfterLoad=false;void load()}}}}
 async function readSyncStatus(force=false){if(localPreview||!props.officialAccess||disposed||(!force&&Date.now()-statusAt<60000))return;statusAt=Date.now();const version=++statusRevision,accessVersion=accessRevision;try{const value=await request<Row>('billing-status');if(!disposed&&props.officialAccess&&version===statusRevision&&accessVersion===accessRevision)syncInfo.value=value}catch{if(!disposed&&props.officialAccess&&version===statusRevision&&accessVersion===accessRevision)syncInfo.value={...syncInfo.value,statusReadError:'暂时无法读取官方账单连接状态，保留上次结果。'}}}
-async function sync(){if(syncBusy.value||!props.officialAccess||disposed)return;const accessVersion=accessRevision,period={from:queried.value.from,to:queried.value.to};syncBusy.value=true;syncMessage.value='';syncFailure.value=null;try{
+async function sync(){if(syncBusy.value||!props.officialAccess||disposed||!openaiEnabled.value)return;const accessVersion=accessRevision,period={from:queried.value.from,to:queried.value.to};syncBusy.value=true;syncMessage.value='';syncFailure.value=null;try{
   const result=await request<Row>('billing-sync',period);if(!disposed&&props.officialAccess&&accessVersion===accessRevision){syncMessage.value=String(result.message||'官方账单已同步。');await load()}
 }catch(e){if(!disposed&&props.officialAccess&&accessVersion===accessRevision){syncMessage.value=e instanceof Error?e.message:'同步未完成，已保留上次结果。';syncFailure.value={...period,after:billingClock.value}}}finally{if(!disposed&&props.officialAccess&&accessVersion===accessRevision){syncBusy.value=false;void readSyncStatus(true)}}}
 async function readBalance(){if(balanceBusy.value||localPreview||!props.officialAccess||disposed)return;const version=++balanceRevision;balanceBusy.value=true;balanceError.value='';try{
@@ -45,7 +53,7 @@ async function readBalance(){if(balanceBusy.value||localPreview||!props.official
   // a balance from an older provider account and must never fill a missing value.
   const result=parseProviderBalance(await request<unknown>('provider-balance'));if(version===balanceRevision&&!disposed&&props.officialAccess)balance.value=result
 }catch(e){if(version===balanceRevision&&!disposed)balanceError.value=e instanceof Error?e.message:'无法查询余额。'}finally{if(version===balanceRevision&&!disposed){balanceBusy.value=false;clock.value=Date.now()}}}
-function reconcile(name:string){emit('reconcile',{provider:name,from:queried.value.from,to:queried.value.to,timezone:name==='deepseek'?'Asia/Shanghai':'UTC'})}
+function reconcile(name:string){if(enabledProviders.value.includes(name as 'openai'|'deepseek'))emit('reconcile',{provider:name,from:queried.value.from,to:queried.value.to,timezone:name==='deepseek'?'Asia/Shanghai':'UTC'})}
 function resume(){clock.value=Date.now();if(document.visibilityState==='visible'){void load();void readBalance();void readSyncStatus()}}
 watch([official,syncFailure],()=>{const failure=syncFailure.value,bill=official.value.items.find(item=>item.provider==='openai'&&item.source==='openai_costs_api');if(failure&&bill&&queried.value.from===failure.from&&queried.value.to===failure.to&&Date.parse(bill.fetchedAt)>failure.after){syncFailure.value=null;syncMessage.value='OpenAI 官方账单已恢复同步。';void readSyncStatus(true)}})
 watch(()=>props.officialAccess,value=>{++balanceRevision;++accessRevision;++statusRevision;data.value={...data.value,officialBills:[]};balance.value=null;balanceError.value='';balanceBusy.value=false;syncBusy.value=false;syncMessage.value='';syncFailure.value=null;syncInfo.value={};statusAt=0;if(value){void load();void readBalance();void readSyncStatus()}})
@@ -55,15 +63,15 @@ onUnmounted(()=>{disposed=true;++revision;++balanceRevision;clearInterval(timer)
 <template><div class="adm-costs">
   <form class="adm-toolbar adm-card" @submit.prevent="load(true)"><label>开始日期<input v-model="from" type="date" required :disabled="busy||syncBusy" @input="followCurrentPeriod=false" /></label><label>结束日期<input v-model="to" type="date" required :min="from" :disabled="busy||syncBusy" @input="followCurrentPeriod=false" /></label>
     <label>业务统计时区<select v-model="timezone" :disabled="busy||syncBusy"><option value="UTC">UTC</option><option value="Asia/Shanghai">GMT+8</option></select></label>
-    <label>翻译通道<select v-model="provider" :disabled="busy||syncBusy"><option value="">全部</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option></select></label>
+    <label>翻译通道<select v-model="provider" :disabled="busy||syncBusy"><option value="">全部</option><option value="openai">{{openaiEnabled?'OpenAI':'OpenAI（历史）'}}</option><option value="deepseek">DeepSeek</option></select></label>
     <button class="adm-primary" :disabled="busy">{{busy?'读取中…':'查询'}}</button></form>
   <p v-if="error" class="adm-error" role="alert">{{error}} 下方保留上次结果。</p>
   <p class="adm-help">业务用量账期：{{queried.from}} 至 {{queried.to}} · {{queried.timezone==='UTC'?'UTC':'GMT+8'}} · {{queried.provider||'全部通道'}} · {{followCurrentPeriod?'默认本月日期按 UTC 自动更新':'按所选日期查询'}}</p>
   <section class="adm-stat-grid adm-billing-kpis" :class="{'with-balance':officialAccess}">
     <article><span>已用字符</span><strong>{{data.totals?fmt(totals.charged_characters):'读取中…'}}</strong><small>所选账期 · 已补偿 {{fmt(totals.refunded_characters)}} 字符<br />备用切换不会重复扣字符</small></article>
-    <article v-if="officialAccess" class="adm-official-cost"><span>各平台官方账单合计 · USD</span><strong v-if="official.complete" class="adm-cost-value">{{usd(official.total)}}</strong><strong v-else class="adm-official-pending">尚缺官方账单</strong>
+    <article v-if="officialAccess&&officialProviders.length" class="adm-official-cost"><span>{{officialProviders.length===1?providerName(officialProviders[0])+' 官方账单':'各平台官方账单合计'}} · USD</span><strong v-if="official.complete" class="adm-cost-value">{{usd(official.total)}}</strong><strong v-else class="adm-official-pending">尚缺官方账单</strong>
       <p v-if="!official.complete&&official.partial!==null" class="adm-official-partial">已同步部分：{{usd(official.partial)}}<br /><small>不是完整合计</small></p>
-      <small v-if="!official.complete">待同步：{{official.missing.map(providerName).join('、')}}<br /></small><small>{{queried.from}} 至 {{queried.to}}<br />{{queried.provider==='openai'?'OpenAI UTC':queried.provider==='deepseek'?'DeepSeek GMT+8':'OpenAI UTC · DeepSeek GMT+8'}}<br />随官方账单同步更新，近期费用仍可能补记</small>
+      <small v-if="!official.complete">待同步：{{official.missing.map(providerName).join('、')}}<br /></small><small>{{queried.from}} 至 {{queried.to}}<br />{{officialZones}}<br />随官方账单同步更新，近期费用仍可能补记</small>
       <small v-if="oldestOfficial" class="adm-official-sampled">本次汇总最早采集 / 录入：<br />{{utcTimestamp(oldestOfficial)}}</small><p v-if="billingIssue&&queried.provider!=='deepseek'" class="adm-error" role="alert">{{billingIssue}}</p><p v-else-if="officialDelayed" class="adm-help adm-balance-state delayed" role="status">官方账单同步有延迟，保留上次金额。</p></article>
     <article v-if="officialAccess" class="adm-provider-balance" :aria-busy="balanceBusy">
       <div class="adm-balance-heading"><span>DeepSeek 官方余额</span><button class="adm-button" :disabled="balanceBusy||localPreview" @click="readBalance">{{balanceBusy?'查询中…':'刷新余额'}}</button></div>
@@ -76,8 +84,9 @@ onUnmounted(()=>{disposed=true;++revision;++balanceRevision;clearInterval(timer)
       <small>官方账户余额不随上方账期筛选变化，也不等于账期花费。</small>
     </article>
   </section>
-  <section v-if="officialAccess" class="adm-card adm-official-breakdown"><h2>官方账单明细</h2><p class="adm-help">按相同日历日期汇总当前账号的各平台账单：OpenAI 使用 UTC，DeepSeek 使用 GMT+8，实际时间边界不同。未取得任一通道账单时，只显示已同步部分。余额变化包含充值、赠金和其他调用，不用于补齐费用。</p>
-    <div v-for="name in (queried.provider?[queried.provider]:['openai','deepseek'])" :key="name" class="adm-bill-provider">
+  <section v-if="officialAccess&&retiredProvider" class="adm-card adm-retired-provider"><h2>{{providerName(queried.provider)}} 历史用量</h2><p>此通道已停用。历史调用回执仍可查账，不计入当前启用通道的官方账单，也不再同步或录入该通道的当前账号账单。</p></section>
+  <section v-if="officialAccess&&officialProviders.length" class="adm-card adm-official-breakdown"><h2>官方账单明细</h2><p class="adm-help">按相同日历日期汇总当前启用通道的账号账单：{{officialZones}}<span v-if="officialProviders.length>1">，实际时间边界不同</span>。未取得启用通道账单时，只显示已同步部分。余额变化包含充值、赠金和其他调用，不用于补齐费用。</p>
+    <div v-for="name in officialProviders" :key="name" class="adm-bill-provider">
       <div><h3>{{providerName(name)}}</h3>
         <small>{{queried.from}} 至 {{queried.to}} · {{name==='openai'?'UTC':'GMT+8'}}</small>
         <p>官方账期费用：<b>{{bill(name)?usd(bill(name)?.amount):'尚未同步该账期'}}</b></p>
@@ -85,9 +94,9 @@ onUnmounted(()=>{disposed=true;++revision;++balanceRevision;clearInterval(timer)
       </div>
       <div class="adm-bill-actions"><button v-if="name==='openai'" class="adm-primary" :disabled="busy||syncBusy||!syncInfo.configured||localPreview" @click="sync">{{syncBusy?'同步中…':'同步官方账单'}}</button><button class="adm-button" :disabled="busy||syncBusy" @click="reconcile(name)">录入账单核对</button></div>
     </div>
-    <p v-if="syncInfo.statusReadError" class="adm-help" role="status">{{syncInfo.statusReadError}}</p>
-    <p v-if="!syncInfo.configured&&!syncInfo.statusReadError" class="adm-help">{{syncInfo.message||'官方账单同步尚未配置。'}}</p>
-    <p class="adm-help">更换过服务商账号时，旧账号费用需另行核对。DeepSeek 官方接口可查询余额；账期费用使用官方导出账单核对，余额变化不会当作翻译成本。</p><p v-if="syncMessage" class="adm-help" role="status">{{syncMessage}}</p>
+    <p v-if="openaiEnabled&&syncInfo.statusReadError" class="adm-help" role="status">{{syncInfo.statusReadError}}</p>
+    <p v-if="openaiEnabled&&!syncInfo.configured&&!syncInfo.statusReadError" class="adm-help">{{syncInfo.message||'官方账单同步尚未配置。'}}</p>
+    <p class="adm-help">更换过服务商账号时，旧账号费用需另行核对。DeepSeek 官方接口可查询余额；账期费用使用官方导出账单核对，余额变化不会当作翻译成本。</p><p v-if="openaiEnabled&&syncMessage" class="adm-help" role="status">{{syncMessage}}</p>
   </section>
   <section class="adm-card"><h2>按用户统计</h2><p class="adm-help">用户费用按调用回执核算，供用量分析；官方账单不能直接分摊到每个用户。</p><AdminTable :rows="users" :columns="columns" empty="所选期间没有请求。" /></section>
   <details class="adm-card adm-local-cost-evidence"><summary>查看每日用量和核算依据</summary>

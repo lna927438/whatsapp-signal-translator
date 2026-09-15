@@ -5,6 +5,19 @@ export type OfficialBill={provider:BillProvider;amount:string;fetchedAt:string;s
 export type OfficialBillSummary={complete:boolean;total:string|null;partial:string|null;missing:BillProvider[];items:OfficialBill[]}
 const scale=1000000000000n
 
+/** Absent metadata is the legacy dual-provider contract; malformed or empty
+ * explicit metadata cannot silently re-enable a retired provider. */
+export function enabledBillProviders(data:Row):BillProvider[]{
+  if(!Object.hasOwn(data,'enabledProviders'))return ['openai','deepseek']
+  const value=data.enabledProviders
+  if(!Array.isArray(value)||value.some(item=>item!=='openai'&&item!=='deepseek')||new Set(value).size!==value.length)return []
+  return value as BillProvider[]
+}
+export function selectedBillProviders(data:Row,period:BillPeriod):BillProvider[]{
+  const enabled=enabledBillProviders(data)
+  return period.provider?enabled.filter(provider=>provider===period.provider):enabled
+}
+
 /** Only automatically collected current-period bills have a freshness deadline.
  * A manual DeepSeek statement must never be described as an automatic sync. */
 export function officialBillDelayed(summary:OfficialBillSummary,period:BillPeriod,now=Date.now()):boolean {
@@ -39,10 +52,10 @@ function instant(value:unknown):number|null {
   const time=Date.parse(value);return Number.isFinite(time)?time:null
 }
 export function officialBillSummary(data:Row,period:BillPeriod,now=Date.now()):OfficialBillSummary {
-  const selected:BillProvider[]=period.provider==='openai'||period.provider==='deepseek'?[period.provider]:['openai','deepseek']
+  const selected=selectedBillProviders(data,period)
   const empty=():OfficialBillSummary=>({complete:false,total:null,partial:null,missing:selected,items:[]})
   const start=day(period.from),end=day(period.to),offset=period.timezone==='Asia/Shanghai'?8*60*60*1000:0
-  if(start===null||end===null||end<start||!['UTC','Asia/Shanghai'].includes(period.timezone)||!['','openai','deepseek'].includes(period.provider))return empty()
+  if(!selected.length||start===null||end===null||end<start||!['UTC','Asia/Shanghai'].includes(period.timezone)||!['','openai','deepseek'].includes(period.provider))return empty()
   const from=start-offset,to=end+86400000-offset
   const referenceNow=instant(data.snapshotAt)??now
   // Business statistics retain their selected timezone; official bills cover

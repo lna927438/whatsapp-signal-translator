@@ -1,5 +1,6 @@
 import { whatsappSidebarScript } from './sidebar'
 import { whatsappContactScript } from './contactDetails'
+import { whatsappVoiceScript } from './voiceMessages'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
 import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
 export const whatsappInjectionScript = String.raw`
@@ -1048,4 +1049,4 @@ export const whatsappInjectionScript = String.raw`
     void recoverPending(); void translateVisible(); }, 1400);
   void translateVisible();
 })();
-` + whatsappSidebarScript + whatsappContactScript;
+` + whatsappSidebarScript + whatsappContactScript + whatsappVoiceScript;

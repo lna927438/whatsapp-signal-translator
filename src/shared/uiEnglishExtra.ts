@@ -1,4 +1,16 @@
 export const uiEnglishExtra: Readonly<Record<string,string>> = {
+  '翻译语音':'Translate voice message',
+  '正在识别语音…':'Recognizing speech…',
+  '语音识别文字':'Recognized speech',
+  '确认并翻译':'Confirm and translate',
+  '核对识别文字后翻译，可先修改识别有误的内容。':'Review the recognized text and correct any mistakes before translating.',
+  '语音识别失败，请重试。':'Speech recognition failed. Please try again.',
+  '语音文件翻译':'Translate an audio file',
+  'WhatsApp 或 Signal 的语音可先保存为文件，再在这里识别和翻译。':'Save a WhatsApp or Signal voice message as a file, then recognize and translate it here.',
+  '选择语音文件':'Choose an audio file',
+  '识别在本机完成；确认后的文字翻译成功按字符计费。':'Speech recognition runs locally. Confirmed text uses characters only when translation succeeds.',
+  '语音翻译完成':'Voice translation completed',
+  '请选择 5 分钟以内的语音。':'Choose an audio recording no longer than 5 minutes.',
   '翻译已恢复': 'Translation recovered',
   '云端仍在处理，结果待确认，稍后继续核对。': 'Translation is still processing. Check again shortly.',
   '编辑红色备注':'Edit red note',
@@ -118,6 +130,14 @@ export const uiEnglishExtra: Readonly<Record<string,string>> = {
 }
 // Customer feedback release: account navigation, refresh and unread status.
 Object.assign(uiEnglishExtra, {
+  '已取消本次语音处理。':'This audio operation has been cancelled.',
+  '密码至少 12 个字符。':'Use a password with at least 12 characters.',
+  '新密码至少 12 个字符。':'Use a new password with at least 12 characters.',
+  '至少 12 个字符':'At least 12 characters',
+  '暂时无法完成，请稍后重试。':'This could not be completed. Try again shortly.',
+  '未读':'Unread', '刷新':'Refresh',
+  '翻译失败，请重试。':'Translation failed. Please try again.',
+  '正在处理…':'Processing…', '正在翻译…':'Translating…',
   '消息中心':'Notification center','消息通知':'Notification','版本更新与管理员通知':'Updates and messages from HelloDog',
   '发现新版本 {0}':'Version {0} is available','新版本已准备好，可前往官网下载更新。':'A new version is ready. Download it from the official website.',
   '知道了':'Got it','查看消息中心':'View notifications','前往官网':'Visit website','暂时没有新通知':'No notifications yet',

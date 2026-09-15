@@ -66,7 +66,7 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     if (direct.peer) return direct.peer
     const key = rowKey(row)
     if (key && learned.has(key)) return learned.get(key)!
-    return selection?.row === row && selected(row) && selection.boundPeer === peerKey() ? selection.boundPeer || '' : ''
+    return selection?.row === row && (selected(row) || selection.explicitNavigation) && selection.boundPeer === peerKey() ? selection.boundPeer || '' : ''
   }
   const rows = () => {
     const found = new Set<HTMLElement>()
@@ -83,6 +83,9 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
   }
   const remove = (view: any) => {
     if (!view) return
+    if (view.retryTimer) clearTimeout(view.retryTimer)
+    if (view.readTimer) clearTimeout(view.readTimer)
+    view.readVersion = (view.readVersion || 0) + 1
     if (dialogOwner === view) close()
     view.root.remove()
     view.sources?.forEach((node: Element) => node.removeAttribute('data-hd-presence-source'))
@@ -98,7 +101,7 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     : listStates.get(view.row) === view && view.row.isConnected && listPeer(view.row) === view.peer && rowKey(view.row) === view.key
   const renderNote = (view: any) => {
     const text = opening && opening.row === view.row ? ui('正在打开聊天…', 'Opening conversation…')
-      : view.error ? ui('重试备注', 'Retry note') : view.value.text || ui('＋联系人备注', '+ Contact note')
+      : view.error ? view.value.text || ui('重试备注', 'Retry note') : view.value.text || ui('＋联系人备注', '+ Contact note')
     if (view.note.textContent !== text) view.note.textContent = text
     view.note.disabled = view.loading || view.kind === 'header' && !view.peer
     view.note.title = view.error || view.value.text || (view.peer
@@ -109,19 +112,37 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     view.note.setAttribute('data-hd-note-peer', view.peer || '')
   }
   const updateNote = (peer: string, value: any) => {
-    if (!value || typeof value.text !== 'string' || !Number.isSafeInteger(value.revision)) return
+    if (!value || typeof value.text !== 'string' || value.text.length > 500 || !Number.isSafeInteger(value.revision) || value.revision < 0) return
     for (const view of allViews()) if (view.peer === peer && current(view) && value.revision >= view.value.revision) {
-      view.value = value; view.loading = false; view.error = ''; renderNote(view)
+      view.value = { text: value.text, revision: value.revision }; view.loading = false; view.error = ''; view.retries = 0
+      view.readVersion = (view.readVersion || 0) + 1
+      if (view.readTimer) { clearTimeout(view.readTimer); view.readTimer = undefined }
+      if (view.retryTimer) { clearTimeout(view.retryTimer); view.retryTimer = undefined }
+      renderNote(view)
     }
   }
-  const load = (view: any) => {
+  const load = (view: any, editAfter = false) => {
     if (!view.peer) { view.loading = false; renderNote(view); return }
+    if (view.loading) return
+    if (view.retryTimer) { clearTimeout(view.retryTimer); view.retryTimer = undefined }
+    const version = view.readVersion = (view.readVersion || 0) + 1
     view.loading = true; renderNote(view)
-    Promise.resolve(api().getContactNote(view.peer)).then(value => {
-      if (current(view)) { updateNote(view.peer, value); view.loading = false; renderNote(view); schedule() }
-    }, () => {
-      if (current(view)) { view.loading = false; view.error = ui('备注读取失败，请点击重试。', 'Could not load the note. Click to retry.'); renderNote(view) }
-    })
+    const valid = () => !disposed && current(view) && version === view.readVersion
+    const failed = () => {
+      if (!valid()) return
+      view.readVersion++; clearTimeout(view.readTimer); view.readTimer = undefined
+      view.loading = false; view.error = ui('备注读取失败，请点击重试。', 'Could not load the note. Click to retry.'); renderNote(view)
+      const attempt = view.retries = (view.retries || 0) + 1
+      if (attempt <= 3) view.retryTimer = setTimeout(() => { view.retryTimer = undefined; if (current(view)) load(view) }, 800 * 2 ** (attempt - 1))
+    }
+    view.readTimer = setTimeout(failed, 8000)
+    Promise.resolve().then(() => api().getContactNote(view.peer)).then(value => {
+      if (!valid()) return
+      if (!value || typeof value.text !== 'string' || value.text.length > 500 || !Number.isSafeInteger(value.revision) || value.revision < 0) { failed(); return }
+      clearTimeout(view.readTimer); view.readTimer = undefined
+      updateNote(view.peer, value); view.loading = false; renderNote(view); schedule()
+      if (editAfter && !view.error) edit(view)
+    }, failed)
   }
   const edit = (snapshot: any) => {
     if (!snapshot?.peer || snapshot.loading || dialog || !current(snapshot)) return
@@ -146,12 +167,13 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
       try {
         if (dialogOwner !== snapshot || !current(snapshot)) throw new Error(ui('联系人已切换，请重新打开备注。', 'The contact changed. Open the note again.'))
         const value = await api().saveContactNote(peer, area.value, revision)
+        if (!value || typeof value.text !== 'string' || value.text.length > 500 || !Number.isSafeInteger(value.revision) || value.revision <= revision) throw new Error(ui('未能确认备注已保存，请保留输入并重试。', 'Could not confirm the saved note. Keep your draft and retry.'))
         updateNote(peer, value)
         if (dialogOwner === snapshot) close()
       } catch (e: any) {
         error.textContent = e?.message || ui('备注保存失败，请重试。', 'Could not save. Try again.'); save.disabled = false
         // A concurrent edit stays visible after reopening; never overwrite it.
-        if (current(snapshot)) Promise.resolve(api().getContactNote(peer)).then(value => updateNote(peer, value), () => {})
+        if (current(snapshot)) Promise.resolve().then(() => api().getContactNote(peer)).then(value => updateNote(peer, value), () => {})
       }
     }
     dialog.addEventListener('cancel', event => { event.preventDefault(); close() })
@@ -159,14 +181,17 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     area.focus()
   }
   const openFromList = (view: any) => {
-    if (view.peer) { if (view.error) load(view); else edit(view); return }
+    if (view.peer) { if (view.error) load(view, true); else edit(view); return }
     if (opening || dialog || !view.row.isConnected) return
-    opening = { row: view.row, key: rowKey(view.row), title: view.title, name: view.name, wasSelected: selected(view.row), expires: Date.now() + 6000 }
+    opening = { row: view.row, key: rowKey(view.row), title: view.title, name: view.name, wasSelected: selected(view.row), previousPeer: peerKey(), expires: Date.now() + 6000 }
     view.error = ''; renderNote(view)
     // This is only a navigation click. It never reads a title as an identity,
     // creates a provider request or sends a message.
-    view.row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }))
-    view.row.click()
+    // WhatsApp also attaches navigation to descendants of the virtual row.
+    // Start at the native title, so both nested and row handlers receive it.
+    view.title.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }))
+    view.title.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }))
+    view.title.click()
     schedule()
   }
   const mount = (view: any, title: HTMLElement, boundary: HTMLElement) => {
@@ -198,16 +223,23 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     const view: any = { kind, title, peer, name: nameOf(title), key: kind === 'list' ? rowKey(parent) : '', root, note, styles: [], value: { text: '', revision: 0 }, loading: false }
     if (kind === 'list') view.row = parent; else view.header = parent
     for (const event of ['pointerdown', 'mousedown', 'mouseup', 'keydown']) note.addEventListener(event, e => e.stopPropagation())
-    note.onclick = event => { event.preventDefault(); event.stopPropagation(); if (kind === 'list') openFromList(view); else if (view.error) load(view); else edit(view) }
+    note.onclick = event => { event.preventDefault(); event.stopPropagation(); if (kind === 'list') openFromList(view); else if (view.error) load(view, true); else edit(view) }
     mount(view, title, parent)
     return view
   }
   const syncSelection = (items: HTMLElement[], peer: string, headerTitle?: HTMLElement) => {
-    const active = items.filter(selected)
+    // Some native versions do not expose aria-selected. A requested navigation
+    // may bind only after a new stable message JID arrives, never by name alone.
+    const navigated = opening && peer && peer !== opening.previousPeer && items.includes(opening.row)
+      && rowKey(opening.row) === opening.key && (opening.key || titleNode(opening.row) === opening.title)
+      && titleNode(opening.row) && nameOf(titleNode(opening.row)!) === opening.name
+    const preserved = selection?.explicitNavigation && selection.boundPeer === peer && items.includes(selection.row)
+      && rowKey(selection.row) === selection.key && titleNode(selection.row) === selection.title && nameOf(selection.title) === selection.name
+    const active = navigated ? [opening.row] : preserved ? [selection.row] : items.filter(selected)
     if (active.length !== 1) { selection = undefined; return }
     const row = active[0], key = rowKey(row)
     if (!selection || selection.row !== row || selection.key !== key) {
-      selection = { row, key, previousPeer: selection?.boundPeer || selection?.peerAtSelection || (synced ? lastPeer : ''), peerAtSelection: peer, boundPeer: '' }
+      selection = { row, key, title: titleNode(row), name: nameOf(titleNode(row)!), previousPeer: selection?.boundPeer || selection?.peerAtSelection || (synced ? lastPeer : ''), peerAtSelection: peer, boundPeer: '', explicitNavigation: Boolean(navigated) }
     }
     const title = titleNode(row)
     if (!peer || !title || !headerTitle || nameOf(title) !== nameOf(headerTitle) || directPeer(row).ambiguous) return
@@ -232,10 +264,10 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     }
     if (opening) {
       const pending = opening, view = listStates.get(pending.row)
-      if (!view || !pending.row.isConnected || rowKey(pending.row) !== pending.key || view.title !== pending.title || view.name !== pending.name || Date.now() > pending.expires) {
+      if (!view || !pending.row.isConnected || rowKey(pending.row) !== pending.key || !pending.key && view.title !== pending.title || view.name !== pending.name || Date.now() > pending.expires) {
         opening = undefined
         if (view) { view.error = ui('未能确认联系人，请打开此聊天后重试备注。', 'Could not confirm the contact. Open this conversation, then retry the note.'); renderNote(view) }
-      } else if (selected(pending.row) && view.peer && view.peer === peerKey() && !view.loading) {
+      } else if ((selected(pending.row) || selection?.row === pending.row && selection.explicitNavigation) && view.peer && view.peer === peerKey() && !view.loading) {
         opening = undefined; renderNote(view); edit(view)
       }
     }
@@ -292,17 +324,23 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     attributeFilter: ['hidden', 'aria-hidden', 'aria-selected', 'aria-current', 'data-selected', 'style', 'class', 'title', 'data-id', 'data-jid', 'data-chat-id', 'data-contact-id', 'data-row-key'] })
   const onScroll = (event: Event) => {
     const target = event.target as Element | null
-    if (target?.closest?.('#pane-side,#side,[data-testid="chat-list"]') && selection && !selection.key) { selection.boundPeer = ''; schedule() }
+    if (target?.closest?.('#pane-side,#side,[data-testid="chat-list"]') && selection && !selection.key) { selection.boundPeer = ''; selection.explicitNavigation = false; schedule() }
   }
   document.addEventListener('scroll', onScroll, true)
-  window.addEventListener('online', schedule); window.addEventListener('offline', schedule); document.addEventListener('visibilitychange', schedule)
+  const recover = () => {
+    if (disposed) return
+    schedule()
+    if (document.visibilityState === 'hidden') return
+    for (const view of allViews()) if (view.peer && view.error && !view.loading) { view.retries = 0; load(view) }
+  }
+  window.addEventListener('online', recover); window.addEventListener('focus', recover); window.addEventListener('offline', schedule); document.addEventListener('visibilitychange', recover)
   win.__HD_SYNC_CONTACT_DETAILS__ = sync
   window.addEventListener('pagehide', () => {
     disposed = true
     observer.disconnect(); if (timer) clearTimeout(timer); opening = undefined; close(); resetHeader()
     for (const view of listStates.values()) remove(view)
     listStates.clear(); learned.clear(); style.remove(); document.removeEventListener('scroll', onScroll, true)
-    window.removeEventListener('online', schedule); window.removeEventListener('offline', schedule); document.removeEventListener('visibilitychange', schedule)
+    window.removeEventListener('online', recover); window.removeEventListener('focus', recover); window.removeEventListener('offline', schedule); document.removeEventListener('visibilitychange', recover)
   }, { once: true })
   if (api()?.getRuntimeSettings) Promise.resolve(api().getRuntimeSettings()).then(settings => {
     english = settings?.uiLanguage === 'en'; for (const view of allViews()) renderNote(view); schedule()

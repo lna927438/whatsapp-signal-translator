@@ -26,6 +26,15 @@ test('provider filtering never combines the unselected provider or local token e
   assert.equal(officialBillSummary(data,{...period,provider:'deepseek'}).total,'0.000000000009')
   data.officialBills[0].official_usd_exact=undefined;assert.equal(officialBillSummary(data,{...period,provider:'openai'}).total,null)
 })
+
+test('enabled provider metadata excludes retired bills from current totals and never treats disabled or invalid configuration as zero',()=>{
+ const data=Object.assign(fixture(),{enabledProviders:['deepseek']})
+ assert.equal(officialBillSummary(data,period).total,'0.000000000009');assert.deepEqual(officialBillSummary(data,period).missing,[])
+ const historical=officialBillSummary(data,{...period,provider:'openai'});assert.equal(historical.total,null);assert.equal(historical.complete,false);assert.deepEqual(historical.missing,[])
+ for(const enabledProviders of [[],null,['invalid'],['deepseek','deepseek']]){
+  const value=officialBillSummary({...data,enabledProviders},period);assert.equal(value.total,null);assert.equal(value.complete,false);assert.deepEqual(value.items,[])
+ }
+})
 test('native provider boundaries use the same calendar dates; business timezone and nearby periods cannot relabel an official bill',()=>{
   const china={...period,timezone:'Asia/Shanghai'},data=fixture(china)
   assert.equal(data.from,'2026-08-31T16:00:00.000Z');assert.equal(data.toExclusive,'2026-09-15T16:00:00.000Z')
@@ -73,6 +82,24 @@ test('main card displays only official totals; missing provider shows partial an
     assert.match(h.card().textContent,/\$0\.032911700009/);assert.doesNotMatch(h.card().textContent,/尚缺官方账单/);assert.match(h.body(),/官方账单 · 手动录入/)
     data.officialBills=[];h.run(10000);await tick();assert.match(h.card().textContent,/尚缺官方账单/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
   }finally{h.close()}
+})
+
+test('DeepSeek-only configuration hides retired OpenAI billing warnings and actions while preserving explicit historical receipts',async()=>{
+ const h=await mount({request:path=>{
+  if(path==='provider-balance')return balanceFixture()
+  if(path==='billing-status')return {enabledProviders:['deepseek'],configured:false,reason:'provider_disabled',message:'OpenAI official sync not configured',sync:{status:'error',message:'OpenAI account deactivated'}}
+  const query=new URLSearchParams(path.slice(6)),data=Object.assign(costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!}),{enabledProviders:['deepseek']})
+  data.officialBills=[officialBillFixture('openai','100',data),officialBillFixture('deepseek','0.19',data)];return data
+ }})
+ try{
+  assert.match(h.card().textContent,/DeepSeek 官方账单/);assert.match(h.card().textContent,/\$0\.19/);assert.doesNotMatch(h.card().textContent,/OpenAI|100|尚缺/)
+  const breakdown=h.w.document.querySelector('.adm-official-breakdown');assert.doesNotMatch(breakdown.textContent,/OpenAI|deactivated|not configured|同步官方账单/)
+  assert.equal(breakdown.querySelectorAll('.adm-bill-provider').length,1)
+  const provider=h.w.document.querySelectorAll('select')[1];assert.match(provider.textContent,/OpenAI（历史）/)
+  provider.value='openai';provider.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+  assert.equal(h.card(),null);assert.match(h.w.document.querySelector('.adm-retired-provider').textContent,/此通道已停用/)
+  assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/OpenAI 回执/);assert.ok(!h.calls.includes('billing-sync'))
+ }finally{h.close()}
 })
 test('official sync refreshes the primary card immediately even when a background read is already in flight',async()=>{
   let resolveSync!:(value:unknown)=>void,resolveRead!:(value:unknown)=>void,count=0

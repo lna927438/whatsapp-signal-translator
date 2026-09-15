@@ -34,6 +34,8 @@ import { validateTranslation } from './translation/translationValidation'
 import { reusableDisplayOriginal } from '../shared/translationResult'
 import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoingPolicy'
 import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread } from './desktopRuntime'
+import { join } from 'path'
+import { VoiceRecognition } from './translation/voiceRecognition'
 
 interface TranslatePayload {
   text: string
@@ -86,6 +88,38 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!owner || !onlineIdentity?.accessToken) throw new Error('请先登录在线账号。')
     return { owner, authorized: () => onlineIdentity?.userId === owner && identityRevision === revision }
   }
+
+  const voice = new VoiceRecognition(app.isPackaged ? join(process.resourcesPath,'voice') : join(app.getAppPath?.()||join(__dirname,'../..'),'resources/voice/bin'),join(app.getPath('temp'),'hellodog-voice'))
+  ipcMain.handle('voice:recognize',async(event,id:string,bytes:Uint8Array)=>{
+    const identity=taskIdentity()
+    const record=(await accounts.list()).find(item=>item.id===id)
+    const senderAllowed=()=>event.sender.id===mainWindow.webContents.id&&['whatsapp','signal'].includes(record?.platform||'')||record?.platform==='whatsapp'&&whatsapp.ownsSender(id,event.sender.id)
+    if(!record||!senderAllowed())throw new Error('语音不属于当前账号窗口。')
+    const text=await voice.recognize(bytes,()=>identity.authorized()&&!event.sender.isDestroyed()&&Boolean(senderAllowed()))
+    if(!identity.authorized()||!senderAllowed())throw new Error('登录状态已变化。')
+    return {text,audioId:createHash('sha256').update(bytes).digest('hex')}
+  })
+  ipcMain.handle('voice:translate-file',async(event,id:string,audioId:string,text:string)=>{
+    requireMain(event);const identity=taskIdentity()
+    const record=(await accounts.list()).find(item=>item.id===id)
+    if(!record||typeof audioId!=='string'||!/^[a-f0-9]{64}$/.test(audioId)||typeof text!=='string'||!text.trim()||Array.from(text).length>12000)throw new Error('语音翻译内容无效。')
+    const runtime=await accountRuntime(id)
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    const answer=await translator.translateIncoming({text:text.trim(),accountId:id,conversationId:'local-voice-files',messageId:audioId,sourceLanguage:'auto',targetLanguage:runtime.localLanguage,quality:runtime.translationQuality},true)
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    return answer
+  })
+  ipcMain.handle('voice:translate',async(event,id:string,peer:string,messageId:string,text:string)=>{
+    const identity=taskIdentity();requireMain(event)
+    const record=(await accounts.list()).find(item=>item.id===id&&item.platform==='signal')
+    if(!record||typeof peer!=='string'||!peer||peer.length>200||typeof messageId!=='string'||messageId.length>1000||typeof text!=='string'||!text.trim()||Array.from(text).length>12000)throw new Error('语音翻译内容无效。')
+    const conversationId=normalizeSignalPeer(peer),runtime=await accountRuntime(id,conversationId)
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    const identityKey='voice:'+createHash('sha256').update(JSON.stringify([conversationId,messageId])).digest('hex')
+    const answer=await translator.translateIncoming({text:text.trim(),accountId:id,conversationId,messageId:identityKey,sourceLanguage:'auto',targetLanguage:runtime.localLanguage,quality:runtime.translationQuality},true)
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    return answer
+  })
 
   const assertTaskSender = (event: Electron.IpcMainInvokeEvent, task: { platform: string; accountId: string }) => {
     const expected = task.platform === 'whatsapp'

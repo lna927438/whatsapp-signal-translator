@@ -20,6 +20,9 @@ with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive
                       'server/worker/src','website/src','website/public','supabase/migrations']:
         paths.extend((root / directory).rglob('*'))
     paths.extend((root / 'resources/native').glob('*.cs'))
+    paths.extend((root / 'resources/voice').glob('*.json'))
+    paths.extend((root / 'resources/voice').glob('LICENSE-*.txt'))
+    paths.append(root / 'resources/voice/README.md')
     paths.extend((root / 'resources/signal').glob('*.txt'))
     paths.extend(root.glob('tsconfig*.json'))
     paths.extend(root / 'docs/product' / name for name in [f'optimization-implementation-{version}.md','optimization-roadmap-2026-09-12.md','experience-stability-plan-2026-09-12.md','security-plan-2026-09-14.md','security-operations-2026-09-14.md','security-implementation-2026-09-14.md'])

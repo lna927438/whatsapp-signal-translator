@@ -195,3 +195,90 @@ test('a minimal native header keeps injected details inside its own boundary and
   assert.equal(h.w.document.querySelector('[data-rt-ui="contact-details"]'),null);assert.equal(header.style.flexWrap,'')
  }finally{h.dom.window.close()}
 })
+
+test('an opaque contact note clicks the native title descendant so nested chat handlers can open its editor',async()=>{
+ const h=contactList({keys:['123@c.us','conversation-stable-two']});try{
+  h.rows[1].querySelector('.title-line')!.addEventListener('click',()=>h.select(1,'456@c.us'))
+  h.install();await settle();h.note(1).click();await settle();await settle()
+  assert.equal(h.w.document.querySelector('textarea')?.value,'Second contact note')
+  await h.save('Nested native navigation');assert.equal(h.note(1).textContent,'Nested native navigation');assert.equal(h.headerNote().textContent,'Nested native navigation')
+ }finally{h.dom.window.close()}
+})
+
+test('temporary note read failure recovers on reconnect and a retry click opens the editor in one step',async()=>{
+ const h=contactList(),get=h.w.realtimeTranslator.getContactNote;let unavailable=true
+ h.w.realtimeTranslator.getContactNote=async(peer:string)=>{if(unavailable)throw new Error('temporary IPC unavailable');return get(peer)}
+ try{
+  h.install();await settle();assert.equal(h.note(0).textContent,'重试备注')
+  unavailable=false;h.note(0).click();await settle()
+  assert.equal(h.w.document.querySelector('textarea')?.value,'First contact note')
+  h.w.document.querySelector('dialog button[type="button"]').click()
+  h.w.dispatchEvent(new h.w.Event('online'));await settle()
+  assert.equal(h.note(1).textContent,'Second contact note')
+ }finally{h.dom.window.close()}
+})
+
+test('native list without selected markers binds only after clicked conversation changes its stable JID',async()=>{
+ const h=contactList({keys:['conversation-one','conversation-two']});try{
+  h.rows.forEach(row=>row.removeAttribute('aria-selected'))
+  h.install();await settle();h.note(1).click();h.sync();await settle()
+  assert.equal(h.w.document.querySelector('dialog'),null,'a same-name previous chat cannot bind the new row')
+  h.w.document.querySelector('.message').setAttribute('data-id','false_456@c.us_new');h.sync();await settle();await settle()
+  assert.equal(h.w.document.querySelector('textarea')?.value,'Second contact note')
+  await h.save('No native selected flag');assert.equal(h.note(1).textContent,'No native selected flag');assert.equal(h.headerNote().textContent,'No native selected flag')
+  h.w.document.querySelector('.message').setAttribute('data-id','false_123@c.us_back');h.sync();await settle()
+  assert.equal(h.headerNote().textContent,'First contact note');assert.equal(h.note(0).getAttribute('data-hd-note-peer'),'')
+  assert.equal(h.note(1).textContent,'No native selected flag','stable opaque row retains only its learned identity')
+ }finally{h.dom.window.close()}
+})
+
+test('native title replacement during a confirmed keyed navigation does not cancel opening the correct note',async()=>{
+ const h=contactList({keys:['conversation-one','conversation-two']});try{
+  h.rows.forEach(row=>row.removeAttribute('aria-selected'))
+  h.rows[1].querySelector('.title-line')!.addEventListener('click',()=>{
+   const title=h.rows[1].querySelector('span[title]')!;title.replaceWith(title.cloneNode(true))
+   h.w.document.querySelector('.message').setAttribute('data-id','false_456@c.us_new')
+  })
+  h.install();await settle();h.note(1).click();await settle();await settle()
+  assert.equal(h.w.document.querySelector('textarea')?.value,'Second contact note');assert.equal(h.note(1).getAttribute('data-hd-note-peer'),'peer:456@c.us')
+ }finally{h.dom.window.close()}
+})
+
+test('failed save confirmation preserves the draft and hiding the page still clears presence',async()=>{
+ const h=contactList();try{
+  h.install();await settle();h.note(0).click();h.w.realtimeTranslator.saveContactNote=async()=>null
+  await h.save('Keep this draft');assert.equal(h.w.document.querySelector('textarea').value,'Keep this draft');assert.match(h.w.document.querySelector('dialog [role="status"]').textContent,/未能确认/)
+  assert.equal(h.note(0).textContent,'First contact note');assert.equal(h.w.document.querySelector('button[type="submit"]').disabled,false)
+  Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));await settle()
+  assert.equal(h.w.document.querySelector('[data-hd-presence]').textContent,'')
+  Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));await settle()
+  assert.equal(h.w.document.querySelector('[data-hd-presence]').textContent,'在线')
+ }finally{h.dom.window.close()}
+})
+
+test('a timed-out note read releases the editor and an older success cannot overwrite the retry result',async()=>{
+ const h=contactList(),originalTimer=h.w.setTimeout.bind(h.w),get=h.w.realtimeTranslator.getContactNote
+ const pending:Array<(value:unknown)=>void>=[];let hanging=true
+ h.w.setTimeout=(fn:Function,delay:number)=>originalTimer(fn,delay===8000?30:delay)
+ h.w.realtimeTranslator.getContactNote=(peer:string)=>hanging&&peer==='peer:123@c.us'?new Promise(resolve=>pending.push(resolve)):get(peer)
+ try{
+  h.install();await settle();assert.equal(h.note(0).disabled,false);assert.equal(h.note(0).textContent,'重试备注')
+  hanging=false;h.note(0).click();await settle();assert.equal(h.w.document.querySelector('textarea')?.value,'First contact note')
+  for(const resolve of pending)resolve({text:'Expired old note',revision:99});await settle()
+  assert.equal(h.note(0).textContent,'First contact note');assert.equal(h.headerNote().textContent,'First contact note')
+ }finally{h.dom.window.close()}
+})
+
+test('a malformed or synchronously throwing bridge never enables an empty-note overwrite and retries stay bounded',async()=>{
+ for(const result of [null,{text:'bad',revision:-1},'throw']){
+  const h=contactList(),originalTimer=h.w.setTimeout.bind(h.w);let calls=0
+  h.w.setTimeout=(fn:Function,delay:number)=>originalTimer(fn,[800,1600,3200].includes(delay)?5:delay)
+  h.w.realtimeTranslator.getContactNote=()=>{calls++;if(result==='throw')throw new Error('temporary bridge error');return result}
+  try{
+   h.install();await settle();await settle();assert.equal(h.note(0).textContent,'重试备注');assert.equal(h.note(0).disabled,false)
+   assert.equal(h.w.document.querySelector('dialog'),null);assert.equal(h.writes.length,0)
+   assert.equal(calls,12,'three views retry only three times after the initial read')
+   await settle();assert.equal(calls,12)
+  }finally{h.dom.window.close()}
+ }
+})

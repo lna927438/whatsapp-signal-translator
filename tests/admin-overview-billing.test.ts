@@ -48,6 +48,20 @@ test('real parent overview and costs route show the same exact official total an
   assert.equal(h.w.document.querySelector('.adm-official-cost'),null);assert.deepEqual(h.errors,[])
  }finally{h.close()}
 })
+
+test('overview and costs default totals include only enabled providers and omit retired-provider missing bill prompts',async()=>{
+ const h=await mount({request:path=>{
+  if(path==='provider-balance')return balanceFixture(initialTime)
+  if(!path.startsWith('costs?'))return {enabledProviders:['deepseek'],configured:false,reason:'provider_disabled'}
+  return {...snapshot(path),enabledProviders:['deepseek']}
+ }})
+ try{
+  assert.match(h.official().textContent,/\$0\.19/);assert.doesNotMatch(h.official().textContent,/OpenAI|尚缺|0\.2385287/)
+  await h.navigate('/admin/costs');const card=h.w.document.querySelector('.adm-official-cost')
+  assert.match(card.textContent,/\$0\.19/);assert.doesNotMatch(card.textContent,/OpenAI|尚缺|0\.2385287/)
+  assert.doesNotMatch(h.w.document.querySelector('.adm-official-breakdown').textContent,/尚未配置/)
+ }finally{h.close()}
+})
 test('overview uses parent five-second refresh and costs keeps ten-second refresh without duplicate component timers',async()=>{
  const h=await mount();try{
   assert.equal([...h.timers.values()].filter(timer=>timer.ms===5000).length,1)

@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "private": true,
   "packageManager": "pnpm@11.5.2",
   "author": "lna927438",
@@ -79,6 +79,20 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "to": "voice",
+        "filter": [
+          "**/*"
+        ],
+        "from": "resources/voice/bin"
+      },
+      {
+        "to": "voice-notices",
+        "filter": [
+          "LICENSE-*.txt"
+        ],
+        "from": "resources/voice"
       }
     ],
     "win": {

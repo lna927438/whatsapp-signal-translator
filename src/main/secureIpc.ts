@@ -8,6 +8,7 @@ const accountFirst = new Set(['translator:get-runtime-settings','translator:cach
   'whatsapp:conversation','whatsapp:connection','translator:status'])
 const taskChannels = new Set(['send:edit-preview','send:back-translate','send:translate','send:submit','send:confirm-not-sent','send:cancel','send:confirm-sent'])
 for (const channel of ['whatsapp:contact-note','whatsapp:save-contact-note']) accountFirst.add(channel)
+accountFirst.add('voice:recognize')
 
 export function createSecureIpc(raw: IpcMain, window: BrowserWindow, whatsapp: { ownsSender(id: string, sender: number): boolean }) {
   function authorize(event: Event, channel: string, args: unknown[]) {

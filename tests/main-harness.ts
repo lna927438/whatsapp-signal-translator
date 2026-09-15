@@ -10,6 +10,7 @@ export function mainHarness(electronOverride?: any, fetchOverride?: typeof fetch
   const directory = mkdtempSync(resolve(tmpdir(), 'hellodog-test-'))
   const modules = new Map<string, any>()
   function load(file: string): any {
+    if(file.endsWith('.json'))return JSON.parse(readFileSync(resolve(file),'utf8'))
     const path = resolve(file.endsWith('.ts') ? file : file + '.ts')
     if (modules.has(path)) return modules.get(path)
     const exports: any = {}; modules.set(path, exports)

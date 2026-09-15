@@ -21,8 +21,7 @@ const defaults: AppSettings = {
   blockChineseSend: true,
   groupTranslate: false,
   fontSize: 13,
-  translationColor: '#c8d4e4',
-  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6-luna'
+  translationColor: '#c8d4e4'
 }
 
 export class SettingsStore {
@@ -41,16 +40,17 @@ export class SettingsStore {
   async publicSettings(): Promise<AppSettings> {
     const value = { ...await this.get() }
     for (const key of secretFields) if (value[key]) value[key] = 'saved-secret'
-    if (value.provider === 'openai') { value.openaiApiKey = 'cloud-managed'; value.openaiModel = '' }
+    // 'openai' is the legacy local identifier for HelloDog's authenticated
+    // cloud transport. It is not an OpenAI account or a provider selection.
+    delete value.openaiApiKey; delete value.openaiModel
     return value
   }
 
   async migrateLegacySecrets(): Promise<void> {
     const value = await this.get()
-    const raw = await fs.readFile(this.path, 'utf8').catch(() => '')
-    if (raw.startsWith('plain:') || secretFields.some(key => value[key] && !['saved-secret','cloud-managed'].includes(value[key]!))) {
-      await this.save(value)
-    }
+    // Rewrite on startup so retired credentials are removed from both old
+    // settings and the separate encrypted secret file, including empty keys.
+    await this.save(value)
   }
   private get path(): string {
     return join(app.getPath('userData'), 'settings.sec')
@@ -59,8 +59,6 @@ export class SettingsStore {
   async get(): Promise<AppSettings> {
     const envMerged: AppSettings = {
       ...defaults,
-      openaiApiKey: process.env.OPENAI_API_KEY || undefined,
-      openaiModel: process.env.OPENAI_MODEL || defaults.openaiModel,
       deeplApiKey: process.env.DEEPL_API_KEY || undefined,
       googleApiKey: process.env.GOOGLE_TRANSLATE_API_KEY || undefined
     }
@@ -76,9 +74,9 @@ export class SettingsStore {
         throw new Error('invalid_settings_format')
       }
       const saved = JSON.parse(json)
-      return { ...envMerged, ...saved, ...await this.secretValues(), ...(saved.closeBehaviorVersion === 1 ? {} : { closeToTray: true, closeBehaviorVersion: 1 }) }
+      return { ...envMerged, ...saved, ...await this.secretValues(), openaiApiKey: undefined, openaiModel: undefined, ...(saved.closeBehaviorVersion === 1 ? {} : { closeToTray: true, closeBehaviorVersion: 1 }) }
     } catch (error: any) {
-      if (error?.code === 'ENOENT') return { ...envMerged, ...await this.secretValues() }
+      if (error?.code === 'ENOENT') return { ...envMerged, ...await this.secretValues(), openaiApiKey: undefined, openaiModel: undefined }
       throw new Error('无法读取安全设置，原文件已保留，请使用原 Windows 用户重试。')
     }
   }
@@ -103,6 +101,7 @@ export class SettingsStore {
     await fs.mkdir(join(app.getPath('userData')), { recursive: true })
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统加密暂不可用，敏感设置尚未保存，原数据已保留。')
     const secrets = await this.secretValues()
+    delete secrets.openaiApiKey; delete settings.openaiApiKey; delete settings.openaiModel
     for (const key of secretFields) {
       const value = settings[key]
       if (value !== undefined && !['saved-secret','cloud-managed'].includes(value)) {

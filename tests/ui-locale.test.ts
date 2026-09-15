@@ -30,7 +30,7 @@ test('queued language changes persist across stores without replacing saved cred
     await Promise.all([first.save(preferences), second.setUiLanguage('en')])
     const restored = await new SettingsStore().get()
     assert.equal(restored.uiLanguage,'en')
-    assert.equal(restored.openaiApiKey, preferences.openaiApiKey)
+    assert.equal(restored.openaiApiKey, undefined, 'retired OpenAI credentials must stay removed during queued locale updates')
     assert.equal(restored.targetLanguage,'es-MX')
     assert.deepEqual([...restored.quickReplies], preferences.quickReplies)
     assert.equal((await second.runtime()).uiLanguage,'en')

@@ -12,6 +12,8 @@ $output = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } els
 if ((Test-Path -LiteralPath $output) -and (Get-ChildItem -LiteralPath $output -Force | Select-Object -First 1)) { throw 'Build output must be a new or empty directory; existing artifacts are preserved.' }
 & $node scripts/verify-signal-security.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Signal security core verification failed.' }
+& $node scripts/verify-voice-resources.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Voice resources verification failed.' }
 $sourceNotice = [IO.File]::ReadAllText((Join-Path $root 'integrations/notices/SOURCE.template.txt')).Replace('{version}', $version)
 [IO.File]::WriteAllText((Join-Path $root 'integrations/notices/SOURCE.txt'), $sourceNotice)
 if ($LocalUnsigned -and -not $Prerelease) { throw 'Unsigned packaging is permitted only for local prerelease acceptance.' }

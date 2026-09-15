@@ -27,3 +27,4 @@ resources/signal/jre/
 /integrations/signal-desktop/
 /integrations/tools/
 /resources/native/*.exe
+/resources/voice/bin/

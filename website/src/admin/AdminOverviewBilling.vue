@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import {computed,onMounted,onUnmounted,ref,watch} from 'vue'
 import {request,fmt,usd,type Row} from './client'
-import {currentBillPeriod,officialBillSummary,officialBillDelayed} from './officialBills'
+import {currentBillPeriod,officialBillSummary,officialBillDelayed,selectedBillProviders} from './officialBills'
 import {utcTimestamp} from './providerBalance'
 
 const props=defineProps<{identity:string;canReadCosts:boolean;officialAccess:boolean}>()
 const data=ref<Row>({}),busy=ref(false),error=ref(''),clock=ref(Date.now()),readAt=ref(Date.now())
 const queried=ref({...currentBillPeriod('UTC'),timezone:'UTC',provider:''})
 const official=computed(()=>officialBillSummary(props.officialAccess?data.value:{},queried.value,clock.value))
+const officialProviders=computed(()=>selectedBillProviders(data.value,queried.value))
+const officialZones=computed(()=>officialProviders.value.map(name=>name==='openai'?'OpenAI UTC':'DeepSeek GMT+8').join(' · '))
 const characters=computed(()=>{
  const value=(data.value.totals as Row|undefined)?.charged_characters
  if(value===null||value===undefined||value==='')return null
@@ -71,16 +73,16 @@ defineExpose({refresh})
   <small v-if="data.snapshotAt" class="adm-overview-sampled">读取于 {{utcTimestamp(data.snapshotAt)}}</small>
   <p v-if="error" class="adm-overview-delayed" role="status">{{characters===null?'本月数据读取失败，未显示为零。':'读取失败，保留上次数据；当前显示可能过期。'}} {{error}}</p>
  </article>
- <article v-if="canReadCosts&&officialAccess" class="adm-overview-official" :aria-busy="busy">
-  <span>各平台官方账单合计 · USD</span>
+ <article v-if="canReadCosts&&officialAccess&&officialProviders.length" class="adm-overview-official" :aria-busy="busy">
+  <span>{{officialProviders.length===1?(officialProviders[0]==='openai'?'OpenAI':'DeepSeek')+' 官方账单':'各平台官方账单合计'}} · USD</span>
   <strong v-if="official.complete" class="adm-cost-value">{{usd(official.total)}}</strong>
   <strong v-else class="adm-overview-pending">{{busy&&!data.snapshotAt?'读取中…':'尚缺官方账单'}}</strong>
   <p v-if="!official.complete&&official.partial!==null" class="adm-overview-partial">已同步部分：{{usd(official.partial)}}<br /><small>不是完整合计</small></p>
   <small v-if="!official.complete">待同步：{{official.missing.map(name=>name==='openai'?'OpenAI':'DeepSeek').join('、')}}<br /></small>
-  <small>{{queried.from}} 至 {{queried.to}}<br />OpenAI UTC · DeepSeek GMT+8</small>
+  <small>{{queried.from}} 至 {{queried.to}}<br />{{officialZones}}</small>
   <small v-if="sampled" class="adm-overview-sampled">本次汇总最早采集 / 录入：<br />{{utcTimestamp(sampled)}}</small>
   <p v-if="error||delayed" class="adm-overview-delayed" role="status">{{error?(data.snapshotAt?'读取失败，保留上次账单；当前显示可能过期。':'官方账单读取失败，尚未取得可用金额。'):'官方账单同步有延迟，保留上次金额。'}}</p>
-  <small>与用量页默认本月、全部通道口径一致</small>
+  <small>与用量页默认本月口径一致，仅汇总启用通道</small>
   <a class="adm-overview-cost-link" href="/admin/costs">查看用量与费用 →</a>
  </article>
 </template>
