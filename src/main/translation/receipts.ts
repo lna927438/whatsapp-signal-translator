@@ -23,6 +23,8 @@ export interface TranslationReceipt {
   providerMs?: number
   error?: string
   missingRetries?: number
+  missingRetryWindowAt?: number
+  missingRetryWindowCount?: number
   retryRequestId?: string
   createdAt: number
   updatedAt: number
@@ -49,8 +51,13 @@ export class TranslationReceipts {
   retryMissing(owner: string, requestId: string, limit: number) {
     return this.mutate(data => {
       const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
-      if (!receipt || receipt.state !== 'pending' || receipt.contentExpired || receipt.contextCleared || (receipt.missingRetries || 0) >= limit) return undefined
-      receipt.state = 'queued'; receipt.error = undefined; receipt.missingRetries = (receipt.missingRetries || 0) + 1; receipt.updatedAt = Date.now()
+      if (!receipt || receipt.state !== 'pending' || receipt.contentExpired || receipt.contextCleared) return undefined
+      const now = Date.now()
+      receipt.missingRetryWindowAt ??= now
+      receipt.missingRetryWindowCount ??= receipt.missingRetries || 0
+      if (now - receipt.missingRetryWindowAt >= 5 * 60000) { receipt.missingRetryWindowAt = now; receipt.missingRetryWindowCount = 0 }
+      if (receipt.missingRetryWindowCount >= limit) return undefined
+      receipt.state = 'queued'; receipt.error = undefined; receipt.missingRetries = (receipt.missingRetries || 0) + 1; receipt.missingRetryWindowCount++; receipt.updatedAt = now
       return receipt.request
     })
   }

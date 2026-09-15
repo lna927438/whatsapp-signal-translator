@@ -142,11 +142,15 @@ export function startHelloDogMessages(): void {
     } catch { retryAt.set(id,Date.now()+15000);showAction(englishUi?'Retry translation':'重试翻译'); }
     finally { pending.delete(id);schedule(); }
   }
-  function scan() { scheduled=undefined; document.querySelectorAll<HTMLElement>('[data-hellodog-id]').forEach(element=>{const rect=element.getBoundingClientRect();if(rect.bottom>0&&rect.top<innerHeight) void render(element);}); }
+  function scan() { scheduled=undefined; if(document.visibilityState==='hidden'||window.navigator.onLine===false)return; document.querySelectorAll<HTMLElement>('[data-hellodog-id]').forEach(element=>{const rect=element.getBoundingClientRect();if(rect.bottom>0&&rect.top<innerHeight) void render(element);}); }
   const schedule=()=>{if(!scheduled) scheduled=setTimeout(scan,400);};
   const observer=new MutationObserver(records=>{if(records.some(record=>!((record.target as Element).closest?.('[data-hellodog-ui]')||record.target.parentElement?.closest('[data-hellodog-ui]'))))schedule();});
   const start=()=>{observer.observe(document.body,{childList:true,characterData:true,subtree:true});document.addEventListener('scroll',schedule,true);schedule();};
   if(document.body) start();else document.addEventListener('DOMContentLoaded',start,{once:true});
+  // A failed request schedules one immediate scan, which falls inside its
+  // cooldown. Keep a lightweight wake-up so a stationary conversation recovers
+  // even when no new message, scroll or DOM mutation arrives.
+  setInterval(schedule,2000);
   const refreshTranslations=()=>{revision++;results.clear();retryAt.clear();document.querySelectorAll('[data-hellodog-ui]').forEach(node=>node.remove());schedule();};
   ipcRenderer.on('hellodog:refresh',refreshTranslations);
   ipcRenderer.on('hellodog:insert-draft',(_event,request:{id:string;text:string})=>{

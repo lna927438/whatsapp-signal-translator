@@ -84,16 +84,27 @@ test('WhatsApp restores outgoing history and offers manual history translation w
  }finally{h.dom.window.close()}
 })
 function signal(translate:(request:any)=>Promise<any>,options:{shortTranslationTimeout?:boolean;language?:string}={}){
- const dom=new JSDOM('<div data-hellodog-id="m1"><div class="module-message__text">hello</div></div>',{runScripts:'outside-only'}),w=dom.window as any,events=new Map(),calls:any[]=[],exports:any={}
+ const dom=new JSDOM('<div data-hellodog-id="m1"><div class="module-message__text">hello</div></div>',{runScripts:'outside-only'}),w=dom.window as any,events=new Map(),calls:any[]=[],exports:any={},intervals:Function[]=[]
  Object.defineProperty(w.navigator,'language',{value:options.language||'zh-CN'});
  w.HTMLElement.prototype.getBoundingClientRect=()=>({top:10,bottom:90,left:0,right:300})
  const message={id:'m1',attributes:{body:'hello',type:'outgoing',conversationId:'c1',sent_at:1,sendStateByConversationId:{peer:{status:'Sent'}}} as any,get(key:string){return this.attributes[key]}}
  w.MessageCache={getById:(id:string)=>id===message.id?message:undefined};w.ConversationController={get:()=>({getTitle:()=> 'Fixture',get:()=> 'direct'})}
  const code=ts.transpileModule(readFileSync(new URL('../integrations/hellodog-source/hellodog.preload.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
- runInNewContext(code,{exports,window:w,document:w.document,innerHeight:700,process:{env:{HELLODOG_EMBEDDED:'1',HELLODOG_BRIDGE_ACTIVE:'1'}},MutationObserver:w.MutationObserver,setTimeout:(f:any,ms:number)=>w.setTimeout(f,ms===400?10:options.shortTranslationTimeout&&ms===45000?30:ms),clearTimeout:w.clearTimeout.bind(w),setInterval:()=>0,require:(name:string)=>name==='electron'?{ipcRenderer:{on:(name:string,fn:Function)=>events.set(name,fn),send(){},invoke:async(_:string,r:any)=>{calls.push(r);return translate(r)}}}:{}})
+ runInNewContext(code,{exports,Date,window:w,document:w.document,innerHeight:700,process:{env:{HELLODOG_EMBEDDED:'1',HELLODOG_BRIDGE_ACTIVE:'1'}},MutationObserver:w.MutationObserver,setTimeout:(f:any,ms:number)=>w.setTimeout(f,ms===400?10:options.shortTranslationTimeout&&ms===45000?30:ms),clearTimeout:w.clearTimeout.bind(w),setInterval:(fn:Function)=>{intervals.push(fn);return intervals.length},require:(name:string)=>name==='electron'?{ipcRenderer:{on:(name:string,fn:Function)=>events.set(name,fn),send(){},invoke:async(_:string,r:any)=>{calls.push(r);return translate(r)}}}:{}})
  exports.startHelloDogMessages()
- return {dom,w,calls,message,refresh:()=>events.get('hellodog:refresh')(),node:()=>w.document.querySelector('.hellodog-translation')}
+ return {dom,w,calls,message,intervals,refresh:()=>events.get('hellodog:refresh')(),node:()=>w.document.querySelector('.hellodog-translation')}
 }
+
+test('Signal retries stationary visible history after cooldown without scrolling or new messages',async()=>{
+ const realNow=Date.now;let clock=realNow(),available=false;Date.now=()=>clock;
+ const h=signal(async()=>{if(!available)throw Error('temporarily busy');return{enabled:true,text:'自动恢复译文'}});
+ try{
+  await until(()=>h.w.document.querySelector('button')?.textContent==='重试翻译');
+  available=true;clock+=15001;h.intervals.forEach(fn=>fn());
+  await until(()=>h.node()?.textContent==='自动恢复译文');assert.equal(h.calls.length,2);
+  h.intervals.forEach(fn=>fn());await tick();assert.equal(h.calls.length,2);
+ }finally{Date.now=realNow;h.dom.window.close()}
+})
 
 test('Signal a stalled history translation becomes retryable with the same message and ignores its late result',async()=>{
  let release:(value:any)=>void=()=>{},first=true;

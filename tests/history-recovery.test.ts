@@ -23,13 +23,55 @@ test('confirmed uncharged history failure recovers once across concurrent scans 
   const reopened=h.create();await reopened.translateIncoming({...request,conversationId:'renamed',context:[]});await reopened.clearCache();await reopened.translateIncoming(request);assert.equal(h.calls,2);
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
-test('history recovery has a persistent limit and manual Retry remains usable without retrying completed work',async()=>{
+test('history recovery limits each burst and manual Retry remains usable without retrying completed work',async()=>{
  const h=fixture();try{
   h.setFailures(10);let e=h.create();
   for(let i=0;i<6;i++){await assert.rejects(e.translateIncoming(request));if(i===2)e=h.create();}
   assert.equal(h.calls,3);h.setFailures(0);await e.translateIncoming(request,true);assert.equal(h.calls,4);
   await e.translateIncoming(request,true);assert.equal(h.calls,4);
  }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('exhausted automatic history retries recover after cooldown across restart with one charge',async()=>{
+ const h=fixture(),realNow=Date.now;let clock=realNow();Date.now=()=>clock;
+ try{
+  h.setFailures(3);let e=h.create();
+  for(let i=0;i<6;i++)await assert.rejects(e.translateIncoming(request));
+  assert.equal(h.calls,3);await e.flush();e=h.create();clock+=299999;
+  await assert.rejects(e.translateIncoming(request));assert.equal(h.calls,3);
+  clock+=1;const results=await Promise.all(Array.from({length:10},()=>e.translateIncoming(request)));
+  assert.equal(h.calls,4);assert.equal(new Set(results).size,1);
+  assert.equal((await e.history()).filter((r:any)=>r.state==='charged').length,1);
+  await e.flush();await h.create().translateIncoming(request);assert.equal(h.calls,4);
+ }finally{Date.now=realNow;rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('an old lifetime-capped receipt is eligible again without clearing history or changing its content',async()=>{
+ const h=fixture(),realNow=Date.now;let clock=realNow();Date.now=()=>clock;
+ try{
+  const e=h.create(),old={...request,requestId:'message-retry-old',historyRetryCount:2,cacheUserId:'owner'};
+  await e.receipts.prepare('owner','openai',old);await e.receipts.update('owner',old.requestId,{state:'failed',chargedCharacters:0});
+  await assert.rejects(e.translateIncoming(old));assert.equal(h.calls,0);
+  clock+=300001;await e.translateIncoming(old);assert.equal(h.calls,1);
+  await e.translateIncoming(old);assert.equal(h.calls,1);
+ }finally{Date.now=realNow;rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('only an authoritative not-found result may reopen an exhausted missing-request window',async()=>{
+ const h=fixture(),realNow=Date.now;let clock=realNow();Date.now=()=>clock;
+ try{
+  let e=h.create();const prepared=await e.messageRequests.prepare({...request,cacheUserId:'owner'});
+  await e.receipts.prepare('owner','openai',prepared);await e.receipts.update('owner',prepared.requestId,{state:'pending'});
+  for(let i=0;i<3;i++){
+   e.cloudProvider=()=>({status:async()=>({state:'not_found'})});e.createProvider=()=>({translate:async()=>{throw Error('reply lost')}});
+   await assert.rejects(e.translateIncoming(request));
+  }
+  assert.equal((await e.receipts.get('owner',prepared.requestId)).missingRetries,2);
+  await e.flush();e=h.create();clock+=300001;e.cloudProvider=()=>({status:async()=>({state:'processing'})});
+  await assert.rejects(e.translateIncoming(request));assert.equal(h.calls,0);
+  e.cloudProvider=()=>({status:async()=>({state:'not_found'})});await e.translateIncoming(request);
+  assert.equal(h.calls,1);assert.equal(h.ids[0],prepared.requestId);
+ }finally{Date.now=realNow;rmSync(h.directory,{recursive:true,force:true})}
 })
 test('an unknown history outcome or an outgoing failure cannot create a replacement API request',async()=>{
  const h=fixture();try{
@@ -55,6 +97,18 @@ test('after login recovery a confirmed missing request resumes with the exact or
   e.cloudProvider=()=>({status:async()=>({state:'not_found'})});
   await e.translateIncoming(request);assert.equal(h.calls,1);assert.equal(h.ids[0],prepared.requestId);
   await e.translateIncoming(request);assert.equal(h.calls,1);
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('a transient request-index write failure cannot poison future cache lookups',async()=>{
+ const h=fixture();try{
+  const e=h.create();await e.translateIncoming(request);assert.equal(h.calls,1);
+  const requests=e.messageRequests,write=requests.store.write.bind(requests.store);let fail=true;
+  requests.store.write=async(value:any)=>{if(fail){fail=false;throw Error('temporary disk failure')}return write(value)};
+  await assert.rejects(requests.prepare({...request,messageId:'other',cacheUserId:'owner'}),/disk/);
+  assert.ok(await e.cached(request));await e.translateIncoming(request);assert.equal(h.calls,1);
+  // Recovery never treats corrupt/locked storage as an empty message index.
+  requests.store.read=async()=>{throw Error('record unreadable')};await assert.rejects(e.cached(request),/unreadable/);
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
 

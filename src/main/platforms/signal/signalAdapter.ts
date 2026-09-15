@@ -429,7 +429,7 @@ export class SignalAdapter {
   async translateMessage(recordId:string, identity:{account:string;peer:string;timestamp:number;fromMe:boolean}, manual=false):Promise<string|undefined> {
     const owner=this.onlineUser, record=await this.recordForSignalAccount(identity.account)
     if(!owner||record?.id!==recordId||owner!==this.onlineUser)throw new Error('Signal 消息与账号不匹配。')
-    await this.historyWrites
+    await this.historyWrites.catch(() => undefined)
     const message=(await this.historyStore.read()).find(item=>item.owner===owner&&item.account===identity.account&&item.peer===identity.peer&&item.timestamp===identity.timestamp&&item.fromMe===Boolean(identity.fromMe))
     if(!message||message.expired||message.system||(message.expiresAt||Infinity)<=Date.now())return
     if(message.fromMe&&message.taskId&&message.translated&&message.translated!==message.original)return message.translated
@@ -439,7 +439,7 @@ export class SignalAdapter {
     const request={text:message.original,sourceLanguage:'auto',targetLanguage:runtime.localLanguage,accountId:recordId,conversationId:'signal:'+message.peer,messageId:message.taskId||`${message.peer}:${message.timestamp}`,context:this.context(recordId,message.peer),quality:runtime.translationQuality}
     if(alreadyInTargetLanguage({...request,quality:undefined}))return
     let translated=await this.translator.cached(request)
-    if(translated===undefined&&(manual||runtime.receiveAutoTranslate&&runtime.historyMode!=='manual'&&(runtime.historyMode==='visible'||message.timestamp>=this.startedAt)&&(!message.peer.startsWith('group:')||runtime.groupTranslate)))translated=await this.translator.translate(request)
+    if(translated===undefined&&(manual||runtime.receiveAutoTranslate&&runtime.historyMode!=='manual'&&(runtime.historyMode==='visible'||message.timestamp>=this.startedAt)&&(!message.peer.startsWith('group:')||runtime.groupTranslate)))translated=await this.translator.translateIncoming(request,manual)
     if(owner!==this.onlineUser)throw new Error('登录状态已变化。')
     if(translated!==undefined && (message.expiresAt||Infinity)>Date.now()){
       const saved=await this.rememberMessage(owner,{...message,...(message.fromMe?{displayTranslated:translated}:{translated})})

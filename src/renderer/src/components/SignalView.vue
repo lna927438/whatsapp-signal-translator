@@ -287,12 +287,12 @@ async function scanDisplayTranslations() {
     const key=displayKey(message)
     if(displayActive>=2)break
     const failure = displayFailures.get(key)
-    if(!visible.has(key)||displayAttempts.has(key)||failure && (failure.count>=5 || failure.retryAt>Date.now())||message.system||message.expired||!message.original||!/\p{L}/u.test(message.original)||message.displayTranslated||message.translated&&message.translated!==message.original)continue
+    if(!visible.has(key)||displayAttempts.has(key)||failure && failure.retryAt>Date.now()||message.system||message.expired||!message.original||!/\p{L}/u.test(message.original)||message.displayTranslated||message.translated&&message.translated!==message.original)continue
     displayAttempts.add(key);displayActive++
     const accountId=props.accountRecord.id, userId=props.userId, identity=messageIdentity(message)
     void bounded<any>(Promise.resolve().then(()=>window.desktopAPI.displaySignalMessage(accountId,identity)),45000,t('翻译响应较慢，原消息已保存。'))
       .then(value=>{ if (!disposed && props.accountRecord.id===accountId && props.userId===userId) { displayFailures.delete(key); applyDisplayResult(message,value) } })
-      .catch(()=>{ if(disposed || props.accountRecord.id!==accountId || props.userId!==userId)return; const count=(displayFailures.get(key)?.count||0)+1; displayAttempts.delete(key); displayFailures.set(key,{count,retryAt:Date.now()+Math.min(60000,3000*2**(count-1))}) })
+      .catch(()=>{ if(disposed || props.accountRecord.id!==accountId || props.userId!==userId)return; const count=(displayFailures.get(key)?.count||0)+1; displayAttempts.delete(key); displayFailures.set(key,{count,retryAt:Date.now()+Math.min(300000,3000*2**Math.min(7,count-1))}) })
       .finally(()=>{displayActive--;if(!disposed)void scanDisplayTranslations()})
   }
 }

@@ -303,6 +303,7 @@ export const whatsappInjectionScript = String.raw`
   window.__RT_APPLY_SETTINGS__ = settings => {
     displayRevision++;
     applyTranslationStyle(settings);
+    resumeIncoming();
   };
 
   const addTranslation = (container, text, settings, kind = 'incoming') => {
@@ -364,18 +365,22 @@ export const whatsappInjectionScript = String.raw`
   const incomingError = (error, payload) => {
     const message = String(error?.message || error);
     incomingPaused = /登录|停用|禁用|字符不足|余额不足|额度|401|403|402|sign in|unauthori[sz]ed|insufficient|disabled/i.test(message);
+    if (payload) payload.error = message;
     if (payload && !incomingPaused) {
       payload.failures = (payload.failures || 0) + 1;
       payload.retryAt = Date.now() + Math.min(60000, 5000 * 2 ** (payload.failures - 1));
     } else {
       incomingFailures += 1;
-      incomingRetryAt = Date.now() + Math.min(60000, 5000 * 2 ** (incomingFailures - 1));
+      incomingRetryAt = Date.now() + (incomingPaused ? 60000 : Math.min(60000, 5000 * 2 ** Math.min(4, incomingFailures - 1)));
     }
     reportStatus('error', message);
   };
   const translateVisible = async () => {
     const api = window.realtimeTranslator;
-    if (!api || incomingBusy || incomingPaused || Date.now() < incomingRetryAt || navigator.onLine === false) return;
+    if (!api || incomingBusy || Date.now() < incomingRetryAt || navigator.onLine === false || document.visibilityState === 'hidden') return;
+    // Recheck access after cooldown: a refreshed login or topped-up balance
+    // must not require restarting the page to release a permanent local latch.
+    incomingPaused = false;
     incomingBusy = true;
     try {
       const conversation = conversationInfo();
@@ -437,6 +442,7 @@ export const whatsappInjectionScript = String.raw`
           && extractMessageText(container) === text && conversationInfo().id === conversation.id && targetKey() === target;
         const finish = translated => {
           if (!current()) return;
+          if (typeof translated !== 'string' || !translated.trim()) throw new Error('暂未取得译文，将自动重试，也可以点击重试翻译。');
           if (translated && !equivalentDisplayText(translated, text)) addTranslation(container, translated, settings, 'incoming');
           payload.sameText = !translated || equivalentDisplayText(translated, text);
           container.setAttribute(RT_ATTR, 'done');
@@ -446,6 +452,7 @@ export const whatsappInjectionScript = String.raw`
           const button = document.createElement('button');
           button.setAttribute('data-rt-ui', 'history-action'); button.setAttribute('data-rt-history-action', '');
           button.textContent = ui(retry ? '重试翻译' : '翻译此消息'); button.title = ui('翻译为我的语言');
+          if (retry && payload.error) button.title = payload.error;
           Object.assign(button.style, { display: 'block', background: 'transparent', color: '#8fb7ab', border: '0', padding: '4px 0', cursor: 'pointer', fontSize: '11px' });
           button.onclick = async () => {
             if (button.disabled || !current() || incomingActive.has(container)) return;

@@ -20,7 +20,9 @@ export class MessageRequests {
   }
   async lookup(request: TranslationRequest): Promise<TranslationRequest | undefined> {
     if (!request.messageId || request.requestId) return undefined
-    await this.chain
+    // Retry the actual durable read after a transient write failure. A rejected
+    // queue tail is not evidence that the saved file remains unreadable.
+    await this.chain.catch(() => undefined)
     return Object.values(await this.store.read()).find(item => this.matches(item,request))
   }
   prepare(request: TranslationRequest): Promise<TranslationRequest> {
@@ -46,15 +48,22 @@ export class MessageRequests {
   async flush() { await this.chain }
   /** Caller must first verify a durable failed receipt with zero charged characters.
    * The compare-and-swap coalesces scans/retries; persist before any new API call. */
-  recoverFailed(request: TranslationRequest, limit: number): Promise<TranslationRequest | undefined> {
+  recoverFailed(request: TranslationRequest, limit: number, failedAt = Date.now()): Promise<TranslationRequest | undefined> {
     if (!request.messageId || !request.requestId || request.requestId.startsWith('send-')) return Promise.resolve(undefined)
     const work = this.chain.catch(() => undefined).then(async () => {
       const entries = await this.store.read()
       const prior = Object.values(entries).find(item => this.matches(item, request))
       if (prior && prior.requestId !== request.requestId) return { ...prior }
       const count = prior?.historyRetryCount || request.historyRetryCount || 0
-      if (count >= limit) return undefined
+      const now = Date.now(), saved = prior || request
+      // Limit bursts, not the lifetime of a message. Older clients persisted a
+      // lifetime cap: a short outage could otherwise disable a message forever.
+      const windowAt = saved.historyRetryWindowAt ?? failedAt
+      const elapsed = now - windowAt >= 5 * 60000
+      const windowCount = elapsed ? 0 : (saved.historyRetryWindowCount ?? count)
+      if (windowCount >= limit) return undefined
       const next = { ...request, historyRetryCount: count + 1,
+        historyRetryWindowAt: elapsed ? now : windowAt, historyRetryWindowCount: windowCount + 1,
         requestId: 'message-retry-' + createHash('sha256').update(request.requestId!).digest('hex') }
       const keys = Object.keys(entries).filter(key => this.matches(entries[key], request))
       if (!keys.length) keys.push(createHash('sha256').update(JSON.stringify([request.cacheUserId, request.accountId, request.messageId, request.sourceLanguage, request.targetLanguage, request.text])).digest('hex'))

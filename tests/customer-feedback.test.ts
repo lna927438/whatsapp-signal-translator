@@ -32,7 +32,7 @@ test('Signal typing expires, respects stop/order, ignores stale packets and sepa
 function adapterFixture(){
  const h=mainHarness(),cache=new Map<string,string>(),requests:any[]=[],events:any[]=[],record:any={id:'signal-a',platform:'signal',signalAccount:'+12025550100',historyMode:'visible'}
  const key=(r:any)=>JSON.stringify([r.accountId,r.conversationId,r.messageId,r.text,r.targetLanguage])
- const translator={cached:async(r:any)=>cache.get(key(r)),translate:async(r:any)=>{requests.push(r);cache.set(key(r),'这是译文');return '这是译文'},history:async()=>[]}
+ const translator={cached:async(r:any)=>cache.get(key(r)),translateIncoming:async(r:any)=>{requests.push(r);cache.set(key(r),'这是译文');return '这是译文'},history:async()=>[]}
  const {SignalAdapter}=h.load('src/main/platforms/signal/signalAdapter.ts'),adapter=new SignalAdapter(translator)
  adapter.setOnlineUser('owner');adapter.accounts.list=async()=>[record];adapter.accounts.updateContactLanguage=async()=>{}
  adapter.settings.runtime=async()=>({localLanguage:'zh-CN',receiveAutoTranslate:true,groupTranslate:true,historyMode:'visible'})

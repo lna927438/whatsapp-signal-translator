@@ -60,7 +60,7 @@ test('Signal receiving subscriptions pause one account without disconnecting oth
 test('Signal emits a single new-message event plus an update and stores history under the receiving user',async()=>{
  const h=mainHarness();try{
  const {SignalAdapter}=h.load('src/main/platforms/signal/signalAdapter.ts')
- const adapter=new SignalAdapter({cached:async()=>undefined,translate:async()=> '你好',history:async()=>[]});adapter.setOnlineUser('owner')
+ const adapter=new SignalAdapter({cached:async()=>undefined,translateIncoming:async()=> '你好',history:async()=>[]});adapter.setOnlineUser('owner')
  adapter.accounts.list=async()=>[{id:'a',platform:'signal',signalAccount:'+12025550100',runtimeMode:'receiving'}]
  adapter.accounts.updateContactLanguage=async()=>{}
  adapter.settings.runtime=async()=>({localLanguage:'zh-CN',receiveAutoTranslate:true,historyMode:'visible'})

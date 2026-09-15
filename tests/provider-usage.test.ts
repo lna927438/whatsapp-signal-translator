@@ -86,7 +86,7 @@ test('single owner policy prevents creating, replacing or removing another admin
 })
 test('official bill comparison is an audited snapshot and never calls incomplete history matched',async()=>{
   const args=await begin();await complete(args)
-  const day=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai'}).format(new Date())
+  const day='2026-09-11' // This fixture's provider call is fixed to this day, independent of request creation.
   const data={from:day,to:day,officialUsd:'0.000078240000',officialTokens:150,officialRequests:1,reference:'Local exact bill fixture'}
   const id=randomUUID(),match=await mutate('cost.reconcile','deepseek',data,id)
   assert.equal(match.status,'matched');assert.equal(match.differenceUsd,0)

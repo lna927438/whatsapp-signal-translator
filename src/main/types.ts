@@ -100,6 +100,8 @@ export interface TranslationRequest {
   cacheUserId?: string
   /** Local history recovery budget. Never supplied to the provider as usage. */
   historyRetryCount?: number
+  historyRetryWindowAt?: number
+  historyRetryWindowCount?: number
   text: string
   targetLanguage: string
   sourceLanguage?: string

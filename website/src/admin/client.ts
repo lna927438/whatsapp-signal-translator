@@ -135,9 +135,10 @@ export const s=(row:Row,key:string)=>row[key]==null?'':String(row[key])
 export const n=(row:Row,key:string)=>Number(row[key]||0)
 export const fmt=(v:unknown)=>new Intl.NumberFormat('zh-CN').format(Number(v||0))
 export const date=(v:unknown)=>v?new Date(String(v)).toLocaleString('zh-CN',{hour12:false}):'暂无'
-export const usd=(v:unknown)=>v==null?'未核算':`$${Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:9})}`
+export {usd} from './money'
 export const tokens=(v:unknown)=>v==null?'未记录':fmt(v)
 export const costLabels:Record<string,string>={calculated:'已按实际用量核算',historical_unavailable:'历史用量未记录',missing_usage:'缺少用量回执',missing_cache:'缺少缓存明细',unknown_price:'缺少对应单价',unknown_time:'计费时段待确认',unknown_response:'API 结果未确认',pending:'等待 API 回执',peak:'高峰',off_peak:'空闲',provider:'API 时间',request_window:'请求所在时段',incomplete:'缺少历史明细'}
+Object.assign(costLabels,{mixed:'OpenAI + DeepSeek',not_attempted:'未调用翻译服务',unknown_attempt_cost:'部分通道费用待核算',missing_cache_write:'缺少缓存写入回执',unknown_service_tier:'计价档位待确认',default:'标准',fixed:'固定单价'})
 export const labels:Record<string,string>={active:'正常',blocked:'已停用',revoked:'已撤销',pending:'待确认',paid:'已入账',cancelled:'已取消',failed:'失败',refunded:'已退款',matched:'账单一致',mismatch:'需要核对',not_charged:'未扣费',cache:'缓存命中',free:'免费处理',processing:'处理中',completed:'已完成',unknown:'结果未知',translation:'翻译扣费',recharge:'充值',adjustment:'人工调整',refund:'翻译补偿',bonus:'赠送',manual:'人工订单',stable:'稳定版',beta:'测试版',info:'一般',warning:'提醒',critical:'重要'}
 export const label=(v:unknown)=>costLabels[String(v)]||labels[String(v)]||String(v??'暂无')
 export const actionNames:Record<string,string>={'wallet.adjust':'余额调整','translation.refund':'翻译补偿','user.update':'用户设置','user.note':'用户备注','order.create':'创建人工订单','order.settle':'确认收款','order.cancel':'取消订单','plan.save':'保存套餐','version.save':'保存版本','announcement.save':'保存公告','role.set':'管理员权限'}

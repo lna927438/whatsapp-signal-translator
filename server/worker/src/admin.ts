@@ -1,4 +1,5 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
+import { billingSyncStatus, syncOfficialCosts, BillingSyncError, type BillingSyncEnv } from './billingSync'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
@@ -6,10 +7,16 @@ export interface AdminServices {
   securityEvent?(actor:string,code:string):Promise<void>
   origins: readonly string[]
   providerBalance?():Promise<unknown>
+  billingStatus?():unknown
+  syncBilling?(range:unknown):Promise<unknown>
 }
 
 export const adminErrors: Record<string, [number, string]> = {
   unauthorized: [401, '登录已失效，请重新登录。'],
+  billing_not_configured:[503,'尚未连接官方账单读取权限或指定 HelloDog 的账单范围。'],
+  billing_permission:[403,'官方账单读取权限不足，请管理员核对账单专用密钥。'],
+  billing_data_incomplete:[503,'官方账单数据尚不完整，已保留上次同步结果，请稍后再试。'],
+  billing_unavailable:[503,'官方账单暂时无法同步，已保留上次结果。'],
   mfa_required: [403, '请先完成管理员二次验证。'],
   mfa_step_up: [403, '为保护账号，请输入验证器中的验证码，再继续此操作。'],
   rate_limited: [429, '管理请求较多，请稍后重试。'],
@@ -54,14 +61,14 @@ export function validateMutation(body: unknown) {
   if (!uuid.test(operationId)) fail()
   const d=body.data
   const keys:Record<string,string[]>={
-    'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference'],
+    'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference','timezone'],
     'wallet.adjust':['amount','expectedBalance'], 'translation.refund':[],
     'user.update':['status','plan_code'], 'user.note':['note','expectedRevision'], 'order.create':['plan_code'], 'order.settle':['reference'], 'order.cancel':[],
     'plan.save':['name','characters','price','currency','active'], 'role.set':['role'],
     'version.save':['channel','url','sha256','notes','active'], 'announcement.save':['title','body','level','active','starts_at','ends_at'],
     'notice.save':['title','body','level','active','starts_at','ends_at','popup','audience','recipient','action','expectedRevision']
   }
-  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d))) fail()
+  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&k==='timezone'))) fail()
   if (!['plan.save','version.save','cost.reconcile'].includes(action) && !uuid.test(target)) fail()
   if ('active' in d && typeof d.active !== 'boolean') fail()
   if ('plan_code' in d && !/^[a-z][a-z0-9_-]{0,39}$/.test(string(d.plan_code,1,40))) fail()
@@ -69,10 +76,11 @@ export function validateMutation(body: unknown) {
     case 'wallet.add': integer(d.amount,1,1000000000);break
     case 'cost.reconcile':
       choice(target,['deepseek','openai']);string(d.reference,3,200)
-      if(!/^\d{1,9}(\.\d{1,12})?$/.test(string(d.officialUsd,1,24)))fail()
+      if(d.timezone!==undefined)choice(d.timezone,['UTC','Asia/Shanghai'])
+      if(!/^-?\d{1,9}(\.\d{1,12})?$/.test(string(d.officialUsd,1,24)))fail()
       for(const k of ['from','to'])if(!/^\d{4}-\d{2}-\d{2}$/.test(string(d[k],10,10))||!Number.isFinite(Date.parse(String(d[k]))))fail()
       if(String(d.to)<String(d.from))fail()
-      integer(d.officialTokens,0,Number.MAX_SAFE_INTEGER);integer(d.officialRequests,0,1000000000);break
+      if(d.officialTokens!==null)integer(d.officialTokens,0,Number.MAX_SAFE_INTEGER);if(d.officialRequests!==null)integer(d.officialRequests,0,1000000000);break
     case 'wallet.adjust': integer(d.amount,-1000000000,1000000000); if(d.amount===0)fail();integer(d.expectedBalance,0,Number.MAX_SAFE_INTEGER);break
     case 'user.update': choice(d.status,['active','blocked']);break
     case 'user.note': string(d.note,0,1000);integer(d.expectedRevision,0,999999999999999);break
@@ -144,6 +152,13 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
       return json({ verified: true })
     }
     if(kind==='security'&&request.method==='GET')return json(await services.rpc('admin_security_overview',{p_actor:actor}))
+    if((kind==='billing-status'&&request.method==='GET')||(kind==='billing-sync'&&request.method==='POST')){
+      const session=await services.rpc('admin_read',{p_actor:actor,p_kind:'session',p_filter:{}}) as {role?:string}
+      if(session.role!=='owner')throw new AdminError('admin_forbidden')
+      if(kind==='billing-status')return json(services.billingStatus?.()||{configured:false,message:'尚未连接官方账单同步。'})
+      if(!services.syncBilling)throw new AdminError('billing_not_configured')
+      return json(await services.syncBilling(await boundedJson(request)))
+    }
     if(request.method==='GET' && kind==='provider-balance'){
       const session=await services.rpc('admin_read',{p_actor:actor,p_kind:'session',p_filter:{}}) as {role?:string}
       if(session.role!=='owner')throw new AdminError('admin_forbidden')
@@ -152,7 +167,8 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
     }
     if(request.method==='GET' && kinds.includes(kind)) {
       const filter:Record<string,string>={}
-      for(const [key,value] of url.searchParams){if(!['q','status','offset','userId','operationId','from','to','provider'].includes(key) || value.length>160)fail();filter[key]=value}
+      for(const [key,value] of url.searchParams){if(!['q','status','offset','userId','operationId','from','to','provider','timezone'].includes(key) || value.length>160)fail();filter[key]=value}
+      if(filter.timezone&&!['UTC','Asia/Shanghai'].includes(filter.timezone))fail()
       for(const k of ['from','to'])if(filter[k]&&(!/^\d{4}-\d{2}-\d{2}$/.test(filter[k])||!Number.isFinite(Date.parse(filter[k]))))fail()
       if(filter.provider&&!['deepseek','openai'].includes(filter.provider))fail()
       if(filter.offset && (!/^\d{1,6}$/.test(filter.offset) || Number(filter.offset)>100000))fail()
@@ -167,7 +183,7 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
     }
     return json({error:'not_found',message:'没有找到管理接口。'},404)
   } catch(error) {
-    const code=error instanceof AdminError && adminErrors[error.code]?error.code:'unavailable'
+    const code=(error instanceof AdminError||error instanceof BillingSyncError) && adminErrors[error.code]?error.code:'unavailable'
     const [status,message]=adminErrors[code]
     if(status===429)headers['Retry-After']='60'
     if(authenticatedActor&&['mfa_required','mfa_step_up','rate_limited'].includes(code))await services.securityEvent?.(authenticatedActor,code).catch(()=>undefined)
@@ -175,18 +191,20 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
   }
 }
 
-export function supabaseAdminServices(env:{SUPABASE_URL:string;SUPABASE_PUBLISHABLE_KEY:string;SUPABASE_SECRET_KEY:string;DEEPSEEK_API_KEY?:string}):AdminServices {
+export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_KEY:string;DEEPSEEK_API_KEY?:string}):AdminServices {
   return {
     origins:['https://admin.hellodog.net','https://hellodog.net','https://www.hellodog.net'],
+    billingStatus(){return billingSyncStatus(env)},
+    syncBilling(range){return syncOfficialCosts(env,range)},
     async securityEvent(actor,code){
       await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_security_event`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_actor:actor,p_code:code}),signal:AbortSignal.timeout(5000)})
     },
     async providerBalance(){
       if(!env.DEEPSEEK_API_KEY)throw new AdminError('unavailable')
-      const response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${env.DEEPSEEK_API_KEY}`},signal:AbortSignal.timeout(10000)})
+      const response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${env.DEEPSEEK_API_KEY}`},redirect:'error',signal:AbortSignal.timeout(10000)})
       if(!response.ok)throw new AdminError('unavailable')
       const payload=await response.json() as {is_available?:boolean;balance_infos?:Record<string,unknown>[]}
-      const valid=(v:unknown)=>typeof v==='string'&&/^\d+(\.\d+)?$/.test(v)?v:null
+      const valid=(v:unknown)=>typeof v==='string'&&/^-?\d{1,12}(\.\d{1,12})?$/.test(v)?v:null
       return {provider:'deepseek',available:payload.is_available===true,snapshotAt:new Date().toISOString(),balances:(payload.balance_infos||[]).filter(x=>['USD','CNY'].includes(String(x.currency))).map(x=>({currency:x.currency,total:valid(x.total_balance),granted:valid(x.granted_balance),paid:valid(x.topped_up_balance)}))}
     },
     async authenticate(token){

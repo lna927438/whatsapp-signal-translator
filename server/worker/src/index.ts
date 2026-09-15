@@ -7,8 +7,9 @@ import { wrongTargetScript } from '../../../src/shared/translationResult'
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
 import { providerReceipt, captureProviderReceipt, type ProviderReceipt } from './providerUsage'
+import { syncBillingSnapshots, type BillingSyncEnv } from './billingSync'
 
-export interface Env extends ProviderEnv {
+export interface Env extends ProviderEnv, BillingSyncEnv {
   API_RATE_LIMITER: SecurityWorkerBindings['API_RATE_LIMITER']
   SUPABASE_URL: string
   SUPABASE_PUBLISHABLE_KEY: string
@@ -453,8 +454,8 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-dual1', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.10-dual1', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.11', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.11', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   const profile = await getProfile(env, user.id)
@@ -506,7 +507,14 @@ export default {
       return failure('internal_error')
     }
   },
-  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env): Promise<void> {
+    if (event.cron === '*/5 * * * *') {
+      const result = await syncBillingSnapshots(env)
+      // Log only completion states, never account balances, credentials or
+      // detailed statements. Billing is separate from translation requests.
+      console.info(JSON.stringify({ event: 'billing_sync', providers: Object.entries(result).map(([provider, value]) => ({ provider, ok: !('error' in value), skipped: 'skipped' in value })) }))
+      return
+    }
     const result = await adminPost(env, '/rest/v1/rpc/security_housekeeping', {})
     console.info(JSON.stringify({ event: 'security_housekeeping', result }))
   }

@@ -160,6 +160,22 @@ test('record-window recovery validates the main window and owner and never invok
   } finally { rmSync(h.directory, { recursive: true, force: true }) }
 })
 
+test('Signal persisted history uses recoverable incoming translation and preserves manual retry intent',async()=>{
+ const h=mainHarness(),seen:any[]=[];
+ try{
+  const {SignalAdapter}=h.load('src/main/platforms/signal/signalAdapter.ts');
+  const adapter=new SignalAdapter({cached:async()=>undefined,translate:async()=>{throw Error('wrong translation path')},translateIncoming:async(r:any,manual:boolean)=>{seen.push({r,manual});if(seen.length===1)throw Error('temporarily unavailable');return '历史译文'}});
+  const identity={account:'+12025550100',peer:'10000000-0000-4000-8000-000000000001',timestamp:1,fromMe:false};
+  adapter.setOnlineUser('owner');adapter.accounts.list=async()=>[{id:'a',platform:'signal',signalAccount:identity.account}];
+  adapter.settings.runtime=async()=>({localLanguage:'zh-CN',receiveAutoTranslate:true,historyMode:'visible'});
+  await adapter.historyStore.write([{...identity,owner:'owner',original:'How was your day?'}]);
+  await assert.rejects(adapter.translateMessage('a',identity),/unavailable/);
+  assert.equal(await adapter.translateMessage('a',identity,true),'历史译文');
+  assert.equal(seen.length,2);assert.equal(seen[0].manual,false);assert.equal(seen[1].manual,true);
+  assert.equal(seen[0].r.messageId,seen[1].r.messageId);assert.equal(seen[1].r.text,'How was your day?');
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
 test('Signal reconnects after an unexpected process exit and stop cancels the retry', async () => {
   const h = mainHarness()
   try {

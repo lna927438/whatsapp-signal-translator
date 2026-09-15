@@ -375,10 +375,11 @@ export class TranslationEngine {
     }
     if (stored.state === 'failed') {
       // Never replace a pending/unknown or settled request. Confirmed uncharged
-      // history failures get at most two automatic recovery attempts, durable
-      // across scrolling and restarts; further attempts require Retry.
+      // history failures get two automatic recovery attempts per five-minute
+      // window. Persist the window across scrolling/restarts, without leaving
+      // old visible messages permanently disabled after a provider outage.
       if (historyRecovery && stored.chargedCharacters === 0 && !stored.contentExpired && !stored.contextCleared) {
-        const next = await this.messageRequests.recoverFailed(normalized, historyRecovery.manual ? Infinity : 2)
+        const next = await this.messageRequests.recoverFailed(normalized, historyRecovery.manual ? Infinity : 2, stored.updatedAt)
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
         if (next && next.requestId !== normalized.requestId) return this.translateWithSettings(next, settings, true, historyRecovery)
       }
