@@ -1,5 +1,6 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
 import { billingSyncStatus, syncOfficialCosts, BillingSyncError, type BillingSyncEnv } from './billingSync'
+import {refreshDeepSeekBalance} from './deepseekBalance'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
@@ -200,13 +201,7 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
       await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_security_event`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_actor:actor,p_code:code}),signal:AbortSignal.timeout(5000)})
     },
     async providerBalance(){
-      const key=String(env.DEEPSEEK_API_KEY||'').trim()
-      if(!key)throw new AdminError('unavailable')
-      const response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${key}`},redirect:'manual',signal:AbortSignal.timeout(10000)})
-      if(!response.ok)throw new AdminError('unavailable')
-      const payload=await response.json() as {is_available?:boolean;balance_infos?:Record<string,unknown>[]}
-      const valid=(v:unknown)=>typeof v==='string'&&/^-?\d{1,12}(\.\d{1,12})?$/.test(v)?v:null
-      return {provider:'deepseek',available:payload.is_available===true,snapshotAt:new Date().toISOString(),balances:(payload.balance_infos||[]).filter(x=>['USD','CNY'].includes(String(x.currency))).map(x=>({currency:x.currency,total:valid(x.total_balance),granted:valid(x.granted_balance),paid:valid(x.topped_up_balance)}))}
+      return refreshDeepSeekBalance(env)
     },
     async authenticate(token){
       const result=await fetch(`${env.SUPABASE_URL}/auth/v1/user`,{headers:{apikey:env.SUPABASE_PUBLISHABLE_KEY,Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(8000)})

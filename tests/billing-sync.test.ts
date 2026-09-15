@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {billingRange,billingSyncStatus,syncOfficialCosts,syncDeepSeekBalance,syncBillingSnapshots,usdUnits,unitsUsd,type BillingSyncEnv} from '../server/worker/src/billingSync.ts'
 import {usd} from '../website/src/admin/money.ts'
 import {handleAdmin,supabaseAdminServices,type AdminServices} from '../server/worker/src/admin.ts'
+import {balanceRpcResponse} from './deepseek-balance-fixture.ts'
 const env:BillingSyncEnv={SUPABASE_URL:'https://billing-db.invalid',SUPABASE_SECRET_KEY:'test-service-only',OPENAI_BILLING_ADMIN_KEY:'test-admin-only',OPENAI_BILLING_PROJECT_ID:'proj_test',OPENAI_BILLING_API_KEY_IDS:'key_second,key_test',DEEPSEEK_API_KEY:'test-deepseek-only'}
 const start=Date.parse('2026-09-14T00:00:00Z')/1000,now=Date.parse('2026-09-16T00:00:00Z')
 const range={from:'2026-09-14',to:'2026-09-15'}
@@ -70,23 +71,25 @@ test('permission failure is sanitized and leaves existing snapshots untouched',a
 })
 test('DeepSeek balances preserve currencies and negative amounts without deriving spending from a balance delta',async t=>{
  let stored:any;t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
-  if(String(input).startsWith(env.SUPABASE_URL)){stored=JSON.parse(String(init?.body));return json({})}
+  if(String(input).startsWith(env.SUPABASE_URL)){stored=JSON.parse(String(init?.body));return balanceRpcResponse(String(input),String(init?.body))!}
   assert.equal(String(input),'https://api.deepseek.com/user/balance');assert.equal(new Headers(init?.headers).get('Authorization'),'Bearer test-deepseek-only');assert.equal(init?.redirect,'manual')
   return json({is_available:false,balance_infos:[{currency:'USD',total_balance:'-0.000000000001',granted_balance:'0',topped_up_balance:'-0.000000000001'},{currency:'CNY',total_balance:'10.10',granted_balance:'1',topped_up_balance:'9.1'}]})
  })
- const result=await syncDeepSeekBalance(env);assert.equal(stored.p_balances[0].total,'-0.000000000001');assert.equal(stored.p_balances[1].total,'10.10')
+ const result=await syncDeepSeekBalance(env);assert.equal(stored.p_result.balances[0].total,'-0.000000000001');assert.equal(stored.p_result.balances[1].total,'10.10')
  assert.equal('cost' in result,false);assert.equal('officialUsd' in result,false)
 })
 
 for(const operation of ['openai','deepseek','admin'] as const)test(`${operation} billing rejects redirects without following credentials or writing snapshots`,async t=>{
  const calls:Call[]=[]
  t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
+  const database=balanceRpcResponse(String(input),String(init?.body));if(database)return database
   calls.push({url:new URL(String(input)),init})
   assert.equal(init?.redirect,'manual')
   return new Response(null,{status:302,headers:{Location:'https://unrelated.invalid/collect'}})
  })
  const services=supabaseAdminServices({...env,SUPABASE_PUBLISHABLE_KEY:'test-public'})
- await assert.rejects(operation==='openai'?syncOfficialCosts(env,range,now):operation==='deepseek'?syncDeepSeekBalance(env):services.providerBalance!(),/unavailable/)
+ if(operation==='openai')await assert.rejects(syncOfficialCosts(env,range,now),/unavailable/)
+ else {const result=await (operation==='deepseek'?syncDeepSeekBalance(env):services.providerBalance!()) as any;assert.equal(result.sync.lastError,'provider_unavailable');assert.equal(result.balances.length,0)}
  assert.equal(calls.length,1)
  assert.equal(calls[0].url.hostname,operation==='openai'?'api.openai.com':'api.deepseek.com')
 })
@@ -94,7 +97,7 @@ for(const operation of ['openai','deepseek','admin'] as const)test(`${operation}
 test('DeepSeek billing trims configured credentials consistently with translation and skips blank credentials',async t=>{
  let providerCalls=0
  t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
-  if(String(input).startsWith(env.SUPABASE_URL))return json({})
+  if(String(input).startsWith(env.SUPABASE_URL))return balanceRpcResponse(String(input),String(init?.body))!
   providerCalls++;assert.equal(new Headers(init?.headers).get('Authorization'),'Bearer test-deepseek-only')
   return json({is_available:true,balance_infos:[{currency:'USD',total_balance:'1',granted_balance:'0',topped_up_balance:'1'}]})
  })
@@ -102,22 +105,22 @@ test('DeepSeek billing trims configured credentials consistently with translatio
  await syncDeepSeekBalance(padded)
  await supabaseAdminServices({...padded,SUPABASE_PUBLISHABLE_KEY:'test-public'}).providerBalance!()
  assert.equal(providerCalls,2)
- assert.deepEqual(await syncDeepSeekBalance({...env,DEEPSEEK_API_KEY:' \r\n'}),{skipped:true,reason:'not_configured'})
- await assert.rejects(supabaseAdminServices({...env,DEEPSEEK_API_KEY:' \r\n',SUPABASE_PUBLISHABLE_KEY:'test-public'}).providerBalance!(),/unavailable/)
+ assert.equal((await syncDeepSeekBalance({...env,DEEPSEEK_API_KEY:' \r\n'})).sync.status,'not_configured')
+ assert.equal(((await supabaseAdminServices({...env,DEEPSEEK_API_KEY:' \r\n',SUPABASE_PUBLISHABLE_KEY:'test-public'}).providerBalance!()) as any).sync.status,'not_configured')
  assert.equal(providerCalls,2)
 })
 test('a failed OpenAI sync cannot prevent DeepSeek balance synchronization or call translation/character RPCs',async t=>{
- const calls:string[]=[];t.mock.method(globalThis,'fetch',async(input:string|URL)=>{
+ const calls:string[]=[];t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
   const url=String(input);calls.push(url)
   if(url.startsWith('https://api.openai.com'))return json({},403)
   if(url==='https://api.deepseek.com/user/balance')return json({is_available:true,balance_infos:[{currency:'USD',total_balance:'3',granted_balance:'1',topped_up_balance:'2'}]})
-  assert.equal(url,env.SUPABASE_URL+'/rest/v1/rpc/record_provider_balance');return json({})
+  const database=balanceRpcResponse(url,String(init?.body));assert.ok(database);return database
  })
- const result=await syncBillingSnapshots(env,now);assert.deepEqual(result.openai,{error:'billing_permission'});assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls.length,3)
+ const result=await syncBillingSnapshots(env,now);assert.deepEqual(result.openai,{error:'billing_permission'});assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls.length,4)
 })
 test('DeepSeek still synchronizes before OpenAI admin key configuration',async t=>{
- let calls=0;t.mock.method(globalThis,'fetch',async(input:string|URL)=>{calls++;assert.ok(!String(input).includes('openai.com'));return String(input).startsWith(env.SUPABASE_URL)?json({}):json({is_available:true,balance_infos:[{currency:'USD',total_balance:'1',granted_balance:'0',topped_up_balance:'1'}]})})
- const result=await syncBillingSnapshots({...env,OPENAI_BILLING_ADMIN_KEY:''},now);assert.ok('skipped' in result.openai);assert.equal(result.openai.skipped,true);assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls,2)
+ let calls=0;t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{calls++;assert.ok(!String(input).includes('openai.com'));return balanceRpcResponse(String(input),String(init?.body))||json({is_available:true,balance_infos:[{currency:'USD',total_balance:'1',granted_balance:'0',topped_up_balance:'1'}]})})
+ const result=await syncBillingSnapshots({...env,OPENAI_BILLING_ADMIN_KEY:''},now);assert.ok('skipped' in result.openai);assert.equal(result.openai.skipped,true);assert.ok('provider' in result.deepseek);assert.equal(result.deepseek.provider,'deepseek');assert.equal(calls,3)
 })
 test('billing date validation and USD display retain original precision and explicit unknowns',()=>{
  assert.throws(()=>billingRange({from:'2026-02-30',to:'2026-03-01'},now),/invalid_request/)

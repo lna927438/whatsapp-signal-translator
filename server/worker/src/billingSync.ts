@@ -1,5 +1,6 @@
 // Official cost snapshots never replace token receipts or customer character
 // debits. A project inference key must never be used as an organization key.
+import {refreshDeepSeekBalance} from './deepseekBalance'
 export interface BillingSyncEnv {
   DEEPSEEK_API_KEY?: string
   OPENAI_BILLING_ADMIN_KEY?: string
@@ -107,23 +108,7 @@ export async function syncRecentOfficialCosts(env:BillingSyncEnv,now=Date.now())
 }
 
 export async function syncDeepSeekBalance(env:BillingSyncEnv){
-  const key=String(env.DEEPSEEK_API_KEY||'').trim()
-  if(!key)return {skipped:true,reason:'not_configured'}
-  let response:Response
-  try{response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${key}`},redirect:'manual',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
-  if(!response.ok)throw new BillingSyncError('billing_unavailable')
-  const data=await response.json() as {is_available?:boolean;balance_infos?:Array<Record<string,unknown>>}
-  if(typeof data.is_available!=='boolean'||!Array.isArray(data.balance_infos)||!data.balance_infos.length||data.balance_infos.length>2)return invalid()
-  const decimal=(v:unknown)=>typeof v==='string'&&/^-?\d{1,12}(\.\d{1,12})?$/.test(v)?v:invalid()
-  const seen=new Set<string>(),balances=data.balance_infos.map(row=>{
-    const currency=String(row.currency);if(!['USD','CNY'].includes(currency)||seen.has(currency))return invalid();seen.add(currency)
-    return {currency,total:decimal(row.total_balance),granted:decimal(row.granted_balance),paid:decimal(row.topped_up_balance)}
-  })
-  const fetchedAt=new Date().toISOString(),id=crypto.randomUUID()
-  const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_provider_balance`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},
-    body:JSON.stringify({p_id:id,p_balances:balances,p_available:data.is_available,p_fetched_at:fetchedAt}),signal:AbortSignal.timeout(5000)})
-  if(!result.ok)throw new BillingSyncError('billing_unavailable')
-  return {provider:'deepseek',available:data.is_available,balances,fetchedAt}
+  return refreshDeepSeekBalance(env)
 }
 /** Scheduled job: either provider may succeed independently. No balance-delta accounting. */
 export async function syncBillingSnapshots(env:BillingSyncEnv,now=Date.now()){

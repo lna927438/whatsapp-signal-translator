@@ -2,6 +2,7 @@ import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {createRequire} from 'node:module'
 import {fileURLToPath} from 'node:url'
+import {balanceRpcResponse} from './deepseek-balance-fixture.ts'
 
 // Use the actual workerd runtime already pinned by the website's Wrangler.
 // Every outbound request is handled locally, with synthetic keys and balances.
@@ -20,14 +21,15 @@ test('workerd accepts billing fetch options and rejects redirects without creden
     if(operation==='legacy'){new Request('https://fixture.invalid',{redirect:'error'});return Response.json({unexpected:true});}
     const result=operation==='openai'?await syncOfficialCosts(env,{from:'2026-09-14',to:'2026-09-14'},Date.parse('2026-09-16T00:00:00Z')):
      operation==='deepseek'?await syncDeepSeekBalance(env):await supabaseAdminServices(env).providerBalance();
-    return Response.json({ok:true,provider:result.provider});
+    return Response.json(result.sync?.status==='error'?{ok:false,code:result.sync.lastError}:{ok:true,provider:result.provider});
    }catch(error){return Response.json({ok:false,name:error.name,code:error.code,redirectError:/redirect/i.test(error.message)});}
   }};
  `},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'})
- let redirect=false;const calls:Array<{host:string;path:string;authorization:string|null}>=[]
+ let redirect=false;const calls:Array<{host:string;path:string;authorization:string|null;body?:string}>=[]
  const runtime=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-09-09',outboundService:async(request:Request)=>{
-  const url=new URL(request.url);calls.push({host:url.hostname,path:url.pathname,authorization:request.headers.get('Authorization')})
-  if(url.hostname==='billing-db.invalid')return Response.json({})
+  const url=new URL(request.url),body=request.method==='POST'?await request.text():undefined
+  calls.push({host:url.hostname,path:url.pathname,authorization:request.headers.get('Authorization'),body})
+  if(url.hostname==='billing-db.invalid')return balanceRpcResponse(request.url,body||'')||Response.json({})
   assert.ok(['api.openai.com','api.deepseek.com'].includes(url.hostname),'No redirects or live network requests permitted')
   if(redirect)return new Response(null,{status:302,headers:{Location:'https://unrelated.invalid/collect'}})
   if(url.hostname==='api.deepseek.com')return Response.json({is_available:true,balance_infos:[{currency:'USD',total_balance:'1',granted_balance:'0',topped_up_balance:'1'}]})
@@ -41,12 +43,15 @@ test('workerd accepts billing fetch options and rejects redirects without creden
    calls.length=0;redirect=false
    const result=await (await runtime.dispatchFetch('https://fixture.invalid/'+operation)).json()
    assert.equal(result.ok,true,`${operation} succeeds in actual workerd`)
-   assert.equal(calls.length,operation==='admin'?1:2)
-   assert.equal(calls[0].authorization,operation==='openai'?'Bearer test-admin':'Bearer test-deepseek')
+   assert.equal(calls.length,operation==='openai'?2:3)
+   assert.equal(calls.find(x=>x.host.startsWith('api.'))?.authorization,operation==='openai'?'Bearer test-admin':'Bearer test-deepseek')
    calls.length=0;redirect=true
    const blocked=await (await runtime.dispatchFetch('https://fixture.invalid/'+operation)).json()
    assert.equal(blocked.ok,false);assert.match(blocked.code,/unavailable/)
-   assert.equal(calls.length,1,`${operation} must neither follow the redirect nor store a snapshot`)
+   assert.equal(calls.filter(x=>x.host.startsWith('api.')).length,1,`${operation} must not follow the redirect`)
+   const finish=calls.find(x=>x.path.endsWith('finish_deepseek_balance_refresh'))
+   if(operation!=='openai'){assert.ok(finish);assert.equal(JSON.parse(finish.body!).p_result,null)}
+   assert.ok(!calls.some(x=>x.path.endsWith('record_official_bill')))
   }
  }finally{await runtime.dispose()}
 })
