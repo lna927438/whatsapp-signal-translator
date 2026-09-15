@@ -64,7 +64,8 @@ export async function syncOfficialCosts(env:BillingSyncEnv,rangeValue:unknown,no
     for(const key of ['project_id','api_key_id','line_item'])url.searchParams.append('group_by[]',key)
     if(page)url.searchParams.set('page',page)
     let response:Response
-    try{response=await fetch(url,{headers:{Authorization:`Bearer ${scope.adminKey}`},redirect:'error',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
+    // workerd supports manual/follow only; reject redirects without forwarding credentials.
+    try{response=await fetch(url,{headers:{Authorization:`Bearer ${scope.adminKey}`},redirect:'manual',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
     if(response.status===401||response.status===403)throw new BillingSyncError('billing_permission')
     if(!response.ok)throw new BillingSyncError('billing_unavailable')
     const raw=await response.text();if(raw.length>2_000_000)return invalid()
@@ -106,9 +107,10 @@ export async function syncRecentOfficialCosts(env:BillingSyncEnv,now=Date.now())
 }
 
 export async function syncDeepSeekBalance(env:BillingSyncEnv){
-  if(!env.DEEPSEEK_API_KEY)return {skipped:true,reason:'not_configured'}
+  const key=String(env.DEEPSEEK_API_KEY||'').trim()
+  if(!key)return {skipped:true,reason:'not_configured'}
   let response:Response
-  try{response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${env.DEEPSEEK_API_KEY}`},redirect:'error',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
+  try{response=await fetch('https://api.deepseek.com/user/balance',{headers:{Authorization:`Bearer ${key}`},redirect:'manual',signal:AbortSignal.timeout(8000)})}catch{throw new BillingSyncError('billing_unavailable')}
   if(!response.ok)throw new BillingSyncError('billing_unavailable')
   const data=await response.json() as {is_available?:boolean;balance_infos?:Array<Record<string,unknown>>}
   if(typeof data.is_available!=='boolean'||!Array.isArray(data.balance_infos)||!data.balance_infos.length||data.balance_infos.length>2)return invalid()
