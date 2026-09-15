@@ -4,7 +4,7 @@ import worker from '../server/worker/src/index.ts'
 import type {Env} from '../server/worker/src/index.ts'
 const env={DEEPSEEK_API_KEY:'test-deepseek',OPENAI_BILLING_ADMIN_KEY:'test-admin',OPENAI_BILLING_PROJECT_ID:'proj_test',OPENAI_BILLING_API_KEY_IDS:'key_test',SUPABASE_URL:'https://fixture.invalid',SUPABASE_SECRET_KEY:'test-service'} as Env
 const status=(value='fresh')=>({provider:'deepseek',available:true,balances:[{currency:'USD',total:'3.00',granted:'1.00',paid:'2.00'}],fetchedAt:new Date().toISOString(),stale:false,sync:{status:value}})
-for(const cron of ['* * * * *','*/5 * * * *','17 * * * *'])test(`scheduled billing dispatch isolates ${cron}`,async t=>{
+for(const cron of ['*/5 * * * *','17 * * * *'])test(`scheduled billing dispatch isolates ${cron}`,async t=>{
  const calls:string[]=[],logs:unknown[]=[]
  t.mock.method(console,'info',(value:string)=>logs.push(JSON.parse(value)))
  t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
@@ -25,9 +25,14 @@ for(const cron of ['* * * * *','*/5 * * * *','17 * * * *'])test(`scheduled billi
  assert.equal(calls.some(path=>path.endsWith('/security_housekeeping')),cron==='17 * * * *')
  assert.equal(logs.length,1);assert.ok(!JSON.stringify(logs).includes('3.00'),'Logs contain no balance amounts')
 })
-test('minute cron reports failed balance refresh instead of a cached balance as successful',async t=>{
+test('billing cron reports failed balance refresh instead of a cached balance as successful',async t=>{
  const logs:any[]=[];t.mock.method(console,'info',(value:string)=>logs.push(JSON.parse(value)))
  t.mock.method(globalThis,'fetch',async()=>Response.json({...status('error'),claimed:false}))
- await worker.scheduled({cron:'* * * * *'} as any,env)
- assert.equal(logs[0].ok,false);assert.equal(logs[0].status,'error')
+ await worker.scheduled({cron:'*/5 * * * *'} as any,{...env,OPENAI_BILLING_ADMIN_KEY:undefined})
+ assert.equal(logs[0].providers.find((row:any)=>row.provider==='deepseek').ok,false)
+})
+
+test('retired or unknown cron events cannot invoke billing or security maintenance',async t=>{
+ t.mock.method(globalThis,'fetch',async()=>{assert.fail('Unexpected cron must not call external services')})
+ for(const cron of ['* * * * *','unexpected'])await worker.scheduled({cron} as any,env)
 })

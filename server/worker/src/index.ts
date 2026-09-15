@@ -7,7 +7,7 @@ import { wrongTargetScript } from '../../../src/shared/translationResult'
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
 import { providerReceipt, captureProviderReceipt, type ProviderReceipt } from './providerUsage'
-import { syncBillingSnapshots, syncDeepSeekBalance, type BillingSyncEnv } from './billingSync'
+import { syncBillingSnapshots, type BillingSyncEnv } from './billingSync'
 
 export interface Env extends ProviderEnv, BillingSyncEnv {
   API_RATE_LIMITER: SecurityWorkerBindings['API_RATE_LIMITER']
@@ -508,15 +508,6 @@ export default {
     }
   },
   async scheduled(event: ScheduledController, env: Env): Promise<void> {
-    if (event.cron === '* * * * *') {
-      try {
-        const result = await syncDeepSeekBalance(env)
-        console.info(JSON.stringify({ event: 'provider_balance_sync', provider: 'deepseek', ok: result.sync.status === 'fresh', status: result.sync.status }))
-      } catch {
-        console.error(JSON.stringify({ event: 'provider_balance_sync', provider: 'deepseek', ok: false, status: 'error' }))
-      }
-      return
-    }
     if (event.cron === '*/5 * * * *') {
       const result = await syncBillingSnapshots(env)
       // Log only completion states, never account balances, credentials or
@@ -526,6 +517,8 @@ export default {
         skipped: 'skipped' in value || (provider === 'deepseek' && 'sync' in value && value.sync.status === 'not_configured') })) }))
       return
     }
+    // Ignore retired or unexpected triggers while cloud configuration propagates.
+    if (event.cron !== '17 * * * *') return
     const result = await adminPost(env, '/rest/v1/rpc/security_housekeeping', {})
     console.info(JSON.stringify({ event: 'security_housekeeping', result }))
   }
