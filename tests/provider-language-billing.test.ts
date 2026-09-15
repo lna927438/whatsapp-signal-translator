@@ -54,13 +54,13 @@ for(const [name,bad] of [['Chinese',text],['Spanish','Hola, gracias, estoy bien 
   assert.deepEqual(errors,[{error_code:'provider_wrong_language'},{error_code:null}])
  })
 }
-test('two wrong-language provider answers are terminal and never debit, including replay',async()=>{
+test('wrong-language answers including one bounded correction are terminal and never debit, including replay',async()=>{
  output=()=>text
  const result=await translate('send-audit-both-wrong')
  assert.equal(result.body.error,'translation_failed');assert.notEqual(result.status,200)
  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0});assert.equal(await debitCount(),0)
  const replay=await translate('send-audit-both-wrong')
- assert.equal(replay.body.error,'translation_failed');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
+ assert.equal(replay.body.error,'translation_failed');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
 })
 test('general translation also rejects clear Chinese output for English before paying the primary',async()=>{
  output=provider=>provider==='https://api.openai.com'?text:good
@@ -108,6 +108,6 @@ test('foreign glossary text that triggers desktop language rejection cannot be c
 test('a Han-only Japanese target that the current desktop rejects is not charged for an outgoing send',async()=>{
  output=()=>'我在東京工作'
  const result=await translate('send-audit-kanji-client',{text:'I work in Tokyo.',sourceLanguage:'en-US',targetLanguage:'ja'})
- assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
+ assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
  assert.throws(()=>validateTranslation({text:'I work in Tokyo.',targetLanguage:'ja'},'我在東京工作'),/译文语言与目标不符/)
 })

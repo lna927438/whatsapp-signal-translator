@@ -65,6 +65,8 @@ const signatures: Record<string, string[]> = {
   translation_status: ['p_user_id', 'p_request_id'],
   account_snapshot: ['p_user_id'],
   begin_translation: ['p_user_id','p_request_id','p_payload_hash','p_characters','p_claim_token','p_metadata'],
+  provider_route_acquire: ['p_user_id','p_request_id','p_claim_token','p_provider','p_model'],
+  provider_route_outcome: ['p_user_id','p_request_id','p_claim_token','p_provider','p_model','p_generation','p_probe_token','p_success','p_error_code'],
   complete_translation: ['p_user_id','p_request_id','p_claim_token','p_translation','p_model','p_latency_ms'],
   complete_translation_metered: ['p_user_id','p_request_id','p_claim_token','p_translation','p_model','p_latency_ms','p_receipt'],
   fail_translation_metered: ['p_user_id','p_request_id','p_claim_token','p_error_code','p_receipt'],
@@ -76,7 +78,7 @@ export async function rpc(db: PGlite, name: string, args: Record<string, unknown
   if (!params) throw new Error('Unexpected RPC')
   const result = await asRole<{ result: any }>(db, 'service_role',
     `select public.${name}(${params.map((_,i) => '$'+(i+1)).join(',')}) as result`,
-    params.map(p => typeof args[p] === 'object' ? JSON.stringify(args[p]) : args[p]))
+    params.map(p => args[p] !== null && typeof args[p] === 'object' ? JSON.stringify(args[p]) : args[p]))
   return result.rows[0].result
 }
 

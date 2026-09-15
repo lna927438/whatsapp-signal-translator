@@ -61,6 +61,7 @@ before(async () => {
 })
 beforeEach(async () => {
   await reset(db)
+  await db.exec('delete from translator_private.provider_circuits')
   providerCalls = 0
   delete env.TRANSLATION_PROVIDER
   delete env.DEEPSEEK_API_KEY
@@ -285,10 +286,11 @@ test('failed Flash IDs remain terminal after a switch while a fresh retry uses P
   assert.equal((await request('switch-fresh-retry')).status,200)
   assert.equal((await request('switch-fresh-retry')).status,200)
   assert.equal(providerCalls,2);assert.deepEqual(await counts(),{debits:1,usages:1})
-  const row=(await db.query<any>("select model,cost_status,input_rate,output_rate,cost_usd from translator_private.provider_usage where request_id='switch-fresh-retry'")).rows[0]
+  const row=(await db.query<any>("select a.model,a.cost_status,a.input_rate,a.output_rate,a.cost_usd,p.cost_usd as total_cost_usd from translator_private.provider_attempt_usage a join translator_private.provider_usage p using(user_id,request_id) where a.request_id='switch-fresh-retry'")).rows[0]
   assert.equal(row.model,'deepseek-v4-pro');assert.equal(row.cost_status,'calculated')
   assert.ok([0.66,1.32].includes(Number(row.input_rate)));assert.ok([1.98,3.96].includes(Number(row.output_rate)))
   assert.ok([0.00013948,0.00027896].includes(Number(row.cost_usd)))
+  assert.equal(row.total_cost_usd,row.cost_usd)
   assert.deepEqual(await wallet(db),{balance:95,reserved_characters:0,lifetime_debited:5})
 })
 

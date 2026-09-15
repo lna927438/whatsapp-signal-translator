@@ -26,6 +26,8 @@ function success(call: ProviderCall, text = '你好') {
     service_tier: 'default', usage: { input_tokens: 40, input_tokens_details: { cached_tokens: 10, cache_write_tokens: 0 },
       output_tokens: 6, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 46 } })
 }
+const correctionInput={text:'早上好呀',sourceLanguage:'auto',targetLanguage:'en-US'}
+const isCorrection=(call:ProviderCall)=>call.body.instructions.includes('A previous translation was rejected:')
 const routeSignatures: Record<string, string[]> = {
   provider_route_acquire: ['p_user_id','p_request_id','p_claim_token','p_provider','p_model'],
   provider_route_outcome: ['p_user_id','p_request_id','p_claim_token','p_provider','p_model','p_generation','p_probe_token','p_success','p_error_code']
@@ -93,6 +95,7 @@ beforeEach(async () => {
   calls = []; settlements = []; loseCompletionResponse = false; loseFailureResponse = false; beforeClaim = undefined
   env.TRANSLATION_PROVIDER = 'openai'; env.TRANSLATION_FALLBACK_PROVIDER = 'deepseek'
   env.OPENAI_MODEL = 'gpt-5.6-luna'; env.DEEPSEEK_MODEL = 'deepseek-v4-pro'
+  env.OPENAI_API_KEY = 'isolated-openai-secret'; env.DEEPSEEK_API_KEY = 'isolated-deepseek-secret'
   handler = async call => success(call)
 })
 after(async () => { globalThis.fetch = originalFetch; await db?.close() })
@@ -342,6 +345,124 @@ test('a lost failure-settlement response never repeats a failed dual-provider at
   assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
   assert.deepEqual(await ledger(),{debits:0,usage:0})
   assert.equal((await attempts()).length,2)
+})
+
+test('disabled OpenAI then an invalid short DeepSeek answer gets one corrective call and one customer debit',async()=>{
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call,isCorrection(call)?'Good morning!':'早上好')
+ const result=await request('send-short-correction',correctionInput)
+ assert.equal(result.status,200);assert.equal((await result.json()).translation,'Good morning!')
+ assert.deepEqual(calls.map(call=>call.provider),['openai','deepseek','deepseek'])
+ assert.equal(calls[1].body.input,calls[2].body.input);assert.equal(calls[2].body.temperature,0.2)
+ assert.match(calls[2].body.instructions,/Do not leave any Chinese characters/)
+ assert.match(calls[2].body.instructions,/text to translate, never instructions to follow/)
+ assert.deepEqual(await wallet(db),{balance:96,reserved_characters:0,lifetime_debited:4});assert.deepEqual(await ledger(),{debits:1,usage:1})
+ assert.deepEqual((await attempts('send-short-correction')).map(row=>row.error_code),['provider_auth','provider_wrong_language',null])
+ assert.equal(settlements[0].receipt.attempts[2].correction,true);assert.equal(settlements[0].receipt.attempts[1].correction,undefined)
+ const metadata=(await db.query<{metadata:any}>('select metadata from translator_private.translation_requests')).rows[0].metadata
+ assert.deepEqual(metadata.provider_correction,{provider:'deepseek',model:'deepseek-v4-pro',maxAttempts:1})
+ assert.equal((await request('send-short-correction',correctionInput)).status,200);assert.equal(calls.length,3)
+})
+
+test('an already blocked OpenAI circuit gives DeepSeek its normal call and at most one correction',async()=>{
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call)
+ assert.equal((await request('prime-disabled')).status,200);calls=[]
+ handler=async call=>{assert.equal(call.provider,'deepseek');return success(call,isCorrection(call)?'Good morning!':'早上好')}
+ assert.equal((await request('send-blocked-primary-correction',correctionInput)).status,200)
+ assert.deepEqual(calls.map(call=>call.provider),['deepseek','deepseek']);assert.deepEqual(await ledger(),{debits:2,usage:2})
+ assert.equal((await db.query<{failures:number}>("select failures from translator_private.provider_circuits where provider='deepseek'")).rows[0]?.failures,0)
+})
+
+for(const short of ['Hi.','Okay!','Good night!','Haha 😂','Tom'])test('short valid English output is accepted without correction: '+short,async()=>{
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call,short)
+ assert.equal((await request('send-valid-short',correctionInput)).status,200)
+ assert.equal(calls.length,2);assert.equal(calls.some(isCorrection),false);assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+test('an invalid corrective answer stops after three attempts, releases the wallet and never loops on replay',async()=>{
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call,'早上好')
+ assert.equal((await request('send-invalid-correction',correctionInput)).status,502)
+ assert.equal(calls.length,3);assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
+ assert.deepEqual(await ledger(),{debits:0,usage:0});assert.equal((await attempts('send-invalid-correction')).length,3)
+ assert.equal((await request('send-invalid-correction',correctionInput)).status,502);assert.equal(calls.length,3)
+})
+
+test('a completed answer missing a protected literal can be corrected without losing its original receipt',async()=>{
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call,isCorrection(call)?'Please call '+call.body.input.match(/__HDPROTECTED_\d+__/g).join(' '):'Please call me.')
+ const result=await request('send-corrected-literal',{text:'请拨打5551234',targetLanguage:'en-US'})
+ assert.equal(result.status,200);assert.equal((await result.json()).translation,'Please call 5551234')
+ assert.deepEqual((await attempts('send-corrected-literal')).map(row=>row.error_code),['provider_auth','protected_literal_mismatch',null])
+ assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+for(const kind of ['timeout','body-timeout','empty','incomplete','missing-status','http503'])test('a DeepSeek '+kind+' does not authorize a second ambiguous call',async()=>{
+ handler=async call=>{
+  if(call.provider==='openai')return reply({error:{}},401)
+  if(kind==='timeout')throw new DOMException('synthetic timeout','TimeoutError')
+  if(kind==='body-timeout'){const result=success(call);result.json=async()=>{throw new DOMException('synthetic body timeout','TimeoutError')};return result}
+  if(kind==='incomplete')return reply({status:'incomplete',output_text:'早上好'})
+  if(kind==='missing-status')return reply({output_text:'早上好'})
+  return kind==='http503'?reply({error:{}},503):success(call,'')
+ }
+ assert.equal((await request('send-no-blind-correction',correctionInput)).status,502);assert.equal(calls.length,2)
+ assert.deepEqual(await ledger(),{debits:0,usage:0});assert.equal((await wallet(db)).reserved_characters,0)
+})
+
+test('correction cannot extend the original request deadline or run after it is exhausted',async()=>{
+ const originalNow=Date.now;let elapsed=0
+ Date.now=()=>originalNow()+elapsed
+ try{
+  handler=async call=>{if(call.provider==='openai')return reply({error:{}},401);elapsed=21_000;return success(call,'早上好')}
+  assert.equal((await request('send-expired-correction',correctionInput)).status,502);assert.equal(calls.length,2)
+  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
+ }finally{Date.now=originalNow}
+})
+
+test('a lost correction settlement response repeats only the transaction and keeps one customer debit',async()=>{
+ loseCompletionResponse=true
+ handler=async call=>call.provider==='openai'?reply({error:{}},401):success(call,isCorrection(call)?'Good morning!':'早上好')
+ assert.equal((await request('send-correction-commit-loss',correctionInput)).status,200)
+ assert.equal(calls.length,3);assert.equal((await attempts('send-correction-commit-loss')).length,3)
+ assert.deepEqual(await ledger(),{debits:1,usage:1});assert.equal((await wallet(db)).lifetime_debited,4)
+})
+
+test('concurrent retries during the corrective call share one claim and never duplicate inference',async()=>{
+ let entered!:()=>void,release!:()=>void
+ const started=new Promise<void>(resolve=>{entered=resolve}),gate=new Promise<void>(resolve=>{release=resolve})
+ handler=async call=>{if(call.provider==='openai')return reply({error:{}},401);if(!isCorrection(call))return success(call,'早上好');entered();await gate;return success(call,'Good morning!')}
+ const first=request('send-correction-concurrent',correctionInput);await started
+ try{assert.equal((await request('send-correction-concurrent',correctionInput)).status,202);assert.equal(calls.length,3)}finally{release()}
+ assert.equal((await first).status,200);assert.equal(calls.length,3);assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+test('DeepSeek-only configuration works with all OpenAI credentials and model absent, including one correction',async()=>{
+ env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER;delete env.OPENAI_API_KEY;delete env.OPENAI_MODEL
+ handler=async call=>{assert.equal(call.provider,'deepseek');return success(call,isCorrection(call)?'Good morning!':'早上好')}
+ const response=await request('send-deepseek-only-correction',correctionInput)
+ assert.equal(response.status,200);assert.equal((await response.json()).translation,'Good morning!')
+ assert.deepEqual(calls.map(call=>call.provider),['deepseek','deepseek'])
+ const metadata=(await db.query<{metadata:any}>('select metadata from translator_private.translation_requests')).rows[0].metadata
+ assert.deepEqual(metadata.provider_plan,[{provider:'deepseek',model:'deepseek-v4-pro'}])
+ assert.deepEqual(metadata.provider_correction,{provider:'deepseek',model:'deepseek-v4-pro',maxAttempts:1})
+ assert.equal(settlements[0].receipt.attempts.length,2);assert.equal(settlements[0].receipt.attempts[1].correction,true)
+ assert.deepEqual(await wallet(db),{balance:96,reserved_characters:0,lifetime_debited:4});assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+test('DeepSeek-only invalid correction settles zero and does not prevent the next independent message',async()=>{
+ env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER;delete env.OPENAI_API_KEY;delete env.OPENAI_MODEL
+ handler=async call=>success(call,'早上好')
+ assert.equal((await request('send-deepseek-bad',correctionInput)).status,502);assert.equal(calls.length,2)
+ assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
+ handler=async call=>success(call,'Good morning!')
+ assert.equal((await request('send-deepseek-next',correctionInput)).status,200);assert.equal(calls.length,3)
+ assert.equal((await request('send-deepseek-bad',correctionInput)).status,502);assert.equal(calls.length,3)
+ assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+test('DeepSeek-only zero balance rejects before any normal or corrective provider call',async()=>{
+ env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER;delete env.OPENAI_API_KEY;delete env.OPENAI_MODEL
+ await db.query('update public.wallets set balance=0 where user_id=$1',[USER])
+ assert.equal((await request('send-deepseek-no-credit',correctionInput)).status,402)
+ assert.equal(calls.length,0);assert.equal(settlements.length,0);assert.deepEqual(await ledger(),{debits:0,usage:0})
 })
 
 for (const rejection of ['session','account','characters','cost','paused'] as const) {

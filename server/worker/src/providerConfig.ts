@@ -2,7 +2,7 @@ export interface ProviderEnv {
   TRANSLATION_PROVIDER?: string
   TRANSLATION_FALLBACK_PROVIDER?: string
   OPENAI_API_KEY?: string
-  OPENAI_MODEL: string
+  OPENAI_MODEL?: string
   DEEPSEEK_API_KEY?: string
   DEEPSEEK_MODEL?: string
 }

@@ -1,9 +1,9 @@
-import {currentOpenAIBillingScope,type BillingSyncEnv} from './billingSync'
+import {currentOpenAIBillingScope,enabledBillingProviders,type BillingSyncEnv} from './billingSync'
 import {deepSeekCredentialDigest} from './deepseekBalance'
 
 // Kept on the server: the browser can select a date range, never an account.
 export async function currentOfficialBillScopes(env:BillingSyncEnv){
- const credentialDigest=await deepSeekCredentialDigest(env.DEEPSEEK_API_KEY)
+ const credentialDigest=enabledBillingProviders(env).includes('deepseek')?await deepSeekCredentialDigest(env.DEEPSEEK_API_KEY):null
  return {openai:currentOpenAIBillingScope(env),deepseek:credentialDigest?{credentialDigest}:null}
 }
 

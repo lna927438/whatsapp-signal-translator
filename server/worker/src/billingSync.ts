@@ -2,6 +2,8 @@
 // debits. A project inference key must never be used as an organization key.
 import {refreshDeepSeekBalance} from './deepseekBalance'
 export interface BillingSyncEnv {
+  TRANSLATION_PROVIDER?: string
+  TRANSLATION_FALLBACK_PROVIDER?: string
   DEEPSEEK_API_KEY?: string
   OPENAI_BILLING_ADMIN_KEY?: string
   OPENAI_BILLING_PROJECT_ID?: string
@@ -15,11 +17,17 @@ export class BillingSyncError extends Error {
 const invalid = (): never => { throw new BillingSyncError('billing_data_incomplete') }
 const projectPattern=/^proj_[A-Za-z0-9_-]{1,160}$/
 const keyPattern=/^key_[A-Za-z0-9_-]{1,160}$/
+export function enabledBillingProviders(env:BillingSyncEnv):Array<'openai'|'deepseek'>{
+ const explicit=String(env.TRANSLATION_PROVIDER||'').trim()
+ if(!explicit)return ['openai','deepseek'] // Backward compatibility for older configurations.
+ const configured=[explicit,String(env.TRANSLATION_FALLBACK_PROVIDER||'').trim()]
+ return (['openai','deepseek'] as const).filter(provider=>configured.includes(provider))
+}
 function configured(env:BillingSyncEnv){
   const projectId=String(env.OPENAI_BILLING_PROJECT_ID||'').trim()
   const apiKeyIds=[...new Set(String(env.OPENAI_BILLING_API_KEY_IDS||'').split(',').map(v=>v.trim()).filter(Boolean))].sort()
   const adminKey=String(env.OPENAI_BILLING_ADMIN_KEY||'').trim()
-  const reason=!adminKey?'admin_key_missing':!projectPattern.test(projectId)||!apiKeyIds.length||apiKeyIds.length>20||apiKeyIds.some(id=>!keyPattern.test(id))?'scope_missing':null
+  const reason=!enabledBillingProviders(env).includes('openai')?'provider_disabled':!adminKey?'admin_key_missing':!projectPattern.test(projectId)||!apiKeyIds.length||apiKeyIds.length>20||apiKeyIds.some(id=>!keyPattern.test(id))?'scope_missing':null
   return {projectId,apiKeyIds,adminKey,reason}
 }
 export function currentOpenAIBillingScope(env:BillingSyncEnv){
@@ -28,9 +36,9 @@ export function currentOpenAIBillingScope(env:BillingSyncEnv){
 }
 export function billingSyncStatus(env:BillingSyncEnv){
   const c=configured(env)
-  return {provider:'openai',configured:c.reason===null,reason:c.reason,timezone:'UTC',
+  return {provider:'openai',configured:c.reason===null,reason:c.reason,timezone:'UTC',enabledProviders:enabledBillingProviders(env),
     officialSource:'https://platform.openai.com/usage',provisional:true,
-    message:c.reason==='admin_key_missing'?'尚未连接官方账单读取权限。':c.reason==='scope_missing'?'尚未指定 HelloDog 的账单范围。':'已连接账单读取配置，实际权限将在同步时核验。'}
+    message:c.reason==='provider_disabled'?'OpenAI 通道已停用，不再同步其账单。':c.reason==='admin_key_missing'?'尚未连接官方账单读取权限。':c.reason==='scope_missing'?'尚未指定 HelloDog 的账单范围。':'已连接账单读取配置，实际权限将在同步时核验。'}
 }
 const syncMessages={
  billing_account_deactivated:'OpenAI 官方账单账号已停用，无法同步。请通过官方申诉恢复；保留上次金额。',

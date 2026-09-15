@@ -1,5 +1,5 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
-import { billingSyncStatusWithHistory, syncOfficialCostsWithStatus, BillingSyncError, type BillingSyncEnv } from './billingSync'
+import { billingSyncStatusWithHistory, syncOfficialCostsWithStatus, enabledBillingProviders, BillingSyncError, type BillingSyncEnv } from './billingSync'
 import {refreshDeepSeekBalance} from './deepseekBalance'
 import {currentOfficialBillScopes,officialReportingBasis} from './officialBillScopes'
 type JsonObject = Record<string, unknown>
@@ -250,7 +250,7 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
         const selected=(['openai','deepseek'] as const).filter(provider=>!filter.userId&&(!filter.provider||filter.provider===provider)&&scopes[provider])
         const bills=await Promise.all(selected.map(provider=>call('read_current_official_bills',{p_actor:args.p_actor,
           p_filter:{from:basis.from,to:basis.to,provider,timezone:basis.timezones[provider]},p_scopes:scopes})))
-        return {...data,officialBills:bills.flat(),officialBillingBasis:basis}
+        return {...data,officialBills:bills.flat(),officialBillingBasis:basis,enabledProviders:enabledBillingProviders(env)}
       }
       return data
     }
