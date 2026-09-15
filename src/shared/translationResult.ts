@@ -1,3 +1,5 @@
+import { detectLanguageEvidence } from './languageDetection'
+
 // Compare display text independently of curly quotes, invisible direction marks,
 // punctuation and emoji presentation. A cosmetic change is not a translation.
 export function equivalentDisplayText(a: string, b: string): boolean {
@@ -25,4 +27,24 @@ export function wrongTargetScript(text: string, target: string): boolean {
 
 export function reusableDisplayOriginal(original: string | undefined, message: string, localLanguage: string): original is string {
   return original !== undefined && !equivalentDisplayText(original, message) && !wrongTargetScript(original, localLanguage)
+}
+
+/** Reject clear language mistakes before settling a paid result. Callers remove
+ * protected literals first, so names, URLs and glossary terms are not evidence. */
+export function wrongTargetLanguage(text: string, target: string): boolean {
+  if (wrongTargetScript(text, target)) return true
+  const evidence = detectLanguageEvidence(text)
+  const expected = target.toLowerCase().split('-')[0]
+  const actual = evidence.language?.split('-')[0]
+  // Kanji-only Japanese is legitimate. Han script alone cannot distinguish it
+  // from Chinese; retain the existing conservative treatment of such text.
+  return evidence.confidence === 'high' && actual !== expected && !(expected === 'ja' && actual === 'zh')
+}
+
+/** Match the existing desktop's final send checks on the restored full text.
+ * Unlike a general translation, a send must be accepted by that client too. */
+export function wrongOutgoingTargetLanguage(text: string, target: string): boolean {
+  if (!/^(zh|ja)(?:-|$)/i.test(target) && /\p{Script=Han}/u.test(text)) return true
+  const evidence = detectLanguageEvidence(text)
+  return evidence.confidence === 'high' && evidence.language?.split('-')[0] !== target.split('-')[0]
 }

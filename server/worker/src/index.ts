@@ -3,7 +3,7 @@ import { providerConfig, providerPlan, type ProviderEnv, type ProviderConfig } f
 import { boundedJson, rateKey, providerTokenBounds } from './requestSecurity'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
 import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
-import { wrongTargetScript } from '../../../src/shared/translationResult'
+import { wrongTargetLanguage, wrongOutgoingTargetLanguage } from '../../../src/shared/translationResult'
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
 import { providerReceipt, captureProviderReceipt, type ProviderReceipt } from './providerUsage'
@@ -182,7 +182,12 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   try { output = protectedText.restore(output) } catch { throw new ProviderFailure('protected_literal_mismatch') }
   let languageSample = output
   for (const literal of [...protectedText.values].sort((a, b) => b.length - a.length)) languageSample = languageSample.split(literal).join(' ')
-  if (wrongTargetScript(languageSample, String(body.targetLanguage || ''))) throw new ProviderFailure('provider_wrong_language')
+  const target = String(body.targetLanguage || '')
+  // The desktop refuses any remaining Han in a foreign-language send. Apply
+  // that same rule before charging, including protected terms that would make
+  // this particular outgoing result unsendable; preserve zh/ja target text.
+  const blockedOutgoing = body.requestId?.startsWith('send-') && wrongOutgoingTargetLanguage(output, target)
+  if (blockedOutgoing || wrongTargetLanguage(languageSample, target)) throw new ProviderFailure('provider_wrong_language')
   return { translation: output, latencyMs: Date.now() - started, model: String(payload?.model || config.model) }
 }
 
@@ -256,6 +261,7 @@ async function translate(request: Request, env: Env, user: User, deadline: numbe
   // Old 0.4.3 clients sent different header/body IDs. Keep the body authoritative.
   const requestId = body.requestId || request.headers.get('x-request-id') || ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
+  body.requestId = requestId
   const claimToken = crypto.randomUUID()
   const config = providerConfig(env)
   const plan = providerPlan(env)
