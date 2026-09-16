@@ -68,19 +68,19 @@ async function mount(options:{access?:boolean;now?:()=>number;request?:(path:str
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
   w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
   w.eval(bundle);await tick()
-  return {w,calls,card:()=>w.document.querySelector('.adm-official-cost'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
+  return {w,calls,card:()=>w.document.querySelector('.adm-official-breakdown'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
 }
-test('main card displays only official totals; missing provider shows partial and local evidence stays collapsed',async()=>{
+test('historical breakdown retains each provider bill and missing-period labels, with local evidence collapsed',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data)]
   const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
-    assert.match(h.card().textContent,/尚缺官方账单/);assert.match(h.card().textContent,/已同步部分：\$0\.0329117/);assert.match(h.card().textContent,/待同步：DeepSeek/)
+    assert.match(h.card().textContent,/尚未同步该账期/);assert.match(h.card().textContent,/\$0\.0329117/);assert.match(h.card().textContent,/DeepSeek/)
     assert.doesNotMatch(h.card().textContent,/0\.123456789012|987654321/)
     assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/0\.123456789012/)
     assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/官方账单不能直接分摊到每个用户/)
     data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(10000);await tick()
-    assert.match(h.card().textContent,/\$0\.032911700009/);assert.doesNotMatch(h.card().textContent,/尚缺官方账单/);assert.match(h.body(),/官方账单 · 手动录入/)
-    data.officialBills=[];h.run(10000);await tick();assert.match(h.card().textContent,/尚缺官方账单/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
+    assert.match(h.card().textContent,/\$0\.0329117/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/官方账单 · 手动录入/)
+    data.officialBills=[];h.run(10000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
   }finally{h.close()}
 })
 
@@ -92,7 +92,7 @@ test('DeepSeek-only configuration hides retired OpenAI billing warnings and acti
   data.officialBills=[officialBillFixture('openai','100',data),officialBillFixture('deepseek','0.19',data)];return data
  }})
  try{
-  assert.match(h.card().textContent,/DeepSeek 官方账单/);assert.match(h.card().textContent,/\$0\.19/);assert.doesNotMatch(h.card().textContent,/OpenAI|100|尚缺/)
+  assert.match(h.card().textContent,/DeepSeek/);assert.match(h.card().textContent,/\$0\.19/);assert.doesNotMatch(h.card().textContent,/OpenAI|100|尚缺/)
   const breakdown=h.w.document.querySelector('.adm-official-breakdown');assert.doesNotMatch(breakdown.textContent,/OpenAI|deactivated|not configured|同步官方账单/)
   assert.equal(breakdown.querySelectorAll('.adm-bill-provider').length,1)
   const provider=h.w.document.querySelectorAll('select')[1];assert.match(provider.textContent,/OpenAI（历史）/)
@@ -101,7 +101,7 @@ test('DeepSeek-only configuration hides retired OpenAI billing warnings and acti
   assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/OpenAI 回执/);assert.ok(!h.calls.includes('billing-sync'))
  }finally{h.close()}
 })
-test('official sync refreshes the primary card immediately even when a background read is already in flight',async()=>{
+test('official sync refreshes historical bill details immediately even when a background read is already in flight',async()=>{
   let resolveSync!:(value:unknown)=>void,resolveRead!:(value:unknown)=>void,count=0
   const old=costsFixture();old.officialBills=[officialBillFixture('openai','0.1',old)]
   const updated=costsFixture();updated.officialBills=[officialBillFixture('openai','0.2',updated),officialBillFixture('deepseek','0.000000000001',updated)]
@@ -109,7 +109,7 @@ test('official sync refreshes the primary card immediately even when a backgroun
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单') as HTMLButtonElement
     button.click();await tick();h.run(10000);await tick();resolveSync({message:'已同步'});await tick();resolveRead(old);await tick()
-    assert.equal(count,3);assert.match(h.card().textContent,/\$0\.200000000001/);assert.doesNotMatch(h.card().textContent,/尚缺官方账单/)
+    assert.equal(count,3);assert.match(h.card().textContent,/\$0\.20/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/)
   }finally{h.close()}
 })
 test('default current-month queries follow UTC midnight and month rollover; manually chosen periods stay fixed',async()=>{
@@ -133,7 +133,7 @@ test('OpenAI current-day sync delay remains visible after GMT+8 midnight under a
   }})
   try{
     const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-    assert.match(h.card().textContent,/\$0\.50/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/to=2026-09-15/)
+    assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/to=2026-09-15/)
   }finally{h.close()}
 })
 test('future samples are rejected, and an old current-period API snapshot is visibly delayed rather than called current',async()=>{
@@ -143,14 +143,14 @@ test('future samples are rejected, and an old current-period API snapshot is vis
   data.officialBills[0].fetched_at=data.snapshotAt;assert.equal(officialBillSummary(data,selected,Date.now()-86400000).total,'0.5','Use the server snapshot clock when the local computer clock is behind')
   data.officialBills[0].fetched_at=new Date(Date.now()-11*60000).toISOString()
   const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
-  try{assert.match(h.card().textContent,/\$0\.50/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.card().textContent,/本次汇总最早采集/)}finally{h.close()}
+  try{assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.card().textContent,/采集于/)}finally{h.close()}
 })
-test('provider query updates the official card only after that query succeeds and excludes other channels',async()=>{
+test('provider query updates historical bill details only after that query succeeds and excludes other channels',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data),officialBillFixture('deepseek','0.000000000009',data)]
   const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const select=h.w.document.querySelectorAll('select')[1];select.value='deepseek';select.dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
-    assert.match(h.card().textContent,/\$0\.032911700009/)
+    assert.match(h.card().textContent,/\$0\.0329117/)
     h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.card().textContent,/\$0\.000000000009/);assert.doesNotMatch(h.card().textContent,/OpenAI \+ DeepSeek/)
   }finally{h.close()}
 })
@@ -159,7 +159,7 @@ test('non-owner cannot see official billing cards or fetch owner endpoints, incl
   const h=await mount({access:false,request:path=>path.startsWith('costs?')?data:{configured:true}})
   try{assert.equal(h.card(),null);assert.doesNotMatch(h.body(),/官方账单明细|\$36\.30/);assert.ok(h.calls.every(path=>path.startsWith('costs?')))}finally{h.close()}
   const owner=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
-  try{assert.match(owner.card().textContent,/\$36\.30/);owner.w.__setAccess(false);await tick();assert.equal(owner.card(),null);assert.doesNotMatch(owner.body(),/\$36\.30/)}finally{owner.close()}
+  try{assert.match(owner.card().textContent,/\$18\.10/);owner.w.__setAccess(false);await tick();assert.equal(owner.card(),null);assert.doesNotMatch(owner.body(),/\$18\.10/)}finally{owner.close()}
 })
 test('business GMT+8 filtering does not disable native UTC sync or change each platform manual billing timezone',async()=>{
   const h=await mount({request:path=>{
@@ -187,7 +187,7 @@ test('a failed manual sync clears only after a newer matching OpenAI API snapsho
     assert.match(h.body(),/同步未完成，已保留上次结果/)
     now+=2000;data.snapshotAt=new Date(now).toISOString();data.officialBills[0].fetched_at=new Date(now).toISOString();h.run(10000);await tick()
     assert.doesNotMatch(h.body(),/同步未完成，已保留上次结果/);assert.match(h.body(),/OpenAI 官方账单已恢复同步/)
-    assert.match(h.card().textContent,/\$0\.39/)
+    assert.match(h.card().textContent,/\$0\.20/)
   }finally{h.close()}
 })
 
@@ -196,7 +196,7 @@ test('account-deactivation status is explicit and an automatic successful status
   const data=costsFixture();data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.19',data)]
   const h=await mount({now:()=>now,request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture(now):{configured:true,sync:failed?{status:'error',errorCode:'billing_account_deactivated',message:'OpenAI 账单账号已停用，请通过官方支持恢复账号。保留上次金额。'}:{status:'fresh'}}})
   try{
-    assert.match(h.card().textContent,/账单账号已停用/);assert.match(h.card().textContent,/\$0\.39/)
+    assert.match(h.card().textContent,/账单账号已停用/);assert.match(h.card().textContent,/\$0\.20/)
     failed=false;now+=61000;h.run(30000);await tick();assert.doesNotMatch(h.body(),/账单账号已停用/)
   }finally{h.close()}
 })

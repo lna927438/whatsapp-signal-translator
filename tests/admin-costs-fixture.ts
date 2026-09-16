@@ -10,7 +10,7 @@ export async function adminCostsBundle():Promise<string> {
   const result=await build({stdin:{sourcefile:'admin-costs-fixture.ts',resolveDir:admin,contents:`
     import {createApp,h,reactive} from 'vue';import AdminCosts from './AdminCosts.vue';
     const props=reactive({officialAccess:window.__officialAccess!==false});
-    const app=createApp({render:()=>h(AdminCosts,{...props,onReconcile:value=>window.__reconciled=value})});app.mount('#app');
+    const app=createApp({render:()=>h(AdminCosts,{...props,onReconcile:value=>window.__reconciled=value,onFunding:value=>window.__funding=value})});app.mount('#app');
     window.__setAccess=value=>props.officialAccess=value;window.__dispose=()=>app.unmount();
   `},bundle:true,write:false,format:'iife',platform:'browser',target:'es2022',define:{'process.env.NODE_ENV':'"production"','__VUE_OPTIONS_API__':'true','__VUE_PROD_DEVTOOLS__':'false','__VUE_PROD_HYDRATION_MISMATCH_DETAILS__':'false'},plugins:[{
     name:'real-admin-costs-with-fake-api',setup(build:any){
@@ -35,6 +35,11 @@ export async function adminCostsBundle():Promise<string> {
 export function balanceFixture(now=Date.now()) {
   return {provider:'deepseek',available:true,balances:[{currency:'USD',total:'1234.123456789012',granted:'0.000000000001',paid:'1234.123456789011'},{currency:'CNY',total:'0.000000000009',granted:'0',paid:'0.000000000009'}],fetchedAt:new Date(now).toISOString(),snapshotAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),stale:false,
     sync:{status:'fresh',lastAttemptAt:new Date(now).toISOString(),lastError:null,lastErrorAt:null,nextRefreshAt:new Date(now+30000).toISOString(),refreshIntervalSeconds:30,staleAfterSeconds:120}}
+}
+export function fundingBalanceFixture(now=Date.now()) {
+ const value=balanceFixture(now)
+ value.balances=[{currency:'USD',total:'19.70',paid:'19.70',granted:'0'}]
+ return {...value,funding:{basis:'confirmed_paid_funding_minus_official_paid_balance',scope:'current_account_lifetime',currency:'USD',status:'ready',reason:null,cumulativeTopUps:'20',cumulativeCashRefunds:'0',netPaidFunding:'20',paidBalance:'19.70',grantedBalance:'0',usedPaid:'0.30',balanceFetchedAt:value.fetchedAt,confirmedAt:value.checkedAt,basisSource:'owner_confirmation'}}
 }
 export function costsFixture(period?:{from:string;to:string;timezone:string}){
   const today=new Date().toISOString().slice(0,10),selected=period||{from:today.slice(0,8)+'01',to:today,timezone:'UTC'},offset=selected.timezone==='Asia/Shanghai'?28800000:0

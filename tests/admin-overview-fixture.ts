@@ -36,7 +36,7 @@ export async function adminOverviewBundle(mode:'app'|'component'='app'):Promise<
         export class ApiError extends Error {constructor(message,code,uncertain=false){super(message);this.code=code;this.uncertain=uncertain}}
         window.__ApiError=ApiError;
         export const savePending=()=>{},loadPending=()=>null,clearPending=()=>{},adminMfaStatus=async()=>({enrolled:true,recent:true});
-        export const s=(row,key)=>String(row?.[key]??''),n=(row,key)=>Number(row?.[key]||0),label=value=>String(value??''),actionNames={};
+        export const s=(row,key)=>String(row?.[key]??''),n=(row,key)=>Number(row?.[key]||0),label=value=>String(value??''),actionNames={'provider.funding.confirm':'确认累计充值与退款'};
         export const fmt=value=>new Intl.NumberFormat('zh-CN').format(Number(value||0));
         export const tokens=value=>value==null?'未记录':fmt(value);export const date=value=>value?new Date(String(value)).toISOString():'暂无';
         export {usd} from './money';

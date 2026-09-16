@@ -2,7 +2,7 @@ import {test,before} from 'node:test'
 import assert from 'node:assert/strict'
 import {JSDOM,VirtualConsole} from 'jsdom'
 import {adminOverviewBundle} from './admin-overview-fixture.ts'
-import {balanceFixture,costsFixture,officialBillFixture} from './admin-costs-fixture.ts'
+import {fundingBalanceFixture,costsFixture,officialBillFixture} from './admin-costs-fixture.ts'
 
 const initialTime=Date.parse('2026-09-15T08:00:00Z')
 let appBundle:string,componentBundle:string
@@ -21,151 +21,121 @@ async function mount(options:Options={}){
  const calls:string[]=[],timers=new Map<number,{fn:()=>void;ms:number}>();let timerId=0
  const now=options.now||(()=>initialTime),RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[now()]))}static now(){return now()}}
  w.__props=options.props||{};w.__session={id:'fixture-owner',email:'owner@example.invalid',role:options.role||'owner'}
- w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id);w.scrollTo=()=>{}
+ w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id);w.scrollTo=()=>{};w.HTMLDialogElement.prototype.showModal=function(){this.open=true}
  Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
  w.__request=async(path:string,body?:unknown)=>{
   calls.push(path)
   if(path==='session')return w.__session
   if(path==='overview')return {users:14,recentClients:2,todayCharacters:100,pendingTranslations:0,snapshotAt:new Date(now()).toISOString(),costs:{known_cost_usd_exact:'0.174394544',mismatches:0}}
-  return options.request?options.request(path,body):path.startsWith('costs?')?snapshot(path,now()):path==='provider-balance'?balanceFixture(now()):{configured:true,message:'已同步'}
+  return options.request?options.request(path,body):path.startsWith('costs?')?snapshot(path,now()):path==='provider-balance'?fundingBalanceFixture(now()):{configured:true,message:'已同步'}
  }
  w.eval(options.mode==='component'?componentBundle:appBundle);await tick()
- return {w,calls,errors,timers,body:()=>w.document.body.textContent as string,official:()=>w.document.querySelector('.adm-overview-official'),characters:()=>w.document.querySelector('.adm-overview-characters'),run:(ms:number)=>{for(const item of [...timers.values()])if(item.ms===ms)item.fn()},refresh:async()=>{await w.__refreshOverview();await tick()},navigate:async(path:string)=>{await w.__navigate(path);await tick()},close:()=>{w.__dispose?.();dom.window.close()}}
+ return {w,calls,errors,timers,body:()=>w.document.body.textContent as string,official:()=>w.document.querySelector('.adm-overview-funding'),characters:()=>w.document.querySelector('.adm-overview-characters'),run:(ms:number)=>{for(const item of [...timers.values()])if(item.ms===ms)item.fn()},refresh:async()=>{await w.__refreshOverview();await tick()},navigate:async(path:string)=>{await w.__navigate(path);await tick()},close:()=>{w.__dispose?.();dom.window.close()}}
 }
 
-test('real parent overview and costs route show the same exact official total and default monthly character count',async()=>{
+
+test('real parent overview and costs share lifetime 20 / 19.70 / 0.30 funds, independently of monthly historical bills',async()=>{
  const h=await mount();try{
-  assert.match(h.official().textContent,/\$0\.2385287/);assert.match(h.characters().textContent,/23,541/)
-  assert.doesNotMatch(h.official().textContent,/0\.174394544|987654321/)
-  assert.match(h.official().textContent,/OpenAI UTC · DeepSeek GMT\+8/)
-  const overviewQuery=h.calls.find(path=>path.startsWith('costs?'))!
-  assert.match(overviewQuery,/from=2026-09-01&to=2026-09-15&timezone=UTC&provider=/)
-  await h.navigate('/admin/costs')
-  const costCard=h.w.document.querySelector('.adm-official-cost');assert.match(costCard.textContent,/\$0\.2385287/)
-  assert.equal(h.official(),null);assert.ok(h.calls.includes(overviewQuery))
-  assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false)
-  await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.2385287/)
-  assert.equal(h.w.document.querySelector('.adm-official-cost'),null);assert.deepEqual(h.errors,[])
+  assert.match(h.official().textContent,/累计已用（余额核算）\$0\.30/);assert.match(h.characters().textContent,/23,541/);assert.match(h.official().textContent,/累计充值\$20\.00/);assert.match(h.official().textContent,/官方余额\$19\.70/)
+  assert.doesNotMatch(h.official().textContent,/0\.174394544|0\.2385287|尚缺官方账单/)
+  const query=h.calls.find(path=>path.startsWith('costs?'))!;assert.match(query,/from=2026-09-01&to=2026-09-15&timezone=UTC&provider=/)
+  await h.navigate('/admin/costs');assert.match(h.w.document.querySelector('.adm-provider-funding').textContent,/\$0\.30/);assert.ok(h.calls.includes(query));assert.equal(h.official(),null)
+  assert.match(h.w.document.querySelector('.adm-official-breakdown').textContent,/\$0\.19/);assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false)
+  await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.30/);assert.deepEqual(h.errors,[])
+ }finally{h.close()}
+})
+test('parent five-second usage refresh checks funds every thirty seconds; manual funding refresh is immediate',async()=>{
+ let now=initialTime;const h=await mount({now:()=>now});try{
+  assert.equal([...h.timers.values()].filter(timer=>timer.ms===5000).length,1)
+  const count=()=>h.calls.filter(p=>p==='provider-balance').length;assert.equal(count(),1)
+  now+=5000;h.run(5000);await tick();assert.equal(count(),1)
+  now+=25000;h.run(5000);await tick();assert.equal(count(),2)
+  h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(count(),3)
+  Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});now+=30000;h.run(5000);await tick();assert.equal(count(),3)
+  Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});await h.navigate('/admin/costs');const reads=count();h.run(30000);await tick();assert.equal(count(),reads+1)
+  const usage=h.calls.filter(p=>p.startsWith('costs?')).length;h.run(10000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).length,usage+1)
+ }finally{h.close()}
+})
+test('missing monthly bills or changed calendar periods never erase current account funds',async()=>{
+ let now=Date.parse('2026-09-30T23:59:58Z')
+ const h=await mount({mode:'component',now:()=>now,request:path=>path==='provider-balance'?fundingBalanceFixture(now):{...snapshot(path,now),enabledProviders:['deepseek'],officialBills:[]}});try{
+  assert.match(h.official().textContent,/\$0\.30/);assert.doesNotMatch(h.official().textContent,/OpenAI|尚缺/);assert.match(h.characters().textContent,/2026-09-01 至 2026-09-30/)
+  now+=6000;await h.refresh();assert.match(h.characters().textContent,/2026-10-01 至 2026-10-01/);assert.match(h.official().textContent,/\$0\.30/)
+ }finally{h.close()}
+})
+test('failure retains prior funds and usage with stale labels; first-read unknown values are never zero',async()=>{
+ let fail=false,now=initialTime
+ const h=await mount({mode:'component',now:()=>now,request:path=>{if(fail)throw Error('synthetic offline');return path==='provider-balance'?fundingBalanceFixture(now):snapshot(path,now)}})
+ try{
+  fail=true;now+=30000;await h.refresh();await tick();assert.match(h.official().textContent,/\$0\.30/);assert.match(h.official().textContent,/上次核对的资金数据/);assert.match(h.characters().textContent,/保留上次数据/)
+  fail=false;now+=30000;await h.refresh();await tick();assert.doesNotMatch(h.official().textContent,/offline|上次核对/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
+ }finally{h.close()}
+ const empty=await mount({mode:'component',request:()=>{throw Error('offline')}});try{assert.match(empty.characters().textContent,/尚未取得/);assert.equal(empty.official().querySelector('.adm-cost-value'),null);assert.doesNotMatch(empty.official().textContent,/\$0/)}finally{empty.close()}
+})
+test('server-side auth revocation clears money even if the rendered role is still owner',async()=>{
+ for(const code of ['unauthorized','admin_forbidden']){
+  let failed=false
+  const h=await mount({mode:'component',request:path=>{if(failed)throw Object.assign(Error('revoked'),{code});return path==='provider-balance'?fundingBalanceFixture(initialTime):snapshot(path)}})
+  try{assert.match(h.official().textContent,/\$0\.30/);failed=true;await h.refresh();assert.doesNotMatch(h.official().textContent,/\$0\.30|\$20|19\.70/);assert.doesNotMatch(h.characters().textContent,/23,541/)}finally{h.close()}
+ }
+})
+test('support and finance retain permitted usage while private funds and balance endpoints stay owner-only',async()=>{
+ for(const role of ['admin','support','finance','editor']){
+  const h=await mount({role});try{
+   assert.equal(h.official(),null);assert.equal(Boolean(h.characters()),role!=='editor');assert.ok(!h.calls.includes('provider-balance')&&!h.calls.includes('billing-status'))
+   await h.navigate('/admin/costs');assert.equal(h.w.document.querySelector('.adm-provider-funding'),null);assert.ok(!h.calls.includes('provider-balance')&&!h.calls.includes('billing-status'));assert.deepEqual(h.errors,[])
+  }finally{h.close()}
+ }
+})
+test('identity replacement rejects an old owner balance response; permission loss clears a new pending response',async()=>{
+ const resolves:Array<(value:unknown)=>void>=[]
+ const h=await mount({mode:'component',request:path=>path==='provider-balance'?new Promise(resolve=>resolves.push(resolve)):snapshot(path)})
+ try{
+  assert.equal(resolves.length,1);h.w.__setProps({identity:'new-owner'});await tick();assert.equal(resolves.length,2)
+  resolves[0](fundingBalanceFixture(initialTime));await tick();assert.equal(h.official().querySelector('.adm-cost-value'),null)
+  resolves[1](fundingBalanceFixture(initialTime));await tick();assert.match(h.official().textContent,/\$0\.30/)
+  h.w.document.querySelector('.adm-funding-heading button').click();await tick();h.w.__setProps({officialAccess:false});await tick();resolves[2](fundingBalanceFixture(initialTime));await tick();assert.equal(h.official(),null);assert.doesNotMatch(h.body(),/19\.70/)
+ }finally{h.close()}
+})
+test('usage refresh requests coalesce without duplicating the balance request',async()=>{
+ let resolvePending!:(value:unknown)=>void,count=0,path=''
+ const h=await mount({mode:'component',request:p=>{if(p==='provider-balance')return fundingBalanceFixture(initialTime);path=p;return ++count===2?new Promise(resolve=>{resolvePending=resolve}):snapshot(p)}})
+ try{
+  const pending=h.w.__refreshOverview();await tick();const duplicate=h.w.__refreshOverview();h.w.__refreshOverview();await tick();assert.equal(count,2)
+  resolvePending(snapshot(path));await Promise.all([pending,duplicate]);await tick();assert.equal(count,3);assert.equal(h.calls.filter(p=>p==='provider-balance').length,1)
+ }finally{h.close()}
+})
+test('unmounted overview late balances cannot overwrite the costs page or a fresh overview instance',async()=>{
+ let resolveLate!:(value:unknown)=>void,hold=false
+ const h=await mount({request:path=>{if(path==='provider-balance'){if(hold){hold=false;return new Promise(resolve=>{resolveLate=resolve})}return fundingBalanceFixture(initialTime)}return path.startsWith('costs?')?snapshot(path):{configured:true}}})
+ try{
+  hold=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();await h.navigate('/admin/costs')
+  const bad=fundingBalanceFixture(initialTime);bad.funding.cumulativeTopUps='500';bad.funding.netPaidFunding='500';bad.funding.usedPaid='480.30';resolveLate(bad);await tick();assert.doesNotMatch(h.body(),/480\.30/)
+  await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.30/);assert.deepEqual(h.errors,[])
+ }finally{h.close()}
+})
+test('UTC rollover rejects old monthly usage response without relabeling it; cumulative funds remain unchanged',async()=>{
+ let now=Date.parse('2026-09-30T23:59:58Z'),old:ReturnType<typeof snapshot>|undefined,returnOld=false
+ const h=await mount({mode:'component',now:()=>now,request:path=>path==='provider-balance'?fundingBalanceFixture(now):returnOld?old:old=snapshot(path,now)})
+ try{
+  now+=6000;returnOld=true;await h.refresh();assert.match(h.characters().textContent,/账期数据尚未核实/);assert.match(h.characters().textContent,/2026-09-01 至 2026-09-30/);assert.match(h.official().textContent,/\$0\.30/)
+  returnOld=false;await h.refresh();assert.match(h.characters().textContent,/2026-10-01 至 2026-10-01/)
  }finally{h.close()}
 })
 
-test('overview and costs default totals include only enabled providers and omit retired-provider missing bill prompts',async()=>{
- const h=await mount({request:path=>{
-  if(path==='provider-balance')return balanceFixture(initialTime)
-  if(!path.startsWith('costs?'))return {enabledProviders:['deepseek'],configured:false,reason:'provider_disabled'}
-  return {...snapshot(path),enabledProviders:['deepseek']}
- }})
+
+test('real funding registration requires review and explicit save, preserves exact decimals and refreshes after a confirmed mutation',async()=>{
+ const mutations:any[]=[],balance=fundingBalanceFixture(initialTime)
+ const h=await mount({request:(path,body)=>{if(path==='mutate'){mutations.push(body);return {funding:balance.funding}}return path==='provider-balance'?balance:path.startsWith('costs?')?snapshot(path):{configured:true}}})
  try{
-  assert.match(h.official().textContent,/\$0\.19/);assert.doesNotMatch(h.official().textContent,/OpenAI|尚缺|0\.2385287/)
-  await h.navigate('/admin/costs');const card=h.w.document.querySelector('.adm-official-cost')
-  assert.match(card.textContent,/\$0\.19/);assert.doesNotMatch(card.textContent,/OpenAI|尚缺|0\.2385287/)
-  assert.doesNotMatch(h.w.document.querySelector('.adm-official-breakdown').textContent,/尚未配置/)
+  await h.navigate('/admin/costs');const reads=h.calls.filter(p=>p==='provider-balance').length
+  h.w.document.querySelector('.adm-funding-confirm').click();await tick();assert.match(h.body(),/历次累计总额，不是本次金额/)
+  const form=h.w.document.querySelector('.adm-edit-form'),inputs=form.querySelectorAll('input')
+  inputs[0].value='20.000000000001';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[2].value='synthetic funding receipt';inputs[2].dispatchEvent(new h.w.Event('input',{bubbles:true}))
+  const reason=form.querySelector('textarea');reason.value='synthetic owner check';reason.dispatchEvent(new h.w.Event('input',{bubbles:true}))
+  form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.equal(mutations.length,0);assert.match(h.body(),/请核对本次修改/)
+  form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.equal(mutations.length,1)
+  const op=mutations[0];assert.equal(op.action,'provider.funding.confirm');assert.equal(op.target,'deepseek');assert.equal(op.data.cumulativeTopUps,'20.000000000001');assert.equal(op.data.cumulativeCashRefunds,'0');assert.equal(op.data.balanceFetchedAt,balance.fetchedAt);assert.equal(op.data.currency,'USD');assert.equal(op.reason,'synthetic owner check');assert.match(op.operationId,/^[a-f0-9-]{36}$/)
+  assert.equal(h.calls.filter(p=>p==='provider-balance').length,reads+1);assert.match(h.body(),/确认累计充值与退款已完成/);assert.equal(h.w.document.querySelector('.adm-dialog'),null)
  }finally{h.close()}
-})
-test('overview uses parent five-second refresh and costs keeps ten-second refresh without duplicate component timers',async()=>{
- const h=await mount();try{
-  assert.equal([...h.timers.values()].filter(timer=>timer.ms===5000).length,1)
-  assert.equal([...h.timers.values()].filter(timer=>timer.ms===10000).length,0)
-  let reads=h.calls.filter(path=>path.startsWith('costs?')).length;h.run(5000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).length,reads+1)
-  Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});reads++
-  h.run(5000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).length,reads)
-  Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});await h.navigate('/admin/costs')
-  reads=h.calls.filter(path=>path.startsWith('costs?')).length;h.run(5000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).length,reads)
-  h.run(10000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).length,reads+1)
-  await h.navigate('/admin/overview');assert.equal([...h.timers.values()].filter(timer=>timer.ms===10000).length,0)
- }finally{h.close()}
-})
-test('missing official bills never display zero or local estimates, but genuine zero bills may total zero',async()=>{
- let state:'missing'|'partial'|'zero'='missing'
- const h=await mount({mode:'component',request:path=>{const data=snapshot(path);if(state==='missing')data.officialBills=[];if(state==='partial')data.officialBills.pop();if(state==='zero')data.officialBills.forEach(bill=>{bill.official_usd_exact='0'});return data}})
- try{
-  assert.match(h.official().textContent,/尚缺官方账单/);assert.doesNotMatch(h.official().textContent,/\$0|0\.174394544/)
-  state='partial';await h.refresh();assert.match(h.official().textContent,/已同步部分：\$0\.0485287/);assert.match(h.official().textContent,/待同步：DeepSeek/)
-  assert.equal(h.official().querySelector('.adm-cost-value'),null)
-  state='zero';await h.refresh();assert.equal(h.official().querySelector('.adm-cost-value').textContent,'$0.00')
- }finally{h.close()}
-})
-test('read failure preserves labeled prior data, recovery clears warning, and an empty current snapshot clears prior amounts',async()=>{
- let state:'good'|'failure'|'empty'='good'
- const h=await mount({mode:'component',request:path=>{if(state==='failure')throw new Error('synthetic unavailable');const data=snapshot(path);if(state==='empty')data.officialBills=[];return data}})
- try{
-  state='failure';await h.refresh();assert.match(h.official().textContent,/\$0\.2385287/);assert.match(h.official().textContent,/读取失败.*保留上次账单/);assert.match(h.characters().textContent,/23,541/)
-  state='good';await h.refresh();assert.doesNotMatch(h.official().textContent,/读取失败/)
-  state='empty';await h.refresh();assert.match(h.official().textContent,/尚缺官方账单/);assert.doesNotMatch(h.official().textContent,/0\.2385287/)
- }finally{h.close()}
-})
-test('first-read failure never turns unknown monthly characters or absent official bills into zero',async()=>{
- const h=await mount({mode:'component',request:()=>{throw new Error('synthetic offline')}})
- try{assert.match(h.characters().textContent,/尚未取得/);assert.match(h.characters().textContent,/未显示为零/);assert.match(h.official().textContent,/尚缺官方账单/);assert.equal(h.official().querySelector('.adm-cost-value'),null)}finally{h.close()}
-})
-test('server-side authorization revocation clears old official amounts even while the rendered role remains owner',async()=>{
- for(const code of ['unauthorized','admin_forbidden']){
-  let failure:Error|undefined
-  const h=await mount({mode:'component',request:path=>{if(failure)throw failure;return snapshot(path)}})
-  try{
-   assert.match(h.official().textContent,/\$0\.2385287/)
-   failure=new h.w.__ApiError('synthetic authorization revoked',code);await h.refresh()
-   assert.doesNotMatch(h.official().textContent,/0\.2385287/);assert.doesNotMatch(h.characters().textContent,/23,541/)
-   assert.match(h.official().textContent,/尚缺官方账单/);assert.match(h.characters().textContent,/尚未取得/)
-  }finally{h.close()}
- }
-})
-test('real role grants keep monthly usage readable to support/finance while official bills and private API calls stay owner-only',async()=>{
- for(const role of ['admin','support','finance','editor']){
-  const h=await mount({role});try{
-   assert.equal(h.official(),null,role);assert.equal(Boolean(h.characters()),role!=='editor',role)
-   assert.doesNotMatch(h.body(),/0\.2385287|0\.174394544/)
-   assert.ok(!h.calls.includes('provider-balance')&&!h.calls.includes('billing-status'))
-   assert.equal(h.calls.some(path=>path.startsWith('costs?')),role!=='editor')
-   await h.navigate('/admin/costs')
-   assert.equal(h.w.document.querySelector('.adm-official-cost'),null)
-   assert.ok(!h.calls.includes('provider-balance')&&!h.calls.includes('billing-status'));assert.deepEqual(h.errors,[])
-  }finally{h.close()}
- }
-})
-test('identity replacement and permission loss discard delayed old-owner reads without leaking prior amounts',async()=>{
- let resolveOld!:(value:unknown)=>void,resolveNew!:(value:unknown)=>void,count=0,oldPath=''
- const h=await mount({mode:'component',request:path=>{oldPath=path;return ++count===1?new Promise(resolve=>{resolveOld=resolve}):new Promise(resolve=>{resolveNew=resolve})}})
- try{
-  h.w.__setProps({identity:'other-owner'});await tick();assert.equal(count,2)
-  resolveOld(snapshot(oldPath));await tick();assert.doesNotMatch(h.official().textContent,/0\.2385287/)
-  const other=snapshot(oldPath);other.officialBills[0].official_usd_exact='1';resolveNew(other);await tick();assert.match(h.official().textContent,/\$1\.19/)
-  h.w.__setProps({officialAccess:false});await tick();assert.equal(h.official(),null);assert.doesNotMatch(h.body(),/1\.19/)
-  h.w.__setProps({canReadCosts:false});await tick();resolveNew(snapshot(oldPath));await tick();assert.equal(h.characters(),null);assert.equal(h.official(),null)
- }finally{h.close()}
-})
-test('concurrent refresh requests coalesce and then load one newer snapshot',async()=>{
- let resolvePending!:(value:unknown)=>void,count=0,path=''
- const h=await mount({mode:'component',request:p=>{path=p;return ++count===1?snapshot(p):count===2?new Promise(resolve=>{resolvePending=resolve}):{...snapshot(p),officialBills:[]}}})
- try{
-  const pending=h.w.__refreshOverview();await tick();const duplicate=h.w.__refreshOverview();h.w.__refreshOverview();await tick();assert.equal(count,2)
-  resolvePending(snapshot(path));await Promise.all([pending,duplicate]);await tick();assert.equal(count,3);assert.match(h.official().textContent,/尚缺官方账单/)
- }finally{h.close()}
-})
-test('a stale overview request completing after route unmount cannot overwrite the costs page or its new overview instance',async()=>{
- let resolveLate!:(value:unknown)=>void,hold=false,latePath=''
- const h=await mount({request:path=>{
-  if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(initialTime):{configured:true}
-  if(hold){hold=false;latePath=path;return new Promise(resolve=>{resolveLate=resolve})}return snapshot(path)
- }})
- try{
-  hold=true;h.run(5000);await tick();await h.navigate('/admin/costs');assert.match(h.w.document.querySelector('.adm-official-cost').textContent,/\$0\.2385287/)
-  const stale=snapshot(latePath);stale.officialBills[0].official_usd_exact='500';resolveLate(stale);await tick();assert.doesNotMatch(h.body(),/500\.19/)
-  await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.2385287/);assert.doesNotMatch(h.body(),/500\.19/);assert.deepEqual(h.errors,[])
- }finally{h.close()}
-})
-test('UTC month rollover requests the new calendar period and rejects a response for the old month',async()=>{
- let now=Date.parse('2026-09-30T23:59:58Z'),old:ReturnType<typeof snapshot>|undefined,returnOld=false
- const h=await mount({mode:'component',now:()=>now,request:path=>{if(returnOld)return old;return old=snapshot(path,now)}})
- try{
-  assert.match(h.characters().textContent,/2026-09-01 至 2026-09-30/)
-  now=Date.parse('2026-10-01T00:00:03Z');returnOld=true;await h.refresh()
-  assert.match(h.calls.at(-1)!,/from=2026-10-01&to=2026-10-01/);assert.match(h.characters().textContent,/账期数据尚未核实/)
-  assert.doesNotMatch(h.characters().textContent,/2026-10-01 至 2026-10-01/,'An old response must not be labeled as the new month')
-  returnOld=false;await h.refresh();assert.match(h.characters().textContent,/2026-10-01 至 2026-10-01/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
- }finally{h.close()}
-})
-test('current API statement delays are explicit, while manual historical statements retain their real sample date',async()=>{
- const h=await mount({mode:'component',request:path=>{const data=snapshot(path);data.officialBills.forEach(bill=>{bill.fetched_at=new Date(initialTime-11*60000).toISOString()});return data}})
- try{assert.match(h.official().textContent,/\$0\.2385287/);assert.match(h.official().textContent,/官方账单同步有延迟/);assert.match(h.official().textContent,/07:49/)}finally{h.close()}
 })

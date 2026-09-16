@@ -11,6 +11,7 @@ import AdminOverviewBilling from './AdminOverviewBilling.vue'
 import AdminAccount from './AdminAccount.vue'
 import AdminMfa from './AdminMfa.vue'
 import AdminSecurity from './AdminSecurity.vue'
+import {fundingDecimal} from './providerFunding'
 import {usd,tokens} from './client'
 
 const route=useRoute(),router=useRouter()
@@ -29,6 +30,7 @@ const detail=ref<Row|null>(null),detailBusy=ref(false),detailError=ref('')
 const profile=computed(()=>detail.value?.profile as Row||{}),wallet=computed(()=>detail.value?.wallet as Row||{})
 const pending=ref<Operation|null>(null)
 const overviewBilling=ref<InstanceType<typeof AdminOverviewBilling>|null>(null)
+const costsPanel=ref<InstanceType<typeof AdminCosts>|null>(null)
 let loadRevision=0,detailRevision=0
 let refreshTimer:ReturnType<typeof setInterval>|undefined
 const write=(scope:'users'|'billing'|'content'|'roles')=>Boolean(session.value&&canWrite(session.value.role,scope))
@@ -86,6 +88,8 @@ function adjust(){openEditor('wallet.add',s(profile.value,'id'),s(profile.value,
 function clearUserContent(){openEditor('user.clear-content',s(profile.value,'id'),s(profile.value,'email')+' · 清理已完成翻译的云端译文，无法恢复。保留余额、流水和请求编号；不删除平台聊天或其他设备上的本地副本。',{},[])}
 function reconcile(data:Row){openEditor('cost.reconcile',s(data,'provider'),`${s(data,'provider')} · ${s(data,'from')} 至 ${s(data,'to')} · ${s(data,'timezone')||'GMT+8'}`,{from:data.from,to:data.to,timezone:data.timezone||'Asia/Shanghai',officialUsd:'',officialTokens:null,officialRequests:null,reference:''},[
   field('officialUsd','账单金额（USD，保留原始精度）'),{...field('officialTokens','账单 Tokens（没有可留空）','number'),min:0,required:false},{...field('officialRequests','账单调用数（没有可留空）','number'),min:0,required:false},field('reference','账单来源或导出文件名称')])}
+function fundingConfirm(data:Row){if(session.value?.role!=='owner'||localPreview)return;openEditor('provider.funding.confirm','deepseek','DeepSeek · 填写此账号历次累计总额，不是本次金额。请先确认充值已到账、官方余额已更新。',{currency:'USD',cumulativeTopUps:data.cumulativeTopUps,cumulativeCashRefunds:data.cumulativeCashRefunds,balanceFetchedAt:data.balanceFetchedAt,reference:''},[
+  field('cumulativeTopUps','累计充值总额（USD）'),field('cumulativeCashRefunds','累计退回付款渠道的金额（USD，没有填 0）'),field('reference','充值或退款记录来源')])}
 function noteEdit(row:Row=profile.value){
   openEditor('user.note',s(row,'id'),s(row,'email'),{note:s(row,'admin_note'),expectedRevision:n(row,'note_revision')},[{...field('note','管理员备注','textarea'),required:false,maxLength:1000}])
 }
@@ -127,6 +131,10 @@ function roleEdit(row:Row={}){
 async function review(){
   if(!editor.value)return
   const current=editor.value;editError.value=''
+  if(current.action==='provider.funding.confirm'){
+    const topups=fundingDecimal(current.data.cumulativeTopUps),refunds=fundingDecimal(current.data.cumulativeCashRefunds)
+    if(topups===null||refunds===null||topups<0n||refunds<0n||refunds>topups){editError.value='请填写有效的非负累计金额，现金退款不能超过累计充值。';return}
+  }
   if(current.action==='notice.save'){
     if(current.data.ends_at&&new Date(String(current.data.ends_at))<=new Date(String(current.data.starts_at))){editError.value='结束时间须晚于开始时间。';return}
     current.targetName=current.data.audience==='user'?String(current.data.recipient).trim():'全部用户'
@@ -157,6 +165,7 @@ async function submit(op?:Operation){
     if(current.action==='cost.reconcile')rawDetail.value=result
     if(current.action==='role.set'||current.action==='user.update'){session.value=await request<AdminSession>('session')}
     await load()
+    if(current.action==='provider.funding.confirm')await costsPanel.value?.refreshFunding()
     if(detail.value)await userDetail(profile.value)
   }catch(e){
     editError.value=message(e)
@@ -170,7 +179,7 @@ async function resume(){
   const p=pending.value;const actor=session.value.id;saving.value=true;editError.value=''
   try{
     const result=await request<{found:boolean;result:Row|null}>('operation?operationId='+encodeURIComponent(p.operationId))
-    if(result.found){clearPending(actor);pending.value=null;editor.value=null;notice.value=`已确认：${actionNames[p.action]}已完成，无需重复操作。`;await load();if(detail.value)await userDetail(profile.value);return}
+    if(result.found){clearPending(actor);pending.value=null;editor.value=null;notice.value=`已确认：${actionNames[p.action]}已完成，无需重复操作。`;await load();if(p.action==='provider.funding.confirm')await costsPanel.value?.refreshFunding();if(detail.value)await userDetail(profile.value);return}
     editor.value={action:p.action,target:p.target,targetName:p.target,data:p.data,fields:[],reason:p.reason,review:true,operationId:p.operationId,fixedTarget:true}
     editError.value='尚未查到已完成的记录。可按原编号重试，已完成的操作不会重复执行。'
   }catch(e){notice.value=message(e)}finally{saving.value=false}
@@ -215,9 +224,9 @@ onUnmounted(()=>{++loadRevision;++detailRevision;clearInterval(refreshTimer);win
           <div v-if="error" class="adm-error" role="alert">{{ error }}<button class="adm-button" @click="load">重新加载</button><small v-if="snapshot">下方是上次成功读取的数据：{{ date(snapshot) }}</small></div>
           <template v-if="active==='overview'">
             <section class="adm-stat-grid"><article><span>客户端用户</span><strong>{{ fmt(overview.users) }}</strong><small>{{fmt(overview.recentClients)}} 位在最近 2 分钟联机</small></article><article><span>今日已扣字符</span><strong>{{fmt(overview.todayCharacters)}}</strong><small>今日 GMT+8 · 云端实际流水</small></article><AdminOverviewBilling ref="overviewBilling" :key="session.id+':'+session.role" :identity="session.id+':'+session.role" :can-read-costs="canView(session.role,'costs')" :official-access="session.role==='owner'" /></section>
-            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink v-if="canView(session.role,'costs')" to="/admin/costs">查看用量与官方费用 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>每 5 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{fmt(overview.pendingTranslations)}} 条</dd></div><div><dt>翻译对账异常</dt><dd>{{fmt((overview.costs as Row)?.mismatches)}} 条</dd></div></dl><p class="adm-help">今日字符按 GMT+8 统计；本月字符按 UTC 统计。官方金额按各平台原生账期汇总，缺少账单不会按零补齐。</p></article></section>
+            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink v-if="canView(session.role,'costs')" to="/admin/costs">查看用量与资金 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>每 5 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{fmt(overview.pendingTranslations)}} 条</dd></div><div><dt>翻译对账异常</dt><dd>{{fmt((overview.costs as Row)?.mismatches)}} 条</dd></div></dl><p class="adm-help">今日字符按 GMT+8、本月字符按 UTC 统计。DeepSeek 金额为当前账号累计资金，不随日期筛选变化；历史账期账单保留在用量与费用中。</p></article></section>
           </template>
-          <AdminCosts v-else-if="active==='costs'" :key="session.id+':'+session.role" :official-access="session.role==='owner'" @reconcile="reconcile" />
+          <AdminCosts v-else-if="active==='costs'" ref="costsPanel" :key="session.id+':'+session.role" :official-access="session.role==='owner'" @reconcile="reconcile" @funding="fundingConfirm" />
           <AdminAccount v-else-if="active==='account'" :session="session" />
           <AdminSecurity v-else-if="active==='security'" />
           <section v-else class="adm-card adm-list-card" :aria-busy="busy">

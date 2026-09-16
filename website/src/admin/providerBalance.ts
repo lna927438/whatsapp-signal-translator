@@ -1,3 +1,4 @@
+import {parseProviderFunding,type ProviderFunding} from './providerFunding'
 export type BalanceStatus='fresh'|'refreshing'|'stale'|'error'|'not_configured'
 export interface ProviderBalance {
   provider:'deepseek'
@@ -7,6 +8,7 @@ export interface ProviderBalance {
   checkedAt:string
   stale:boolean
   sync:{status:BalanceStatus;nextRefreshAt:string|null;refreshIntervalSeconds:number;staleAfterSeconds:number}
+  funding:ProviderFunding|null
 }
 const timestamp=(value:unknown):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))
 export function parseProviderBalance(value:unknown):ProviderBalance {
@@ -22,7 +24,8 @@ export function parseProviderBalance(value:unknown):ProviderBalance {
   })
   const s=v.sync
   if(!s||!['fresh','refreshing','stale','error','not_configured'].includes(s.status)||!Number.isFinite(s.refreshIntervalSeconds)||s.refreshIntervalSeconds<1||!Number.isFinite(s.staleAfterSeconds)||s.staleAfterSeconds<1||s.nextRefreshAt!==null&&!timestamp(s.nextRefreshAt))return invalid()
-  return {provider:'deepseek',available:v.available,balances,fetchedAt,checkedAt:v.checkedAt,stale:v.stale,sync:{status:s.status,nextRefreshAt:s.nextRefreshAt,refreshIntervalSeconds:s.refreshIntervalSeconds,staleAfterSeconds:s.staleAfterSeconds}}
+  const funding=parseProviderFunding(v.funding,{balances,fetchedAt,checkedAt:v.checkedAt})
+  return {provider:'deepseek',available:v.available,balances,fetchedAt,checkedAt:v.checkedAt,stale:v.stale,sync:{status:s.status,nextRefreshAt:s.nextRefreshAt,refreshIntervalSeconds:s.refreshIntervalSeconds,staleAfterSeconds:s.staleAfterSeconds},funding}
 }
 export function balanceState(balance:ProviderBalance|null,error:string,now=Date.now()):{label:string;delayed:boolean} {
   if(error)return {label:balance?.balances.length?'同步未完成，保留上次余额':'暂未取得官方余额',delayed:true}

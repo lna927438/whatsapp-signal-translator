@@ -32,7 +32,7 @@ test('freshness uses provider fetched time rather than a new checked time, with 
 })
 test('one visible balance card shows precise currencies, amount details and current data without summary fallback',async()=>{
   const h=await mount();try{
-    assert.equal(h.w.document.querySelectorAll('.adm-provider-balance').length,1)
+    assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,1)
     assert.match(h.body(),/USD 1,234\.123456789012/);assert.match(h.body(),/CNY 0\.000000000009/)
     assert.match(h.body(),/赠金余额 USD 0\.000000000001/);assert.doesNotMatch(h.body(),/999999999999/)
     assert.match(h.body(),/\$0\.123456789012/);assert.match(h.body(),/23,541/);assert.match(h.body(),/UTC/)
@@ -43,8 +43,8 @@ test('30-second visible checks and the manual button share one guarded request a
   let resolveBalance:((value:unknown)=>void)|undefined,balanceCalls=0
   const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?(balanceCalls++,new Promise(resolve=>{resolveBalance=resolve})):{configured:true}})
   try{
-    h.run(30000);h.w.document.querySelector('.adm-balance-heading button').click();await tick();assert.equal(balanceCalls,1)
-    assert.equal(h.w.document.querySelector('.adm-balance-heading button').disabled,true)
+    h.run(30000);h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(balanceCalls,1)
+    assert.equal(h.w.document.querySelector('.adm-funding-heading button').disabled,true)
     resolveBalance!(balanceFixture());await tick();assert.match(h.body(),/USD 1,234\.123456789012/)
     h.run(10000);await tick();assert.match(h.body(),/USD 1,234\.123456789012/);assert.doesNotMatch(h.body(),/999999999999/)
     Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});h.run(30000);await tick();assert.equal(balanceCalls,1)
@@ -56,7 +56,7 @@ test('a failed refresh retains the sampled amount and time, then reconnect recov
   let fail=false;const sampled=balanceFixture(Date.parse('2026-09-15T01:00:00Z'))
   const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?fail?Promise.reject(Error('暂时无法连接')):sampled:{configured:true}})
   try{
-    fail=true;h.w.document.querySelector('.adm-balance-heading button').click();await tick();assert.match(h.body(),/保留上次余额/);assert.match(h.body(),/2026-09-15 01:00:00 UTC/);assert.match(h.body(),/USD 1,234\.123456789012/)
+    fail=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/上次核对的资金数据/);assert.match(h.body(),/2026-09-15 01:00:00 UTC/);assert.match(h.body(),/USD 1,234\.123456789012/)
     fail=false;sampled.balances[0].total='1234.000000000001';sampled.fetchedAt=new Date().toISOString();h.w.dispatchEvent(new h.w.Event('online'));await tick();assert.match(h.body(),/USD 1,234\.000000000001/);assert.doesNotMatch(h.body(),/暂时无法连接/)
   }finally{h.close()}
 })
@@ -65,12 +65,12 @@ test('explicit absent account data clears old balance and a role change cannot r
   const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?response:{configured:true}})
   try{
     response={...balanceFixture(),available:null,balances:[],fetchedAt:null,snapshotAt:null,sync:{...balanceFixture().sync,status:'not_configured'}}
-    h.w.document.querySelector('.adm-balance-heading button').click();await tick();assert.match(h.body(),/尚未连接/);assert.match(h.body(),/尚未取得/);assert.doesNotMatch(h.body(),/USD 1,234/)
-    response=new Promise(resolve=>{resolveBalance=resolve});h.run(30000);await tick();h.w.__setAccess(false);await tick();resolveBalance!(balanceFixture());await tick();assert.equal(h.w.document.querySelectorAll('.adm-provider-balance').length,0);assert.doesNotMatch(h.body(),/USD 1,234/)
+    h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/尚未连接/);assert.match(h.body(),/尚未取得/);assert.doesNotMatch(h.body(),/USD 1,234/)
+    response=new Promise(resolve=>{resolveBalance=resolve});h.run(30000);await tick();h.w.__setAccess(false);await tick();resolveBalance!(balanceFixture());await tick();assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,0);assert.doesNotMatch(h.body(),/USD 1,234/)
   }finally{h.close()}
 })
 test('cost-reader roles make no owner-only balance or official-bill requests',async()=>{
-  const h=await mount({access:false});try{h.run(30000);await tick();assert.ok(h.calls.every(path=>path.startsWith('costs?')));assert.equal(h.w.document.querySelectorAll('.adm-provider-balance').length,0);assert.doesNotMatch(h.body(),/同步官方账单/)}finally{h.close()}
+  const h=await mount({access:false});try{h.run(30000);await tick();assert.ok(h.calls.every(path=>path.startsWith('costs?')));assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,0);assert.doesNotMatch(h.body(),/同步官方账单/)}finally{h.close()}
 })
 test('background cost refresh preserves the submitted filter until Query is pressed',async()=>{
   const h=await mount();try{
