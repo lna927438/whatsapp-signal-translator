@@ -3,13 +3,17 @@ async function authCaptcha():Promise<string|undefined>{return import.meta.env.VI
 import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 import UiLanguagePicker from './UiLanguagePicker.vue'
 
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef, watch, onBeforeUnmount } from 'vue'
 import { authStorage, createTransientSupabase, requireSupabase, supabaseConfigured } from '../lib/supabase'
+import { inspectDesktopAssurance, confirmDesktopMfa, verifiedTotpFactors, type DesktopTotpFactor } from '../lib/desktopMfa'
+import type { BridgedSession } from '../lib/sessionCoordinator'
+import { boundedAuthWork, requiresSessionLogin } from '../lib/sessionRecovery'
 
-type Mode = 'login' | 'register' | 'verify-signup' | 'recover-request' | 'recover-verify' | 'recover-password' | 'recovered-username'
+type Mode = 'login' | 'register' | 'verify-signup' | 'verify-mfa' | 'recover-request' | 'recover-verify' | 'recover-password' | 'recovered-username'
 type RecoveryIntent = 'password' | 'username'
 
-const emit = defineEmits(['authenticated'])
+const props = defineProps<{ sessionToVerify?: BridgedSession | null }>()
+const emit = defineEmits<{ authenticated: [session: BridgedSession]; cancelled: [] }>()
 const mode = ref<Mode>('login')
 const recoveryIntent = ref<RecoveryIntent>('password')
 const identifier = ref('')
@@ -27,6 +31,13 @@ const showPassword = ref(false)
 const busy = ref(false)
 const error = ref('')
 const success = ref('')
+const mfaSession = shallowRef<BridgedSession | null>(null)
+const mfaFactors = ref<DesktopTotpFactor[]>([])
+const mfaFactorId = ref('')
+let mfaClient: ReturnType<typeof requireSupabase> | null = null
+let mfaContinuation: (() => Promise<void>) | null = null
+let mfaRevision = 0
+let disposed = false
 
 
 let recoveryClient: ReturnType<typeof createTransientSupabase> | null = null
@@ -35,6 +46,7 @@ const title = computed(() => {
   if (mode.value === 'login') return t('登录')
   if (mode.value === 'register') return t('创建在线账号')
   if (mode.value === 'verify-signup') return t('验证注册邮箱')
+  if (mode.value === 'verify-mfa') return t('安全验证')
   if (mode.value === 'recover-request') return recoveryIntent.value === 'password' ? t('重置密码') : t('找回账号')
   if (mode.value === 'recover-verify') return t('验证绑定邮箱')
   if (mode.value === 'recover-password') return t('设置新密码')
@@ -44,6 +56,11 @@ const title = computed(() => {
 
 
 function clearStatus() { error.value = ''; success.value = '' }
+function authFailure(error: any): string {
+  if (requiresSessionLogin(error)) return t('登录会话已失效，请重新登录。草稿与翻译记录已保留。')
+  if (error?.code === 'mfa_verification_failed' || error?.message === 'Invalid TOTP code entered') return t('验证码不正确，请输入验证器中当前的六位验证码。')
+  return error?.message || String(error)
+}
 function cleanEmail(value: string) { return value.trim().toLowerCase() }
 function validateEmail(value: string) { if (!/^\S+@\S+\.\S+$/.test(value)) throw new Error(t('请输入有效邮箱地址。')) }
 
@@ -55,8 +72,96 @@ function go(next: Mode) {
 
 async function finishSession(session: any) {
   if (!session?.user?.id || !session?.access_token) throw new Error(t('没有获得有效登录会话，请重试。'))
+  const client = requireSupabase()
+  const revision = mfaRevision
+  const assurance = await boundedAuthWork(inspectDesktopAssurance(client, session))
+  if (disposed || revision !== mfaRevision) return
+  if (assurance === 'mfa') {
+    await beginMfa(client, session)
+    return
+  }
+  if (disposed) return
   emit('authenticated', session)
 }
+
+async function beginMfa(client: ReturnType<typeof requireSupabase>, session: BridgedSession, continuation: (() => Promise<void>) | null = null) {
+  const revision = ++mfaRevision
+  mfaClient = client; mfaSession.value = session; mfaContinuation = continuation
+  mode.value = 'verify-mfa'; otp.value = ''; mfaFactors.value = []; mfaFactorId.value = ''
+  busy.value = true; clearStatus(); password.value = ''
+  try {
+    const { data, error: factorError } = await boundedAuthWork(client.auth.mfa.listFactors())
+    if (factorError) throw factorError
+    if (disposed || revision !== mfaRevision) return
+    mfaFactors.value = verifiedTotpFactors(data)
+    mfaFactorId.value = mfaFactors.value[0]?.id || ''
+    if (!mfaFactorId.value) throw new Error(t('此账号没有可用的验证器，请使用原有登录方式完成安全验证。'))
+  } catch (e: any) { if (!disposed && revision === mfaRevision) error.value = authFailure(e) }
+  finally { if (!disposed && revision === mfaRevision) busy.value = false }
+}
+
+async function retryMfa() {
+  if (!busy.value && mfaClient && mfaSession.value) await beginMfa(mfaClient, mfaSession.value, mfaContinuation)
+}
+
+async function verifyMfa() {
+  if (busy.value || !mfaClient || !mfaSession.value) return
+  const client = mfaClient, pending = mfaSession.value, continuation = mfaContinuation, revision = mfaRevision
+  const active = () => !disposed && revision === mfaRevision
+  busy.value = true; clearStatus()
+  try {
+    const code = otp.value.trim()
+    if (!/^\d{6}$/.test(code)) throw new Error(t('请输入验证器中的六位验证码。'))
+    if (!mfaFactors.value.some(factor => factor.id === mfaFactorId.value)) throw new Error(t('请重新加载账号安全验证。'))
+    const before = await boundedAuthWork(client.auth.getSession())
+    if (before.error) throw before.error
+    if (!active()) return
+    if (before.data.session?.user.id !== pending.user.id) throw new Error(t('登录账号已变化，请重新登录。'))
+    const { error: verifyError } = await boundedAuthWork(client.auth.mfa.challengeAndVerify({ factorId: mfaFactorId.value, code }))
+    if (verifyError) throw verifyError
+    if (!active()) return
+    const { data, error: sessionError } = await boundedAuthWork(client.auth.getSession())
+    if (sessionError) throw sessionError
+    if (!data.session || data.session.user.id !== pending.user.id) throw new Error(t('登录账号已变化，请重新登录。'))
+    await boundedAuthWork(confirmDesktopMfa(client, data.session))
+    if (!active()) return
+    otp.value = ''; mfaSession.value = null; mfaContinuation = null
+    if (continuation) await continuation()
+    else emit('authenticated', data.session)
+  } catch (e: any) { if (active()) error.value = authFailure(e) }
+  finally { if (active()) busy.value = false }
+}
+
+async function cancelMfa() {
+  if (busy.value) return
+  const client = mfaClient, pending = mfaSession.value
+  const revision = ++mfaRevision
+  const active = () => !disposed && revision === mfaRevision
+  busy.value = true; clearStatus(); otp.value = ''
+  try {
+    const current = client ? await boundedAuthWork(client.auth.getSession()) : null
+    if (current?.error) throw current.error
+    if (!active()) return
+    if (current?.data.session && current.data.session.access_token !== pending?.access_token) throw new Error(t('登录状态已更新，请重新验证。'))
+    // Never sign out a different account that became active during verification.
+    if (client && current?.data.session?.user.id === pending?.user.id) {
+      const { error: logoutError } = await boundedAuthWork(client.auth.signOut({ scope: 'local' }))
+      if (logoutError) throw logoutError
+    }
+    if (!active()) return
+    mfaSession.value = null; mfaClient = null; mfaContinuation = null; recoveryClient = null
+    mode.value = 'login'; emit('cancelled')
+  } catch (e: any) { if (active()) error.value = authFailure(e) }
+  finally { if (active()) busy.value = false }
+}
+
+watch(() => props.sessionToVerify, session => {
+  if (session && session.access_token !== mfaSession.value?.access_token) void beginMfa(requireSupabase(), session)
+  else if (!session && mfaSession.value && !mfaContinuation) {
+    ++mfaRevision; mfaSession.value = null; mfaClient = null; busy.value = false; go('login')
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { disposed = true; ++mfaRevision; otp.value = ''; password.value = '' })
 
 async function login() {
   if (busy.value) return
@@ -173,7 +278,18 @@ async function verifyRecovery() {
     if (verifyError) throw verifyError
     const userId = data.user?.id
     if (!userId) throw new Error(t('邮箱验证失败，请重新获取验证码。'))
+    if (!data.session) throw new Error(t('没有获得有效登录会话，请重试。'))
+    if (await inspectDesktopAssurance(recoveryClient, data.session) === 'mfa') {
+      await beginMfa(recoveryClient, data.session, () => completeRecovery(userId, data.user?.user_metadata?.username))
+      return
+    }
+    await completeRecovery(userId, data.user?.user_metadata?.username)
+  } catch (e: any) { error.value = e?.message || String(e) }
+  finally { busy.value = false }
+}
 
+async function completeRecovery(userId: string, fallbackUsername?: unknown) {
+    if (!recoveryClient || disposed) return
     if (recoveryIntent.value === 'password') {
       newPassword.value = ''
       confirmNewPassword.value = ''
@@ -184,13 +300,11 @@ async function verifyRecovery() {
 
     const { data: profile, error: profileError } = await recoveryClient.from('profiles').select('username').eq('id', userId).maybeSingle()
     if (profileError) throw profileError
-    recoveredUsername.value = String(profile?.username || data.user?.user_metadata?.username || t('未设置用户名'))
-    await recoveryClient.auth.signOut()
+    recoveredUsername.value = String(profile?.username || fallbackUsername || t('未设置用户名'))
+    await recoveryClient.auth.signOut({ scope: 'local' })
     recoveryClient = null
     mode.value = 'recovered-username'
     success.value = t('邮箱验证成功，已找到绑定账号。')
-  } catch (e: any) { error.value = e?.message || String(e) }
-  finally { busy.value = false }
 }
 
 async function resendRecovery() {
@@ -234,7 +348,7 @@ function backToLoginWithRecoveredUsername() {
 </script>
 
 <template>
-  <div class="auth-screen">
+  <div class="auth-screen" :class="{ 'auth-mfa-screen': mode === 'verify-mfa' }">
     <section class="auth-brand-panel">
       <div class="auth-brand-wordmark"><img src="/hellodog-icon.webp" alt="" /><b>HelloDog</b></div>
       <div class="auth-visual-mark"><img src="/hellodog-icon.webp" :alt="t('HelloDog 小狗')" /></div>
@@ -254,6 +368,7 @@ function backToLoginWithRecoveredUsername() {
           <p v-if="mode === 'login'">{{ t('使用在线账号进入 WhatsApp / Signal 翻译工作台') }}</p>
           <p v-else-if="mode === 'register'">{{ t('创建账号并通过邮箱验证码完成绑定') }}</p>
           <p v-else-if="mode === 'verify-signup'">{{ t('输入注册邮箱收到的验证码') }}</p>
+          <p v-else-if="mode === 'verify-mfa'">{{ t('此账号已开启安全验证，请输入验证器中的验证码。') }}</p>
           <p v-else-if="mode === 'recover-request'">{{ t('通过绑定邮箱验证账号所有权') }}</p>
           <p v-else-if="mode === 'recover-verify'">{{ t('输入邮件中的账号安全验证码') }}</p>
           <p v-else-if="mode === 'recover-password'">{{ t('邮箱已验证，请设置新密码') }}</p>
@@ -269,6 +384,14 @@ function backToLoginWithRecoveredUsername() {
           </div>
           <button class="auth-submit" :disabled="busy" @click="login">{{ busy ? t('登录中…') : t('登录') }}</button>
           <div class="auth-switch">{{ t('还没有账号？ ') }}<button @click="go('register')">{{ t('免费注册') }}</button></div>
+        </template>
+
+        <template v-else-if="mode === 'verify-mfa'">
+          <div class="auth-otp-intro"><b>{{ mfaSession?.user.email }}</b><span>{{ t('完成验证后继续使用，已有草稿和聊天会保留。') }}</span></div>
+          <label v-if="mfaFactors.length > 1" class="auth-field"><span>{{ t('验证器') }}</span><select v-model="mfaFactorId" :disabled="busy"><option v-for="(factor, index) in mfaFactors" :key="factor.id" :value="factor.id">{{ factor.friendly_name || t('验证器 {0}', index + 1) }}</option></select></label>
+          <label class="auth-field"><span>{{ t('验证器验证码') }}</span><input v-model="otp" class="auth-otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" :disabled="busy || !mfaFactorId" :placeholder="t('请输入六位验证码')" @keydown.enter="verifyMfa" /></label>
+          <button class="auth-submit" :disabled="busy || !mfaFactorId" @click="verifyMfa">{{ busy ? t('验证中…') : t('验证并继续') }}</button>
+          <div class="auth-switch auth-switch-split"><button v-if="!mfaFactorId" :disabled="busy" @click="retryMfa">{{ t('重新加载') }}</button><button :disabled="busy" @click="cancelMfa">{{ t('返回登录') }}</button></div>
         </template>
 
         <template v-else-if="mode === 'register'">
@@ -318,3 +441,11 @@ function backToLoginWithRecoveredUsername() {
     </section>
   </div>
 </template>
+
+<style scoped>
+.auth-field select { width: 100%; min-height: 43px; padding: 0 12px; border: 1px solid #dbe2ed; border-radius: 8px; background: #fbfcfe; color: #15233a; }
+@media (max-width: 1000px) {
+  .auth-mfa-screen { grid-template-columns: minmax(0, 1fr); }
+  .auth-mfa-screen .auth-brand-panel { display: none; }
+}
+</style>

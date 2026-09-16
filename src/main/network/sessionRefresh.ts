@@ -11,25 +11,36 @@ export function tokenExpiresSoon(token: string, now = Date.now()): boolean {
 }
 
 export class SessionRefresh {
-  private pending?: { id: string; owner: string; work: Promise<void>; finish: (ok: boolean) => void }
-  constructor(private current: () => Identity, private notify: (request: { id: string; userId: string }) => void, private timeout = 12000) {}
-  changed() { if (this.pending && this.current()?.userId !== this.pending.owner) this.pending.finish(false) }
-  complete(id: string, ok: boolean) { if (id === this.pending?.id) this.pending.finish(ok) }
+  private pending?: { id: string; owner: string; work: Promise<void>; finish: (ok: boolean, requiresLogin?: boolean) => void }
+  private rejected?: { owner: string; token: string }
+  constructor(private current: () => Identity, private notify: (request: { id: string; userId: string; reason: 'rejected' | 'expiring' }) => void, private timeout = 12000) {}
+  changed() {
+    const identity = this.current()
+    if (this.rejected && (identity?.userId !== this.rejected.owner || identity.accessToken !== this.rejected.token)) this.rejected = undefined
+    if (this.pending && identity?.userId !== this.pending.owner) this.pending.finish(false)
+  }
+  complete(id: string, ok: boolean, requiresLogin = false) { if (id === this.pending?.id) this.pending.finish(ok, requiresLogin) }
   async token(owner: string, force = false, rejectedToken?: string): Promise<string> {
     const identity = this.current()
     if (!owner || identity?.userId !== owner || !identity.accessToken) throw new SessionUnavailableError('登录状态已变化，请重新登录。草稿已保留。')
+    if (this.rejected?.owner === owner && this.rejected.token === identity.accessToken) throw new SessionUnavailableError('登录会话已失效，请重新登录。草稿与翻译记录已保留。')
     if (rejectedToken && rejectedToken !== identity.accessToken) force = false
     if (!force && !tokenExpiresSoon(identity.accessToken)) return identity.accessToken
     if (this.pending?.owner !== owner) this.pending?.finish(false)
     if (!this.pending) {
       const id = randomUUID()
-      let finish!: (ok: boolean) => void
+      let finish!: (ok: boolean, requiresLogin?: boolean) => void
       const work = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => finish(false), this.timeout)
-        finish = ok => { clearTimeout(timer); if (this.pending?.id === id) this.pending = undefined; ok ? resolve() : reject(new SessionUnavailableError('暂时无法恢复在线登录，请检查网络或重新登录。草稿已保留。')) }
+        finish = (ok, requiresLogin = false) => {
+          clearTimeout(timer)
+          if (this.pending?.id === id) this.pending = undefined
+          if (!ok && requiresLogin && this.current()?.userId === owner && this.current()?.accessToken === identity.accessToken) this.rejected = { owner, token: identity.accessToken! }
+          ok ? resolve() : reject(new SessionUnavailableError(requiresLogin ? '登录会话已失效，请重新登录。草稿与翻译记录已保留。' : '暂时无法恢复在线登录，请检查网络或重新登录。草稿已保留。'))
+        }
       })
       this.pending = { id, owner, work, finish }
-      try { this.notify({ id, userId: owner }) } catch { finish(false) }
+      try { this.notify({ id, userId: owner, reason: force ? 'rejected' : 'expiring' }) } catch { finish(false) }
       await work
     } else await this.pending.work
     const refreshed = this.current()
@@ -41,13 +52,16 @@ export class SessionRefresh {
 
 /** Retry authentication once, keeping the original request body and idempotency key. */
 export async function authenticatedFetch(source: TokenSource, url: string, init: RequestInit, timeout: number): Promise<Response> {
-  const deadline = Date.now() + Math.max(1, timeout)
+  // Session refresh has its own bounded wait. Do not consume the entire
+  // network budget before a newly authenticated request can reach the API.
+  let deadline: number
   const readToken = async (force: boolean, rejected?: string) => {
     try { return (typeof source === 'function' ? await source(force, rejected) : source).trim() }
     catch (error) { throw error instanceof SessionUnavailableError ? error : new SessionUnavailableError(error instanceof Error ? error.message : '登录状态尚未恢复，草稿已保留。') }
   }
   let token = await readToken(false)
   if (!token) throw new SessionUnavailableError('在线登录令牌缺失，请重新登录。')
+  deadline = Date.now() + Math.max(1, timeout)
   const send = () => {
     if (Date.now() >= deadline) throw new Error('服务请求超时，原请求和草稿已保留。')
     const headers = new Headers(init.headers); headers.set('Authorization', `Bearer ${token}`)
@@ -59,5 +73,6 @@ export async function authenticatedFetch(source: TokenSource, url: string, init:
   if (!refreshed || refreshed === token) return response
   await response.body?.cancel().catch(() => {})
   token = refreshed
+  deadline = Date.now() + Math.max(1, timeout)
   return send()
 }

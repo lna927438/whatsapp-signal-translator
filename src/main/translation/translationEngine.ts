@@ -14,6 +14,7 @@ import { GoogleProvider } from './providers/google'
 import type { TranslationProvider } from './providers/provider'
 import { detectLanguageEvidence } from './languageDetection'
 import { TranslationContentPolicy, type ContentExpiry } from './contentPolicy'
+import { SessionUnavailableError } from '../network/sessionRefresh'
 
 interface QueueJob {
   interactive: boolean
@@ -262,7 +263,7 @@ export class TranslationEngine {
           } else if (result.state === 'failed') await this.receipts.update(owner, entry.requestId, { state: 'failed', chargedCharacters: 0, error: translationFailureMessage(result.error) })
           else await this.receipts.update(owner, entry.requestId, { error: result.state === 'not_found' ? '云端暂未查到此编号。可主动重试原编号，仍按同一请求处理。' : '云端仍在处理，结果待确认，稍后继续核对。' })
           if (result.state === 'not_found') return 'not_found' as const
-        } catch (error) { await this.receipts.update(owner, entry.requestId, { error: error instanceof TranslationOutcomeError ? error.message : '暂时无法核对原请求，请恢复连接或重新登录。' }) }
+        } catch (error) { await this.receipts.update(owner, entry.requestId, { error: error instanceof TranslationOutcomeError || error instanceof SessionUnavailableError ? error.message : '暂时无法核对原请求，请恢复连接或重新登录。' }) }
         })().finally(()=>this.reconciliations.delete(key))
         this.reconciliations.set(key, work)
         if (await work === 'not_found') missing.add(entry.requestId)

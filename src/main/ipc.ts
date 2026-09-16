@@ -69,9 +69,9 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   let identityWrites: Promise<unknown> = Promise.resolve()
   const sessions = new SessionRefresh(() => onlineIdentity, request => mainWindow.webContents.send('auth:refresh-requested', request))
   translator.onSessionRefresh((owner, force, rejectedToken) => sessions.token(owner, force, rejectedToken))
-  ipcMain.handle('auth:refresh-complete', (event, id: string, ok: boolean) => {
-    if (event.sender.id !== mainWindow.webContents.id || typeof id !== 'string' || id.length > 100 || typeof ok !== 'boolean') throw new Error('登录恢复响应无效。')
-    sessions.complete(id, ok)
+  ipcMain.handle('auth:refresh-complete', (event, id: string, ok: boolean, requiresLogin = false) => {
+    if (event.sender.id !== mainWindow.webContents.id || typeof id !== 'string' || id.length > 100 || typeof ok !== 'boolean' || typeof requiresLogin !== 'boolean') throw new Error('登录恢复响应无效。')
+    sessions.complete(id, ok, requiresLogin)
   })
   const accountStatus = new BackgroundAccountStatus(() => cloudRequest('/api/me'))
   const accountCheckTimer = setInterval(() => { void accountStatus.refresh() }, 60000)
@@ -298,7 +298,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     }
     whatsapp.resumeTranslations()
     if (previous?.userId === onlineIdentity?.userId && previous?.accessToken !== onlineIdentity?.accessToken) signalDesktop.refresh()
-    if (previous?.userId !== onlineIdentity?.userId && onlineIdentity?.userId) void recover().catch(() => undefined)
+    if (onlineIdentity?.userId && (previous?.userId !== onlineIdentity.userId || previous?.accessToken !== onlineIdentity.accessToken)) void recover().catch(() => undefined)
     return { authenticated: Boolean(onlineIdentity), source: 'supabase', user: onlineIdentity ? { ...onlineIdentity, accessToken: undefined } : null }
   })
   ipcMain.handle('auth:status', async () => onlineIdentity?.userId
