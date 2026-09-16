@@ -43,6 +43,15 @@ test('website account reads one atomic snapshot and refreshes matching wallet an
   assert.ok(h.calls.every(call=>call.init.cache==='no-store'));assert.deepEqual(h.errors,[])
  }finally{h.close()}
 })
+
+test('account displays administrative reductions separately from actual translation use',async()=>{
+ const value=snapshot('owner',875,100);Object.assign(value.wallet,{lifetime_adjusted_down:25})
+ const h=await mount({request:()=>Response.json(value)});try{
+  assert.match(h.body(),/累计使用\s*100/);assert.match(h.body(),/管理减少\s*25/);assert.match(h.body(),/875/);assert.deepEqual(h.errors,[])
+ }finally{h.close()}
+ const invalid={...value,wallet:{...value.wallet,lifetime_adjusted_down:-25}}
+ const bad=await mount({request:()=>Response.json(invalid)});try{assert.equal(bad.w.document.querySelector('.wallet-card'),null);assert.match(bad.body(),/校验/)}finally{bad.close()}
+})
 test('visible five-second polling preserves a stale complete snapshot on failure and recovers without false zero',async()=>{
  let fail=false;const h=await mount({request:()=>fail?Response.json({message:'Unavailable'},{status:503}):Response.json(snapshot())});try{
   assert.equal([...h.timers.values()][0].ms,5000);fail=true;await h.run();assert.match(h.body(),/900/);assert.match(h.body(),/保留上次同步数据/)

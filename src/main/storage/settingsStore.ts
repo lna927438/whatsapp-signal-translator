@@ -8,6 +8,7 @@ const writes = new Map<string, Promise<void>>()
 const secretFields = ['openaiApiKey', 'deeplApiKey', 'googleApiKey'] as const
 
 const defaults: AppSettings = {
+  workspaceTheme: 'charcoal',
   accountNavigationPosition: 'top',
   uiLanguage: 'system',
   historyMode: 'new', previewSend: false, backTranslation: false,
@@ -84,6 +85,7 @@ export class SettingsStore {
   async save(settings: AppSettings): Promise<void> {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings) || JSON.stringify(settings).length > 65536) throw new Error('设置内容无效。')
     if (settings.accountNavigationPosition !== undefined && !['top','side'].includes(settings.accountNavigationPosition)) throw new Error('账号栏位置无效。')
+    if (settings.workspaceTheme !== undefined && !['charcoal','soft'].includes(settings.workspaceTheme)) throw new Error('主题选项无效。')
     settings = { ...settings, uiLanguage: normalizeUiPreference(settings.uiLanguage), translationQuality: normalizeQuality(settings.translationQuality) }
     if (settings.quickReplies && (!Array.isArray(settings.quickReplies) || settings.quickReplies.length > 30 || settings.quickReplies.some(item => typeof item !== 'string' || item.length > 2000))) throw new Error('快捷回复最多 30 条，每条最多 2000 字符。')
     await this.write(() => settings)

@@ -1,7 +1,7 @@
 import { normalizeQuality } from '../../shared/translationPolicy'
 const booleanFields = ['receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','translationsVisible','previewSend','backTranslation','notificationSound','hideNotificationNames','autoStart','startMinimized','closeToTray']
 const stringFields = ['localLanguage','targetLanguage','translationColor']
-const enums: Record<string, string[]> = { accountNavigationPosition:['top','side'], uiLanguage:['system','en','zh-CN'], historyMode: ['new','manual','visible'], notifications: ['off','background','always'], cloudRoute: ['auto','primary','backup'], updateChannel: ['stable','beta'] }
+const enums: Record<string, string[]> = { workspaceTheme:['charcoal','soft'], accountNavigationPosition:['top','side'], uiLanguage:['system','en','zh-CN'], historyMode: ['new','manual','visible'], notifications: ['off','background','always'], cloudRoute: ['auto','primary','backup'], updateChannel: ['stable','beta'] }
 export function portableSettings(input: any): Record<string, any> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('设置备份格式无效。')
   const out: Record<string, any> = {}

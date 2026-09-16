@@ -18,6 +18,10 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
   const listStates = new Map<HTMLElement, any>(), learned = new Map<string, string>()
   const api = () => win.realtimeTranslator
   const ui = (zh: string, en: string) => english ? en : zh
+  const bounded = <T>(operation: () => Promise<T>, timeout: number) => new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(ui('备注响应超时，输入已保留，请重试。', 'The note request timed out. Your draft is kept. Try again.'))), timeout)
+    Promise.resolve().then(operation).then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
+  })
   const nativeText = (node: Element) => { const copy = node.cloneNode(true) as Element; copy.querySelectorAll('[data-rt-ui]').forEach(el => el.remove()); return copy.textContent || '' }
   const titleNode = (container: Element) => Array.from(container.querySelectorAll<HTMLElement>('[data-testid="conversation-info-header-chat-title"], [data-testid="cell-frame-title"] span[title], span[title][dir="auto"], span[title]'))
     .find(el => !el.closest('[data-rt-ui]') && !parsePresence(el.getAttribute('title') || nativeText(el)))
@@ -27,7 +31,33 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     const jid = value.match(/^(?:true|false)_([^_]+@[^_]+)_/)?.[1] || value
     return /^[a-zA-Z0-9.-]{1,160}@(c\.us|s\.whatsapp\.net|g\.us|lid)$/.test(jid) ? 'peer:' + jid : ''
   }
+  const modelPeers = (node: Element) => {
+    const peers = new Set<string>()
+    // Some native releases expose an opaque DOM message ID but put the chat
+    // model on that row/header's React props. Accept only explicitly named chat
+    // identities, not arbitrary objects, display names, previews or fiber parents.
+    for (const key of Object.keys(node).filter(key => key.startsWith('__reactProps$') || key.startsWith('__reactFiber$'))) {
+      const value = (node as any)[key], props = key.startsWith('__reactFiber$') ? value?.memoizedProps : value
+      for (const id of [props?.chat?.id, props?.chatModel?.id, props?.conversation?.id, props?.chatId]) {
+        const peer = parsePeer(typeof id === 'string' ? id : typeof id?._serialized === 'string' ? id._serialized : '')
+        if (peer) peers.add(peer)
+      }
+    }
+    return peers
+  }
   const peerKey = () => {
+    // Empty conversations and newer opaque message IDs have no embedded JID.
+    // Read only explicit conversation identity, never a contact name or a JID
+    // mentioned inside a message/quoted preview.
+    const main = document.querySelector('#main'), header = main?.querySelector('header')
+    const explicit = new Set<string>()
+    for (const node of [main, header, ...(header ? header.querySelectorAll('[data-chat-id],[data-jid],[data-contact-id]') : [])]) {
+      if (!node || node.closest('[data-rt-ui]')) continue
+      for (const attr of ['data-chat-id', 'data-jid', 'data-contact-id']) { const peer = parsePeer(node.getAttribute(attr)); if (peer) explicit.add(peer) }
+      if (node === main || node === header) for (const peer of modelPeers(node)) explicit.add(peer)
+    }
+    if (explicit.size === 1) return [...explicit][0]
+    if (explicit.size > 1) return ''
     const values = new Set<string>()
     for (const el of document.querySelectorAll('#main [data-id]')) {
       if (el.closest('[data-rt-ui], blockquote, [data-testid*="quoted"]')) continue
@@ -45,8 +75,9 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
   // sender JID inside the last-message preview must never identify the chat.
   const directPeer = (row: HTMLElement) => {
     const peers = new Set<string>()
-    for (const node of rowNodes(row)) for (const attr of ['data-jid', 'data-chat-id', 'data-contact-id', 'data-id']) {
-      const peer = parsePeer(node.getAttribute(attr)); if (peer) peers.add(peer)
+    for (const node of rowNodes(row)) {
+      for (const attr of ['data-jid', 'data-chat-id', 'data-contact-id', 'data-id']) { const peer = parsePeer(node.getAttribute(attr)); if (peer) peers.add(peer) }
+      for (const peer of modelPeers(node)) peers.add(peer)
     }
     return { peer: peers.size === 1 ? [...peers][0] : '', ambiguous: peers.size > 1 }
   }
@@ -128,10 +159,13 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     const version = view.readVersion = (view.readVersion || 0) + 1
     view.loading = true; renderNote(view)
     const valid = () => !disposed && current(view) && version === view.readVersion
-    const failed = () => {
+    const failed = (reason?: any) => {
       if (!valid()) return
       view.readVersion++; clearTimeout(view.readTimer); view.readTimer = undefined
-      view.loading = false; view.error = ui('备注读取失败，请点击重试。', 'Could not load the note. Click to retry.'); renderNote(view)
+      view.loading = false
+      const message = typeof reason?.message === 'string' ? reason.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '').slice(0, 250) : ''
+      view.error = message || ui('备注读取失败，请点击重试。', 'Could not load the note. Click to retry.'); renderNote(view)
+      if (editAfter) edit(view)
       const attempt = view.retries = (view.retries || 0) + 1
       if (attempt <= 3) view.retryTimer = setTimeout(() => { view.retryTimer = undefined; if (current(view)) load(view) }, 800 * 2 ** (attempt - 1))
     }
@@ -145,11 +179,12 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     }, failed)
   }
   const edit = (snapshot: any) => {
-    if (!snapshot?.peer || snapshot.loading || dialog || !current(snapshot)) return
-    const peer = snapshot.peer, revision = snapshot.value.revision
+    if (!snapshot?.peer || dialog || !current(snapshot)) return
+    const peer = snapshot.peer
+    let revision = snapshot.value.revision, loaded = !snapshot.loading && !snapshot.error
     dialogOwner = snapshot
     dialog = document.createElement('dialog'); dialog.setAttribute('data-rt-ui', 'contact-note-editor')
-    dialog.setAttribute('aria-label', ui('联系人备注', 'Contact note'))
+    dialog.setAttribute('aria-label', ui('联系人备注', 'Contact note')); dialog.setAttribute('role', 'dialog')
     Object.assign(dialog.style, { width: 'min(420px, 85vw)', border: '1px solid #52605c', borderRadius: '12px', padding: '18px', color: '#eef3f1', background: '#202b27' })
     const form = document.createElement('form'), heading = document.createElement('h3'), help = document.createElement('p'), area = document.createElement('textarea'), error = document.createElement('p')
     heading.textContent = snapshot.name + ui(' · 联系人备注', ' · Contact note')
@@ -157,16 +192,37 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     help.style.fontSize = '12px'; area.value = snapshot.value.text; area.maxLength = 500; area.rows = 4; area.setAttribute('aria-label', ui('联系人备注', 'Contact note'))
     Object.assign(area.style, { width: '100%', boxSizing: 'border-box', color: '#ff858d', background: '#131c18', padding: '8px', border: '1px solid #52605c', borderRadius: '6px' })
     error.setAttribute('role', 'status'); error.style.color = '#ff858d'
+    if (!loaded) error.textContent = snapshot.error || ui('正在读取备注，输入内容会保留。', 'Loading the note. Your draft will be kept.')
     const save = document.createElement('button'), cancel = document.createElement('button')
     save.type = 'submit'; save.textContent = ui('保存备注', 'Save note'); cancel.type = 'button'; cancel.textContent = ui('取消', 'Cancel'); cancel.onclick = close
     for (const button of [save, cancel]) Object.assign(button.style, { padding: '7px 16px', marginRight: '8px', borderRadius: '6px', cursor: 'pointer' })
     form.append(heading, help, area, error, save, cancel); dialog.append(form); document.body.append(dialog)
+    let edited = false
+    area.addEventListener('input', () => { edited = true })
+    // Local notes must never reach WhatsApp's global keyboard shortcuts or its
+    // chat-send listener. Keep IME, multiline input and clipboard editing native.
+    for (const event of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'paste', 'drop']) dialog.addEventListener(event, event => event.stopPropagation())
+    if (!loaded) bounded<any>(() => api().getContactNote(peer), 8000).then(value => {
+      if (dialogOwner !== snapshot || !current(snapshot) || !value || typeof value.text !== 'string' || !Number.isSafeInteger(value.revision) || value.revision < 0) return
+      updateNote(peer, value)
+      if (!edited) { area.value = value.text; revision = value.revision; loaded = true; error.textContent = '' }
+    }, () => {})
     form.onsubmit = async event => {
       event.preventDefault(); if (save.disabled) return
       save.disabled = true
       try {
         if (dialogOwner !== snapshot || !current(snapshot)) throw new Error(ui('联系人已切换，请重新打开备注。', 'The contact changed. Open the note again.'))
-        const value = await api().saveContactNote(peer, area.value, revision)
+        if (!loaded) {
+          const stored: any = await bounded(() => api().getContactNote(peer), 8000)
+          if (!stored || typeof stored.text !== 'string' || !Number.isSafeInteger(stored.revision) || stored.revision < 0) throw new Error(ui('备注尚未读取成功，输入已保留，请重试。', 'The note could not be loaded. Your draft is kept. Try again.'))
+          if (stored.revision !== revision || stored.text !== snapshot.value.text) {
+            updateNote(peer, stored)
+            throw new Error(ui('已有备注需要核对，输入已保留。请复制当前输入，取消后重新打开查看。', 'The saved note needs review. Copy your draft, then cancel and reopen.'))
+          }
+          loaded = true; revision = stored.revision
+        }
+        if (dialogOwner !== snapshot || !current(snapshot)) throw new Error(ui('联系人已切换，请重新打开备注。', 'The contact changed. Open the note again.'))
+        const value: any = await bounded(() => api().saveContactNote(peer, area.value, revision), 15000)
         if (!value || typeof value.text !== 'string' || value.text.length > 500 || !Number.isSafeInteger(value.revision) || value.revision <= revision) throw new Error(ui('未能确认备注已保存，请保留输入并重试。', 'Could not confirm the saved note. Keep your draft and retry.'))
         updateNote(peer, value)
         if (dialogOwner === snapshot) close()
@@ -181,7 +237,7 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     area.focus()
   }
   const openFromList = (view: any) => {
-    if (view.peer) { if (view.error) load(view, true); else edit(view); return }
+    if (view.peer) { edit(view); return }
     if (opening || dialog || !view.row.isConnected) return
     opening = { row: view.row, key: rowKey(view.row), title: view.title, name: view.name, wasSelected: selected(view.row), previousPeer: peerKey(), expires: Date.now() + 6000 }
     view.error = ''; renderNote(view)
@@ -223,7 +279,7 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
     const view: any = { kind, title, peer, name: nameOf(title), key: kind === 'list' ? rowKey(parent) : '', root, note, styles: [], value: { text: '', revision: 0 }, loading: false }
     if (kind === 'list') view.row = parent; else view.header = parent
     for (const event of ['pointerdown', 'mousedown', 'mouseup', 'keydown']) note.addEventListener(event, e => e.stopPropagation())
-    note.onclick = event => { event.preventDefault(); event.stopPropagation(); if (kind === 'list') openFromList(view); else if (view.error) load(view, true); else edit(view) }
+    note.onclick = event => { event.preventDefault(); event.stopPropagation(); if (kind === 'list') openFromList(view); else edit(view) }
     mount(view, title, parent)
     return view
   }
@@ -259,7 +315,16 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
       const title = titleNode(row)!, peer = listPeer(row), key = rowKey(row)
       let view = listStates.get(row)
       if (!view || view.title !== title || view.peer !== peer || view.key !== key || view.name !== nameOf(title) || !view.root.isConnected) {
-        remove(view); view = makeView('list', row, title, peer); listStates.set(row, view); load(view)
+        if (view && view.peer && view.peer === peer && view.key === key && view.row === row) {
+          // React can replace just the title, rename a contact, or remove our
+          // child while keeping the same conversation. Preserve the editor and
+          // its draft for this identity rather than treating that as navigation.
+          const staleStyles = view.styles; view.styles = []
+          for (const saved of staleStyles) if (saved.node.style.getPropertyValue(saved.property) === saved.value) {
+            if (saved.old) saved.node.style.setProperty(saved.property, saved.old, saved.priority); else saved.node.style.removeProperty(saved.property)
+          }
+          view.title = title; view.name = nameOf(title); mount(view, title, row); renderNote(view)
+        } else { remove(view); view = makeView('list', row, title, peer); listStates.set(row, view); load(view) }
       }
     }
     if (opening) {
@@ -274,6 +339,9 @@ function installWhatsAppContactDetails(parsePresence: typeof parseWhatsAppPresen
   }
   const syncHeader = (header: HTMLElement | null, title: HTMLElement | undefined, peer: string) => {
     if (!header || !title) { resetHeader(); return }
+    if (state && state.peer && state.peer === peer && state.header === header && (state.title !== title || state.name !== nameOf(title) || !state.root.isConnected)) {
+      state.title = title; state.name = nameOf(title); mount(state, title, header); renderNote(state)
+    }
     if (!state || state.header !== header || state.title !== title || state.peer !== peer || state.name !== nameOf(title) || !state.root.isConnected) {
       resetHeader(); state = makeView('header', header, title, peer)
       state.sources = new Set<Element>()

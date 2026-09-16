@@ -18,6 +18,7 @@ import { cloudApi } from './lib/cloudApi'
 import { AccountWrites } from './lib/accountWrites'
 import { RemoteSnapshot } from './lib/remoteSnapshot'
 import { prepareBeforeRestart } from './lib/restartState'
+import { orderedAccounts } from '../../shared/accountOrder'
 
 const props = defineProps<{ userId: string }>()
 
@@ -44,6 +45,7 @@ type Account = {
   runtimeMode?: 'receiving' | 'paused'
   translationQuality?: any
   pinned?: boolean
+  tabOrder?: number
   group?: string
   zoomFactor?: number
   translationColor?: string
@@ -89,7 +91,22 @@ const unread = ref<Record<string, number>>({})
 const activePlatform = ref<'whatsapp'|'signal'>('whatsapp')
 const lastAccounts = new Map<string,string>()
 const navigationPosition = computed(() => settings.value?.accountNavigationPosition === 'side' ? 'side' : 'top')
-const platformAccounts = computed(() => accounts.value.filter(account => account.platform === activePlatform.value))
+const platformAccounts = computed(() => orderedAccounts(accounts.value.filter(account => account.platform === activePlatform.value)))
+const orderingAccounts = ref(false)
+async function reorderAccounts(ids: string[]) {
+  if (orderingAccounts.value) return
+  orderingAccounts.value = true
+  const platform = activePlatform.value
+  try {
+    const saved: Account[] = await accountWrites.enqueue(() => window.desktopAPI.reorderAccounts(platform, ids))
+    // Only merge order fields: an unrelated settings save may have completed meanwhile.
+    for (const account of saved) {
+      const current = accounts.value.find(item => item.id === account.id)
+      if (current) current.tabOrder = account.tabOrder
+    }
+  } catch { error.value = t('账号顺序未保存，请重试。') }
+  finally { orderingAccounts.value = false }
+}
 function platformUnread(platform: string) { return accounts.value.filter(account => account.platform === platform).reduce((sum,account) => sum + (unread.value[account.id] || 0),0) }
 async function choosePlatform(platform: 'whatsapp'|'signal') {
   const matching = accounts.value.filter(account => account.platform === platform)
@@ -180,10 +197,9 @@ const subscriptions: Array<() => void> = []
 const languages = ref<any[]>([])
 const liveStatuses = ref<Record<string, LiveStatus>>({})
 const conversations = ref<Record<string, ConversationInfo>>({})
-const metrics = ref<any>({ totalRequests: 0, providerCalls: 0, cacheHits: 0, dedupHits: 0, activeRequests: 0, queueDepth: 0, lastLatencyMs: 0, averageLatencyMs: 0 })
 const controlFeedback = ref<{ state: 'idle'|'saving'|'saved'|'error'; message: string }>({ state: 'idle', message: '' })
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined
-let metricsTimer: ReturnType<typeof setInterval> | undefined
+let healthTimer: ReturnType<typeof setInterval> | undefined
 let walletTimer: ReturnType<typeof setInterval> | undefined
 
 const selectedIsSignal = computed(() => selected.value?.platform === 'signal')
@@ -207,28 +223,11 @@ const apiConfigured = computed(() => {
   if (provider === 'google') return Boolean(String(settings.value?.googleApiKey || '').trim())
   return false
 })
-const channelName = computed(() => {
-  if (settings.value?.provider === 'openai') return t('HelloDog 云端')
-  if (settings.value?.provider === 'deepl') return 'DeepL'
-  return 'Google Translate'
-})
-const serverName = computed(() => {
-  if (settings.value?.provider === 'openai') return 'Cloudflare API'
-  if (settings.value?.provider === 'deepl') return 'DeepL API'
-  return 'Google API'
-})
-const serverStatusLabel = computed(() => settings.value?.provider === 'openai' ? t('云端已配置') : (apiConfigured.value ? t('密钥已配置') : t('未配置')))
 const selectedLiveStatus = computed<LiveStatus>(() => {
   if (!apiConfigured.value) return { state: 'error', message: t('翻译服务未配置') }
   if (profileSynced.value && Number(profile.value?.remainingCharacters || 0) <= 0) return { state: 'error', message: t('字符额度已用完') }
   if (selected.value?.id && liveStatuses.value[selected.value.id]) return liveStatuses.value[selected.value.id]
   return { state: 'ready', message: t('等待翻译请求') }
-})
-const metricLabel = computed(() => {
-  const delay = metrics.value?.lastLatencyMs ? `${metrics.value.lastLatencyMs} ms` : t('待测')
-  const queue = Number(metrics.value?.queueDepth || 0)
-  const hits = Number(metrics.value?.cacheHits || 0) + Number(metrics.value?.dedupHits || 0)
-  return t('翻译 {0} · 队列 {1} · 缓存 {2}', delay, queue, hits)
 })
 const contactLabel = computed(() => {
   const conversation = selectedConversation.value
@@ -280,9 +279,6 @@ async function reloadProfile() {
   return profileSync.refresh(async () => cloudProfileFromState(await cloudApi.me()))
 }
 
-async function reloadMetrics() {
-  try { metrics.value = await window.desktopAPI.getTranslationMetrics() } catch { /* ignore transient UI metric errors */ }
-}
 
 async function openSetup(platform: 'whatsapp' | 'signal', account?: Account) {
   await window.desktopAPI.setOverlayOpen(true)
@@ -456,7 +452,7 @@ onMounted(async () => {
     if (event.action === 'home') await home()
     if (event.action === 'diagnose') await openSettings()
   }))
-  metricsTimer = setInterval(() => { void reloadMetrics(); void refreshHealth() }, 3000)
+  healthTimer = setInterval(() => { void refreshHealth() }, 3000)
   walletTimer = setInterval(() => { void reloadProfile() }, 5000)
   subscriptions.push(window.desktopAPI.onWhatsAppConversation((info: any) => {
     if (!info?.accountId || !info?.conversationId) return
@@ -483,7 +479,7 @@ onMounted(async () => {
     setTimeout(() => error.value = '', 6500)
   }))
   void reloadProfile()
-  await Promise.allSettled([reload(), reloadSettings(), reloadMetrics()])
+  await Promise.allSettled([reload(), reloadSettings()])
 })
 
 onUnmounted(() => {
@@ -494,14 +490,14 @@ onUnmounted(() => {
   boundsObserver?.disconnect()
   cancelAnimationFrame(boundsFrame)
   subscriptions.forEach(unsubscribe => unsubscribe())
-  if (metricsTimer) clearInterval(metricsTimer)
+  if (healthTimer) clearInterval(healthTimer)
   if (walletTimer) clearInterval(walletTimer)
   if (feedbackTimer) clearTimeout(feedbackTimer)
 })
 </script>
 
 <template>
-  <div class="app-shell compact-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-platform="selected?.platform || 'whatsapp'" :style="{gridTemplateColumns: (navigationPosition === 'side' ? 208 : 52) + 'px minmax(0,1fr)'}">
+  <div class="app-shell compact-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-theme="settings?.workspaceTheme || 'charcoal'" :data-platform="selected?.platform || 'whatsapp'" :style="{gridTemplateColumns: (navigationPosition === 'side' ? 208 : 52) + 'px minmax(0,1fr)'}">
     <aside class="sidebar compact-account-sidebar" :aria-label="t('账号与应用导航')">
       <nav class="platform-rail" :aria-label="t('应用种类')">
         <button class="brand compact-tool" @click="home" :title="t('HelloDog 工作台')" :aria-label="t('HelloDog 工作台')"><img src="/hellodog-icon.webp" alt="HelloDog" /></button>
@@ -520,7 +516,7 @@ onUnmounted(() => {
         <button class="compact-tool" @click="openSettings" :title="t('设置与连接诊断')" :aria-label="t('设置与连接诊断')"><UiIcon name="settings" /></button>
         <button class="compact-tool" :aria-expanded="!collapsed" :title="t('切换功能栏')" :aria-label="t('切换功能栏')" @click="collapsed = !collapsed"><UiIcon name="more" /></button>
       </nav>
-      <AccountNavigation v-if="navigationPosition === 'side'" :accounts="platformAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="side" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)" />
+      <AccountNavigation v-if="navigationPosition === 'side'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="side" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)" />
     </aside>
     <TranslationQualityEditor v-if="showQuality && selected" :account="selected" :conversation="selectedConversation || undefined" @close="closeQuality" @updated="qualityUpdated" /><div v-if="finderOpen" class="compact-finder-backdrop" @click.self="closeAccountFinder" @keydown.esc.stop="closeAccountFinder">
       <section class="compact-finder" role="dialog" aria-modal="true" :aria-label="t('搜索和添加账号')">
@@ -532,14 +528,14 @@ onUnmounted(() => {
       </section>
     </div>
     <div class="workspace">
-      <AccountNavigation v-if="navigationPosition === 'top'" :accounts="platformAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="top" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)"><template #tools><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></template></AccountNavigation>
+      <AccountNavigation v-if="navigationPosition === 'top'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="top" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)"><template #tools><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></template></AccountNavigation>
       <header v-if="navigationPosition === 'side' || !selected" class="workspace-header compact-workspace-header"><h1>{{ selected?.note || selected?.label || t('你的聊天，世界都听得懂。') }}</h1><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></header>
       <section v-if="selected" class="account-toolbar" :class="{ 'toolbar-compact': selected.toolbarCollapsed }" :inert="selected.toolbarCollapsed">
         <div class="language-control"><label><span>{{ t('我使用的语言') }}</span><select :value="localLanguage" @change="setStringField('localLanguage', $event)"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ languageName(language) }}</option></select></label><span class="language-arrow">⇄</span><label><span>{{ contactLabel || t('对方的语言') }}</span><select :value="targetLanguage" @change="setTargetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ languageName(language) }}</option></select></label></div>
         <div class="translation-toggles"><label><input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />{{ t('接收翻译') }}</label><label><input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />{{ t('发送翻译') }}</label><label><input type="checkbox" :checked="blockChineseSend" disabled :title="t('外语消息仍含中文时禁止发送，翻译失败保留草稿。')" />{{ t('拦截中文原文') }}</label><label><input type="checkbox" :checked="groupTranslate" @change="patchSelected({ groupTranslate: !groupTranslate })" />{{ t('群组翻译') }}</label></div>
         <button class="text-button" @click="openQuality" :title="t('设置当前账号或联系人的语气与术语')">{{ t('术语') }}</button><label class="tone-control">{{ t('语气') }}<select :value="selected.translationQuality?.tone || ''" @change="patchSelected({ translationQuality: { ...selected?.translationQuality, tone: ($event.target as HTMLSelectElement).value || undefined } })"><option value="">{{ t('跟随全局') }}</option><option value="natural">{{ t('自然') }}</option><option value="business">{{ t('商务') }}</option></select></label><label class="tone-control" :title="t('只影响当前账号；自动翻译未缓存的历史消息会按正常规则计费')">{{ t('历史') }}<select :value="selected.historyMode || ''" @change="patchSelected({ historyMode: ($event.target as HTMLSelectElement).value || undefined })"><option value="">{{ t('跟随全局') }}</option><option value="new">{{ t('新消息自动') }}</option><option value="visible">{{ t('可见消息自动') }}</option><option value="manual">{{ t('点击翻译') }}</option></select></label><div class="display-controls" role="group" :aria-label="t('译文显示')"><label>{{ t('译文字号') }}<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label :title="t('译文颜色')">{{ t('颜色') }}<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? t('显示译文') : t('隐藏译文') }}</button></div>
       </section>
-      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ uiError(selectedLiveStatus.message) }}</span></div><button v-if="selectedLiveStatus.state === 'error'" class="text-button" @click="openReliability('history')">{{ t('翻译恢复') }}</button><button v-if="runtimeHealth?.pendingSends?.some((task:any) => task.accountId === selected?.id)" class="text-button" @click="openReliability('runtime')">{{ t('处理未发送消息') }}</button><span>{{ channelName }}</span><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" :title="t('查看代理设置')">{{ t('独立代理已配置') }}</button><span class="metric-text">{{ metricLabel }}</span><span class="save-feedback" :class="controlFeedback.state" role="status">{{ uiError(controlFeedback.message) }}</span><button v-if="undoChange?.id === selected.id" class="text-button" @click="undoAccountChange">{{ t('撤销修改') }}</button><span class="quota-text" :class="{ low: quotaLow }" role="status" aria-live="polite" :title="quotaLow ? t('剩余字符不足 50,000，请及时补充；字符用完后无法发送翻译消息。') : undefined">{{ t('余 ') }}{{ remainingCharsLabel }}{{ t(' 字符') }}<b v-if="quotaLow">{{ t(' · 余额不足 50,000') }}</b></span></div>
+      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ uiError(selectedLiveStatus.message) }}</span></div><button v-if="selectedLiveStatus.state === 'error'" class="text-button" @click="openReliability('history')">{{ t('翻译恢复') }}</button><button v-if="runtimeHealth?.pendingSends?.some((task:any) => task.accountId === selected?.id)" class="text-button" @click="openReliability('runtime')">{{ t('处理未发送消息') }}</button><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" :title="t('查看代理设置')">{{ t('独立代理已配置') }}</button><span class="save-feedback" :class="controlFeedback.state" role="status">{{ uiError(controlFeedback.message) }}</span><button v-if="undoChange?.id === selected.id" class="text-button" @click="undoAccountChange">{{ t('撤销修改') }}</button><span class="quota-text" :class="{ low: quotaLow }" role="status" aria-live="polite" :title="quotaLow ? t('剩余字符不足 50,000，请及时补充；字符用完后无法发送翻译消息。') : undefined">{{ t('余 ') }}{{ remainingCharsLabel }}{{ t(' 字符') }}<b v-if="quotaLow">{{ t(' · 余额不足 50,000') }}</b></span></div>
       <main ref="contentArea" class="content" :class="{ 'signal-content': selectedIsSignal }">
         <div v-if="selected?.runtimeMode === 'paused'" class="paused-account"><h2>{{ t('此账号已暂停') }}</h2><p>{{ t('恢复后继续收消息和查询原翻译任务。') }}</p><button class="primary" @click="openReliability('runtime')">{{ t('管理账号运行') }}</button></div>
         <SignalNativeView v-else-if="selectedIsSignal && selected?.signalEngine === 'desktop'" :key="'desktop-' + selected!.id" :account-record="selected!" @changed="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />

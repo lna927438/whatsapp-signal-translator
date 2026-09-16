@@ -25,6 +25,7 @@ export interface AccountRecord {
   translationQuality?: TranslationQuality
   runtimeMode?: 'receiving' | 'paused'
   pinned?: boolean
+  tabOrder?: number
   group?: string
   localLanguage?: string
   targetLanguage?: string
@@ -70,6 +71,7 @@ export interface ProviderSettings {
 }
 
 export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor' | 'conversationId' | 'conversationName' | 'contactLanguageSource'>, ProviderSettings {
+  workspaceTheme?: 'charcoal' | 'soft'
   accountNavigationPosition?: 'top' | 'side'
   uiLanguage?: 'system' | 'en' | 'zh-CN'
   hideNotificationNames?: boolean

@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   authResetPassword: (input: any) => ipcRenderer.invoke('auth:reset-password', input),
   testAccountProxy: (input: any, id?: string) => ipcRenderer.invoke('accounts:test-proxy', input, id),
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
+  reorderAccounts: (platform: string, ids: string[]) => ipcRenderer.invoke('accounts:reorder', platform, ids),
   addAccounts: (args: any) => ipcRenderer.invoke('accounts:add-batch', args),
   addAccount: (args: any) => ipcRenderer.invoke('accounts:add', args),
   updateAccount: (id: string, patch: any) => ipcRenderer.invoke('accounts:update', id, patch),

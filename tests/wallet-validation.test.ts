@@ -10,3 +10,9 @@ test('wallet display accepts confirmed integer characters and rejects missing, f
  }
  assert.throws(()=>checkedWalletState({}),/校验/)
 })
+
+test('management reductions are a separate optional counter compatible with older snapshots',()=>{
+ const state={wallet:{balance:75,lifetime_debited:0,lifetime_credited:100,lifetime_adjusted_down:25}}
+ assert.equal(checkedWalletState(state),state)
+ for(const value of [null,'25',NaN,Infinity,-1,1.5,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>checkedWalletState({wallet:{...state.wallet,lifetime_adjusted_down:value}}),/校验/)
+})

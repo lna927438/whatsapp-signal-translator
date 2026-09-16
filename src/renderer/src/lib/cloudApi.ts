@@ -3,6 +3,8 @@ export function checkedWalletState(state: any) {
     const value = state?.wallet?.[key]
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error('云端字符数据未通过校验，请重新同步。')
   }
+  const adjusted = state?.wallet?.lifetime_adjusted_down
+  if (adjusted !== undefined && (!Number.isSafeInteger(adjusted) || adjusted < 0)) throw new Error('云端字符数据未通过校验，请重新同步。')
   return state
 }
 

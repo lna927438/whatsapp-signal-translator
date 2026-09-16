@@ -34,3 +34,4 @@
 .app-shell.compact-shell .workspace-status{min-height:20px;height:20px;padding:0 9px;gap:8px;box-sizing:border-box;overflow:hidden;font-size:10px}
 .app-shell.compact-shell .account-navigation .tab-app-icon .unread-badge{right:-4px;top:-3px;border-width:1px;font-size:8px;height:12px;line-height:12px}
 .app-shell.compact-shell .account-navigation .account-add{height:28px;width:28px;padding:5px}
+.app-shell.compact-shell .workspace-status{min-height:27px;height:auto;padding:3px 10px;gap:9px;font-size:11px;flex-wrap:nowrap}

@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "private": true,
   "packageManager": "pnpm@11.5.2",
   "author": "lna927438",
@@ -32,6 +32,7 @@
     "vue-tsc": "3.3.11"
   },
   "build": {
+    "compression": "maximum",
     "forceCodeSigning": false,
     "electronFuses": {
       "runAsNode": false,
@@ -102,6 +103,7 @@
       "icon": "resources/brand/hellodog-icon.png"
     },
     "nsis": {
+      "differentialPackage": false,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }

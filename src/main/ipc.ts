@@ -149,6 +149,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const wallet = payload?.wallet || {}
     const remoteProfile = payload?.profile || {}
     for (const key of ['balance', 'lifetime_debited', 'lifetime_credited']) if (!Number.isSafeInteger(wallet[key]) || wallet[key] < 0) throw new Error('云端余额尚未通过校验，请重新同步。')
+    if (wallet.lifetime_adjusted_down !== undefined && (!Number.isSafeInteger(wallet.lifetime_adjusted_down) || wallet.lifetime_adjusted_down < 0)) throw new Error('云端余额尚未通过校验，请重新同步。')
     const remaining = wallet.balance
     const used = wallet.lifetime_debited
     const credited = wallet.lifetime_credited
@@ -326,6 +327,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('auth:reset-password', (_e, input: { identifier: string; recoveryCode: string; newPassword: string }) => auth.resetPassword(input))
 
   ipcMain.handle('accounts:list', async () => { await requireAuth(); return accounts.list() })
+  ipcMain.handle('accounts:reorder', async (event, platform: any, ids: string[]) => {
+    requireMain(event); await requireAuth()
+    return accounts.reorder(platform, ids)
+  })
   whatsapp.setPasswordReader(id => accounts.proxyPassword(id))
   ipcMain.handle('accounts:add', async (event, args: any) => {
     requireMain(event); await requireAuth()

@@ -105,11 +105,11 @@ async function adminPost<T>(env: Env, path: string, body: unknown, prefer?: stri
 }
 
 async function getWallet(env: Env, userId: string) {
-  const rows = await adminGet<Array<{ balance: number; lifetime_credited: number; lifetime_debited: number; updated_at: string }>>(
+  const rows = await adminGet<Array<{ balance: number; lifetime_credited: number; lifetime_debited: number; lifetime_adjusted_down: number; updated_at: string }>>(
     env,
-    `/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}&select=balance,reserved_characters,lifetime_credited,lifetime_debited,updated_at&limit=1`
+    `/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}&select=balance,reserved_characters,lifetime_credited,lifetime_debited,lifetime_adjusted_down,updated_at&limit=1`
   )
-  return rows[0] || { balance: 0, lifetime_credited: 0, lifetime_debited: 0, updated_at: null }
+  return rows[0] || { balance: 0, lifetime_credited: 0, lifetime_debited: 0, lifetime_adjusted_down: 0, updated_at: null }
 }
 
 async function getProfile(env: Env, userId: string) {

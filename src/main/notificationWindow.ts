@@ -34,7 +34,7 @@ export class NotificationWindow {
     if(this.disposed)return
     this.data=data
     if(!this.popup){
-      const popup=this.popup=new BrowserWindow({parent:this.parent,show:false,frame:false,transparent:true,resizable:false,movable:false,minimizable:false,maximizable:false,fullscreenable:false,focusable:false,skipTaskbar:true,hasShadow:true,roundedCorners:true,
+      const popup=this.popup=new BrowserWindow({parent:this.parent,show:false,frame:false,transparent:false,backgroundColor:'#191e24',resizable:false,movable:false,minimizable:false,maximizable:false,fullscreenable:false,focusable:false,skipTaskbar:true,hasShadow:true,roundedCorners:true,
         ...noticeWindowBounds(this.parent.getContentBounds()),webPreferences:{preload:join(__dirname,'../preload/notice.js'),contextIsolation:true,sandbox:true,nodeIntegration:false}})
       popup.setMenu(null);popup.webContents.setWindowOpenHandler(()=>({action:'deny'}));popup.webContents.on('will-navigate',event=>event.preventDefault())
       if(process.env.ELECTRON_RENDERER_URL)await popup.loadURL(new URL('notification.html',process.env.ELECTRON_RENDERER_URL).href)

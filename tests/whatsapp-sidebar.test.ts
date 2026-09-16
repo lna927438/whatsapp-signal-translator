@@ -74,3 +74,28 @@ test('a platform style change is preserved when restoring the default width', ()
     assert.equal(h.column.style.width, '380px'); assert.equal(h.column.style.getPropertyPriority('width'), '')
   } finally { h.dom.window.close() }
 })
+
+test('a removed resize overlay is recreated without waiting for a page reload',async()=>{
+ const h=fixture();try{
+  h.install();h.handle().remove();await settle();assert.ok(h.handle());assert.equal(h.doc.querySelectorAll('[role=separator]').length,1)
+  h.handle().dispatchEvent(new h.w.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));assert.equal(h.column.style.width,'376px')
+ }finally{h.dom.window.close()}
+})
+
+test('initial nested width mismatch repairs the full branch without requiring a previously saved width',()=>{
+ const h=fixture();try{
+  h.side.getBoundingClientRect=()=>{const width=h.side.style.width==='100%'?(parseInt(h.column.style.width)||360):266;return{left:60,right:60+width,top:0,bottom:600,width,height:600}}
+  h.install();assert.ok(h.handle());assert.equal(h.column.style.width,'266px');assert.equal(h.side.style.width,'100%');assert.equal(h.w.localStorage.getItem('hellodog:whatsapp-chat-list-width'),null)
+  h.handle().dispatchEvent(new h.w.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));assert.equal(h.column.style.width,'282px')
+ }finally{h.dom.window.close()}
+})
+
+test('the same-row positioned conversation follows the sidebar and never leaves its old offset',()=>{
+ const h=fixture({main:true,absolute:true});try{
+  h.content.style.transform='none';Object.defineProperty(h.content,'offsetParent',{get:()=>h.column.parentElement})
+  h.content.getBoundingClientRect=()=>{const offset=parseInt(h.content.style.left)||360;return{left:60+offset,right:1020,top:0,bottom:600,width:960-offset,height:600}}
+  h.w.localStorage.setItem('hellodog:whatsapp-chat-list-width','480');h.install()
+  assert.ok(h.handle());assert.equal(h.content.style.left,'480px');assert.equal(h.column.style.width,'480px')
+  h.handle().dispatchEvent(new h.w.KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));assert.equal(h.content.style.left,'464px')
+ }finally{h.dom.window.close()}
+})

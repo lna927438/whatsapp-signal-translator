@@ -137,3 +137,17 @@
 .quota-text.low,.quota-warning{color:#cf303b!important;font-weight:700}
 .app-shell .quota-text.low{color:#ff858d!important}
 .quota-text b{font-size:inherit}
+
+/* One opaque surface palette for the shell, dialogs and notification center. */
+.app-shell[data-theme=charcoal]{--surface:#171b20;--raised:#242a30;--field:#11161a;--border:#303840;--text:#e9edf0;--muted:#a7b1ba}
+.app-shell[data-theme=soft]{--surface:#23272d;--raised:#30363d;--field:#1d2126;--border:#414851;--text:#edf0f3;--muted:#bcc4cb}
+.app-shell[data-theme] .platform-rail,.app-shell[data-theme] .sidebar,.app-shell[data-theme] .workspace-status{background:var(--surface)}
+.app-shell.compact-shell .workspace-status{height:auto;min-height:27px;flex-wrap:nowrap;gap:9px;padding:3px 10px;font-size:11px}
+.app-shell.compact-shell .workspace-status .live-status{min-width:0;max-width:none;flex:1;font-size:11px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.app-shell.compact-shell .workspace-status .live-status>span{overflow:hidden;text-overflow:ellipsis}
+.app-shell.compact-shell .workspace-status .quota-text{flex-shrink:0;white-space:nowrap;font-size:11px}
+.app-shell.compact-shell .workspace-status .text-button{flex-shrink:0;padding:2px 5px;font-size:11px}
+.app-shell.compact-shell .workspace-status .save-feedback:empty{display:none}
+.app-shell.compact-shell .workspace-status .save-feedback{max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-shell .modal-backdrop{backdrop-filter:none}
+.app-shell :is(.notice-list,.settings-scroll,.setup-scroll,.finder-accounts){scrollbar-width:thin;scrollbar-color:var(--border) transparent;overscroll-behavior:contain}

@@ -31,8 +31,12 @@ export const whatsappSidebarScript = String.raw`
       ledger.delete(node);
     }
   };
-  const fill = node => {
-    for (const [name, value] of Object.entries({ width: '100%', 'min-width': '0px', 'max-width': '100%', 'box-sizing': 'border-box', 'flex-basis': 'auto' })) set(owned, node, name, value);
+  const fill = (node, width) => {
+    // Percentage widths on positioned descendants can resolve against the
+    // whole app, not the visible sidebar wrapper. Use the measured column
+    // width in that case without introducing a new containing block.
+    const size = floating(node) ? width + 'px' : '100%';
+    for (const [name, value] of Object.entries({ width: size, 'min-width': '0px', 'max-width': size, 'box-sizing': 'border-box', 'flex-basis': 'auto' })) set(owned, node, name, value);
   };
   const locate = () => {
     const side = doc.querySelector('#side'), main = doc.querySelector('#main');
@@ -53,12 +57,16 @@ export const whatsappSidebarScript = String.raw`
       const root = node.parentElement;
       if (!root || !['flex', 'inline-flex'].includes(css(root).display) || !['row', 'row-reverse'].includes(css(root).flexDirection)) continue;
       const r = rect(node);
-      const content = Array.from(root.children).find(other => other !== node && !other.hasAttribute('data-rt-ui') && !floating(other) && visible(other) && rect(other).left >= r.right - 2 && Math.abs(rect(other).top - r.top) < 100);
+      const content = Array.from(root.children).find(other => other !== node && !other.hasAttribute('data-rt-ui') && visible(other) && rect(other).left >= r.right - 2 && Math.abs(rect(other).top - r.top) < 100 && (!floating(other) || css(other).position === 'absolute' && other.offsetParent === root));
       if (content && visible(node)) result = { side, column: node, content, root };
     }
     return result;
   };
-  const resizable = value => value && ['flex', 'inline-flex'].includes(css(value.root).display) && css(value.root).flexDirection === 'row' && !floating(value.column) && !floating(value.content) && (!value.main || !floating(value.main));
+  // WhatsApp has shipped both in-flow and absolutely anchored conversation
+  // panes. Support the latter only when its containing block is the same row;
+  // never move a portal or infer an offset from a different coordinate system.
+  const anchored = value => css(value.content).position === 'absolute' && value.content.offsetParent === value.root && css(value.content).transform === 'none';
+  const resizable = value => value && ['flex', 'inline-flex'].includes(css(value.root).display) && css(value.root).flexDirection === 'row' && !floating(value.column) && (!floating(value.content) || anchored(value)) && (!value.main || !floating(value.main) || value.main === value.content || value.main.offsetParent && value.content.contains(value.main.offsetParent));
   const limits = () => ({ min: 240, max: Math.max(240, Math.min(660, rect(layout.root).width - 320)) });
   const aligned = () => {
     const s = rect(layout.side), c = rect(layout.column), m = rect(layout.main || layout.content), root = rect(layout.root);
@@ -68,12 +76,18 @@ export const whatsappSidebarScript = String.raw`
     if (!resizable(layout)) { restore(owned); return null; }
     const bounds = limits(), width = Math.max(bounds.min, Math.min(bounds.max, value));
     for (const [name, item] of Object.entries({ width: width + 'px', 'flex-basis': width + 'px', 'flex-grow': '0', 'flex-shrink': '0', 'min-width': bounds.min + 'px', 'max-width': bounds.max + 'px', 'box-sizing': 'border-box' })) set(owned, layout.column, name, item);
-    for (let node = layout.side; node && node !== layout.column; node = node.parentElement) fill(node);
+    for (let node = layout.side; node && node !== layout.column; node = node.parentElement) fill(node, width);
     set(owned, layout.content, 'min-width', '0px');
     set(owned, layout.content, 'flex-basis', '0px');
     set(owned, layout.content, 'flex-grow', '1');
     set(owned, layout.content, 'flex-shrink', '1');
-    for (let node = layout.main; node && node !== layout.content; node = node.parentElement) fill(node);
+    if (anchored(layout)) {
+      set(owned, layout.content, 'left', (rect(layout.column).right - rect(layout.root).left - layout.root.clientLeft) + 'px');
+      set(owned, layout.content, 'right', '0px');
+      set(owned, layout.content, 'width', 'auto');
+      set(owned, layout.content, 'max-width', 'none');
+    }
+    for (let node = layout.main; node && node !== layout.content; node = node.parentElement) fill(node, rect(layout.content).width);
     // A flex-looking ancestor may contain a positioned pane with an independent
     // offset. In that case leave the native layout intact, including its border.
     if (!aligned()) { restore(owned); return null; }
@@ -125,13 +139,19 @@ export const whatsappSidebarScript = String.raw`
   const createHandle = () => {
     handle = doc.createElement('div');
     handle.setAttribute('data-rt-ui', 'sidebar-resize'); handle.setAttribute('role', 'separator'); handle.setAttribute('aria-label', '调整 WhatsApp 聊天列表宽度'); handle.setAttribute('aria-orientation', 'vertical'); handle.setAttribute('aria-valuemin', '240'); handle.tabIndex = 0;
-    Object.assign(handle.style, { position: 'fixed', width: '6px', zIndex: '20', cursor: 'col-resize', touchAction: 'none', background: 'transparent', border: '0', boxShadow: 'none', padding: '0', margin: '0' });
+    Object.assign(handle.style, { position: 'fixed', width: '6px', zIndex: '20', cursor: 'col-resize', touchAction: 'none', background: 'transparent', border: '0', outline: 'none', boxShadow: 'none', padding: '0', margin: '0' });
+    const focusMark = doc.createElement('span'); focusMark.setAttribute('aria-hidden', 'true');
+    Object.assign(focusMark.style, { position: 'absolute', left: '2px', top: 'calc(50% - 18px)', height: '36px', width: '2px', borderRadius: '2px', background: '#91bcae', opacity: '0', pointerEvents: 'none' });
+    handle.appendChild(focusMark);
+    handle.onfocus = () => { focusMark.style.opacity = handle.matches(':focus-visible') ? '1' : '0'; };
+    handle.onblur = () => { focusMark.style.opacity = '0'; };
     handle.onpointerenter = () => { handle.style.background = '#7ba7b340'; };
     handle.onpointerleave = () => { if (!dragging) handle.style.background = 'transparent'; };
     handle.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
+      focusMark.style.opacity = '0';
       event.preventDefault(); event.stopPropagation(); dragging = true; dragWidth = rect(layout.side).width;
-      handle.setPointerCapture?.(event.pointerId);
+      try { handle.setPointerCapture?.(event.pointerId); } catch { dragging = false; }
     });
     handle.addEventListener('pointermove', event => {
       if (!dragging) return;
@@ -139,7 +159,7 @@ export const whatsappSidebarScript = String.raw`
       if (width !== null) dragWidth = width;
       syncDrawers(); syncHandle();
     });
-    const stop = () => { if (!dragging) return; dragging = false; persist(dragWidth); handle.style.background = 'transparent'; schedule(); };
+    const stop = () => { if (!dragging) return; dragging = false; if (Number.isFinite(dragWidth)) persist(dragWidth); if (handle) handle.style.background = 'transparent'; schedule(); };
     handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop); handle.addEventListener('lostpointercapture', stop);
     handle.onkeydown = event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
@@ -148,7 +168,7 @@ export const whatsappSidebarScript = String.raw`
       if (width !== null) persist(width);
       syncDrawers(); syncHandle();
     };
-    handle.ondblclick = () => { try { localStorage.removeItem(key); } catch {} restore(owned); syncDrawers(); syncHandle(); };
+    handle.ondblclick = () => { try { localStorage.removeItem(key); } catch {} restore(owned); if (!aligned()) apply(rect(layout.side).width); syncDrawers(); syncHandle(); };
     doc.body.appendChild(handle);
   };
   let watched = new Set();
@@ -161,7 +181,9 @@ export const whatsappSidebarScript = String.raw`
   };
   const install = () => {
     scheduled = false;
-    if (dragging) return;
+    if (dragging && layout?.side.isConnected && layout?.content.isConnected && handle?.isConnected) return;
+    dragging = false;
+    if (handle && !handle.isConnected) handle = null;
     const next = locate();
     if (!next || !layout || next.side !== layout.side || next.column !== layout.column || next.content !== layout.content || next.main !== layout.main) {
       restore(owned); restore(drawerStyles); removeHandle(); layout = next;
@@ -170,7 +192,12 @@ export const whatsappSidebarScript = String.raw`
     const desired = saved();
     let safe = resizable(layout);
     if (desired) safe = apply(desired) !== null;
-    else { restore(owned); safe = safe && aligned(); }
+    else {
+      // An inner #side may be narrower than its native fixed-width wrapper.
+      // The old early alignment check disabled resizing precisely when it was
+      // needed, leaving the wrapper's border as a second line in the chat.
+      safe = safe && (aligned() || apply(rect(layout.side).width) !== null);
+    }
     if (safe) { if (!handle) createHandle(); } else removeHandle();
     syncDrawers(); syncHandle(); watch();
   };

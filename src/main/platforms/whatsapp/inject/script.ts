@@ -924,6 +924,7 @@ export const whatsappInjectionScript = String.raw`
   };
 
   const stopInput = (event) => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); };
+  const localContactUi = target => (target instanceof Element ? target : target?.parentElement)?.closest('[data-rt-ui="contact-note-editor"], [data-rt-ui="contact-list-note"], [data-rt-ui="contact-details"]');
   const auxiliaryEditor = target => (target instanceof Element ? target : target?.parentElement)?.closest('[role="dialog"], [data-testid*="media-preview"]');
   const guardAuxiliary = (event, scope) => {
     const text = [...scope.querySelectorAll('[contenteditable="true"], [contenteditable="plaintext-only"], textarea')]
@@ -944,6 +945,7 @@ export const whatsappInjectionScript = String.raw`
     }
   }, true);
   window.addEventListener('keydown', (event) => {
+    if (localContactUi(event.target)) return;
     if(nativeEditor && event.isTrusted && (((event.key.toLowerCase()==='a'||event.key==='End') && event.ctrlKey)||event.key==='Backspace')) return;
     if (editorLocked) { stopInput(event); return; }
     const auxiliary = auxiliaryEditor(event.target);
@@ -968,6 +970,7 @@ export const whatsappInjectionScript = String.raw`
     interceptSendNow(event, composer);
   }, true);
   window.addEventListener('keyup', event => {
+    if (localContactUi(event.target)) return;
     const composer = getComposer(event.target);
     if (composer?.contains(event.target)) {
       nativeParagraphEditors.delete(composer);
@@ -975,18 +978,21 @@ export const whatsappInjectionScript = String.raw`
     }
   }, true);
   document.addEventListener('beforeinput', (event) => {
+    if (localContactUi(event.target)) return;
     if (event.inputType !== 'insertParagraph' || event.isComposing) return;
     const composer = getComposer(event.target);
     if (composer && composer.contains(event.target) && !composingEditors.has(composer) && !nativeParagraphEditors.has(composer)) interceptSendNow(event, composer);
   }, true);
   document.addEventListener('pointerdown', (event) => {
+    if (localContactUi(event.target)) return;
     if (editorLocked) { stopInput(event); return; }
     const composer = getComposer();
     if (!composer?.contains(event.target) && !isSendTarget(event.target)
       && !event.target?.closest?.('[data-rt-ui]')) navigationRevision += 1;
   }, true);
-  for (const name of ['paste', 'drop']) document.addEventListener(name, (event) => { if (editorLocked) stopInput(event); }, true);
+  for (const name of ['paste', 'drop']) document.addEventListener(name, (event) => { if (editorLocked && !localContactUi(event.target)) stopInput(event); }, true);
   window.addEventListener('click', (event) => {
+    if (localContactUi(event.target)) return;
     if (nativeClick && (event.target === nativeClick || nativeClick.contains(event.target))) return;
     if (editorLocked) { stopInput(event); return; }
     const auxiliary = auxiliaryEditor(event.target), button = (event.target instanceof Element ? event.target : event.target?.parentElement)?.closest('button,[role="button"]');

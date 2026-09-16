@@ -19,7 +19,7 @@ export class ApiError extends Error {constructor(message:string,readonly code:st
 export const roleNames:Record<Role,string>={owner:'主管理员',admin:'管理员',support:'客服',finance:'财务',editor:'内容运营'}
 export const sections=[
   {id:'overview',name:'总览',icon:'◫',hint:'用户与翻译运行概况'},
-  {id:'users',name:'用户与余额',icon:'♙',hint:'查找用户、添加字符和管理账号状态'},
+  {id:'users',name:'用户与余额',icon:'♙',hint:'查找用户、增减字符和管理账号状态'},
   {id:'translations',name:'翻译对账',icon:'⇄',hint:'每个请求的用量、扣费与补偿'},
   {id:'costs',name:'用量与费用',icon:'▥',hint:'实际字符用量、DeepSeek 资金与账单'},
   {id:'account',name:'管理员账号',icon:'♧',hint:'唯一的主管理员与登录密码'},
@@ -144,6 +144,6 @@ export const label=(v:unknown)=>costLabels[String(v)]||labels[String(v)]||String
 export const actionNames:Record<string,string>={'wallet.adjust':'余额调整','translation.refund':'翻译补偿','user.update':'用户设置','user.note':'用户备注','order.create':'创建人工订单','order.settle':'确认收款','order.cancel':'取消订单','plan.save':'保存套餐','version.save':'保存版本','announcement.save':'保存公告','role.set':'管理员权限'}
 actionNames['notice.save']='客户端通知'
 actionNames['user.clear-content']='清理云端译文'
-actionNames['wallet.add']='添加字符';actionNames['cost.reconcile']='官方账单核对'
+actionNames['wallet.add']='添加字符';actionNames['wallet.remove']='减少字符';actionNames['cost.reconcile']='官方账单核对'
 
 actionNames['provider.funding.confirm']='确认累计充值与退款'

@@ -282,3 +282,57 @@ test('a malformed or synchronously throwing bridge never enables an empty-note o
   }finally{h.dom.window.close()}
  }
 })
+
+test('empty and opaque-message conversations use explicit native chat identity, never names or quoted contacts',async()=>{
+ for(const opaque of [false,true]){
+  const h=contactList();try{
+   const main=h.w.document.querySelector('#main');main.setAttribute('data-chat-id','123@c.us')
+   if(opaque)h.w.document.querySelector('.message').setAttribute('data-id','3EB0000000000001');else h.w.document.querySelector('.message').remove()
+   h.install();await settle();assert.equal(h.headerNote().textContent,'First contact note')
+   h.headerNote().click();await h.save('Empty chat note');assert.equal(h.note(0).textContent,'Empty chat note')
+  }finally{h.dom.window.close()}
+ }
+})
+
+test('native React chat models identify unkeyed rows without reading preview identities or parent fibers',async()=>{
+ const h=contactList({keys:['','']});try{
+  const header=h.w.document.querySelector('#main header')
+  header.__reactProps$test={chat:{id:{_serialized:'123@c.us'}}}
+  ;(h.rows[0] as any).__reactProps$test={chat:{id:{_serialized:'123@c.us'}}}
+  ;(h.rows[1] as any).__reactFiber$test={memoizedProps:{chatId:'456@c.us'},return:{memoizedProps:{chatId:'123@c.us'}}}
+  h.w.document.querySelector('.message').setAttribute('data-id','3EB0000000000001')
+  h.install();await settle();assert.equal(h.note(1).textContent,'Second contact note');assert.equal(h.headerNote().textContent,'First contact note')
+  h.note(1).click();await h.save('Second model note');assert.equal(h.writes[0].peer,'peer:456@c.us');assert.equal(h.headerNote().textContent,'First contact note')
+  ;(h.rows[1] as any).__reactFiber$test.memoizedProps={message:{chatId:'123@c.us'}};h.sync();await settle()
+  assert.equal(h.note(1).getAttribute('data-hd-note-peer'),'')
+ }finally{h.dom.window.close()}
+})
+
+test('React replaces title and injected subtree without closing a same-contact note draft',async()=>{
+ for(const fromHeader of [false,true]){
+  const h=contactList();try{
+   h.install();await settle();(fromHeader?h.headerNote():h.note(0)).click()
+   const area=h.w.document.querySelector('textarea');area.value='Keep my draft';area.dispatchEvent(new h.w.Event('input',{bubbles:true}))
+   const container=fromHeader?h.w.document.querySelector('#main header'):h.rows[0]
+   const title=container.querySelector('span[title]');title.replaceWith(title.cloneNode(true))
+   container.querySelector('[data-rt-ui]')?.remove();h.sync();await settle()
+   assert.equal(h.w.document.querySelector('textarea'),area);assert.equal(area.value,'Keep my draft')
+   await h.save(area.value);assert.equal(h.headerNote().textContent,'Keep my draft');assert.equal(h.note(0).textContent,'Keep my draft')
+  }finally{h.dom.window.close()}
+ }
+})
+
+test('failed note reads expose an editable preserved draft but cannot overwrite an unread saved note',async()=>{
+ const h=contactList(),get=h.w.realtimeTranslator.getContactNote;let offline=true
+ h.w.realtimeTranslator.getContactNote=(peer:string)=>{if(offline)throw new Error('Error invoking remote method \'whatsapp:contact-note\': Error: 请先登录在线账号。');return get(peer)}
+ try{
+  h.install();await settle();h.note(0).click();await settle()
+  const area=h.w.document.querySelector('textarea');assert.ok(area);assert.match(h.w.document.querySelector('dialog [role=status]').textContent,/请先登录/)
+  area.value='Offline draft';area.dispatchEvent(new h.w.Event('input',{bubbles:true}));await h.save(area.value)
+  assert.equal(h.writes.length,0);assert.equal(area.value,'Offline draft')
+  offline=false;await h.save(area.value)
+  assert.equal(h.writes.length,0);assert.equal(area.value,'Offline draft');assert.match(h.w.document.querySelector('dialog [role=status]').textContent,/核对/)
+  h.w.document.querySelector('dialog button[type=button]').click();h.note(0).click();assert.equal(h.w.document.querySelector('textarea').value,'First contact note')
+  await h.save('Reviewed update');assert.equal(h.writes.length,1)
+ }finally{h.dom.window.close()}
+})

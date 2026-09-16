@@ -4,6 +4,7 @@ import { NoticeJournal } from './storage/noticeJournal'
 import { NotificationWindow } from './notificationWindow'
 import type { UpdateManager } from './updates'
 import { t } from './uiLocale'
+import { mainFrame } from './securityPolicy'
 
 export class ClientNotifications {
   private user=''
@@ -25,9 +26,9 @@ export class ClientNotifications {
   constructor(private window:BrowserWindow,private updates:UpdateManager,private identity:()=>string,
     private read:()=>Promise<unknown>,private receipt:(value:{id:string;revision:number;state:string})=>Promise<unknown>) {
     this.popup=new NotificationWindow(window,{action:(key,action)=>this.action(key,action),displayed:key=>this.displayed(key),hidden:()=>{this.current=null;this.showNextLater()}})
-    const main=(event:Electron.IpcMainInvokeEvent)=>{if(event.sender.id!==window.webContents.id||!this.identity()||this.identity()!==this.user)throw new Error('请先登录在线账号。')}
+    const main=(event:Electron.IpcMainInvokeEvent)=>{if(event.sender.id!==window.webContents.id||!mainFrame(event)||!this.identity()||this.identity()!==this.user)throw new Error('请先登录在线账号。')}
     ipcMain.handle('notices:snapshot',event=>{main(event);return this.snapshot()})
-    ipcMain.handle('notices:refresh',async event=>{main(event);await this.refresh();return this.snapshot()})
+    ipcMain.handle('notices:refresh',async event=>{main(event);await this.refresh(true);return this.snapshot()})
     ipcMain.handle('notices:action',async(event,key:string,action:string)=>{main(event);if(!['dismiss','open'].includes(action))throw new Error('通知操作无效。');await this.action(key,action as 'dismiss'|'open');return this.snapshot()})
     this.timer=setInterval(()=>{void this.refresh()},30000);this.timer.unref?.()
     window.on('focus',()=>{void this.refresh();this.showNext()})
@@ -39,10 +40,10 @@ export class ClientNotifications {
     if(owner!==this.user){this.revision++;this.user=owner;this.notices=[];this.update=null;this.syncedAt=0;this.error='';this.nextAttempt=0;this.shown.clear();this.recent=[];this.current=null;this.popup.hide();this.popup.setBlocked(false);this.emit()}
     if(owner)void this.refresh()
   }
-  snapshot(){const notices=this.notices.filter(n=>!n.ends_at||Date.parse(n.ends_at)>Date.now());return {notices,update:this.update,syncedAt:this.syncedAt,error:this.error,unread:notices.filter(n=>!n.dismissed).length+(this.update?.available?1:0)}}
+  snapshot(){const notices=this.notices.filter(n=>!n.ends_at||Date.parse(n.ends_at)>Date.now());return {notices,update:this.update,syncedAt:this.syncedAt,error:this.error,unread:notices.filter(n=>!n.dismissed).length+(this.update?.available&&this.update?.show?1:0)}}
   private emit(){if(!this.disposed&&!this.window.isDestroyed())this.window.webContents.send('notices:changed',this.snapshot())}
-  refresh():Promise<void>{
-    if(this.disposed||!this.user||Date.now()<this.nextAttempt)return Promise.resolve()
+  refresh(force=false):Promise<void>{
+    if(this.disposed||!this.user||(!force&&Date.now()<this.nextAttempt))return Promise.resolve()
     if(this.work)return this.work
     const owner=this.user,revision=this.revision
     this.nextAttempt=Date.now()+25000
@@ -110,7 +111,7 @@ export class ClientNotifications {
       await shell.openExternal(url)
     }
     if(revision!==this.revision||owner!==this.identity())return
-    if(notice){await this.journal.record(owner,notice,'dismissed');notice.dismissed=true;void this.flushReceipts()}
+    if(notice){await this.journal.record(owner,notice,'dismissed');if(revision!==this.revision||owner!==this.identity())return;this.notices=this.notices.map(item=>noticeKey(item)===key?{...item,dismissed:true}:item);void this.flushReceipts()}
     else if(version)this.update=await this.updates.snooze(version)
     if(revision!==this.revision)return
     this.shown.add(key);if(this.current?.key===key){this.current=null;this.popup.hide();this.showNextLater()}this.emit()

@@ -45,6 +45,7 @@ async function apiGet(accessToken: string, signal:AbortSignal) {
 function checkedSnapshot(value:any,expectedOwner:string){
   if(value?.user?.id!==expectedOwner || value?.profile?.id!==expectedOwner || (value?.wallet?.user_id&&value.wallet.user_id!==expectedOwner))throw new Error('账户快照身份不匹配，请重新同步。')
   for(const key of ['balance','lifetime_debited','lifetime_credited'])if(!Number.isSafeInteger(value.wallet?.[key])||value.wallet[key]<0)throw new Error('云端字符数据未通过校验，请重新同步。')
+  if(value.wallet?.lifetime_adjusted_down!==undefined&&(!Number.isSafeInteger(value.wallet.lifetime_adjusted_down)||value.wallet.lifetime_adjusted_down<0))throw new Error('云端字符数据未通过校验，请重新同步。')
   if(!Array.isArray(value.usage)||!Array.isArray(value.ledger)||!Number.isFinite(Date.parse(value.snapshotAt)))throw new Error('账户快照未通过校验，请重新同步。')
   for(const item of value.usage)if(typeof item?.request_id!=='string'||!Number.isSafeInteger(item.source_characters)||item.source_characters<1)throw new Error('使用记录未通过校验，请重新同步。')
   for(const key of ['translationDebit','usageCharacters','duplicateDebits','mismatchedRequests'])if(!Number.isSafeInteger(value.reconciliation?.[key])||value.reconciliation[key]<0)throw new Error('对账汇总未通过校验，请重新同步。')
@@ -139,7 +140,7 @@ onUnmounted(()=>{
           <em>字符额度</em>
         </div>
         <div class="wallet-ring" :style="{ '--remaining': remainingPct + '%' }"><b>{{ remainingPct }}%</b><small>剩余</small></div>
-        <div class="wallet-stats"><span>累计使用 <b>{{ fmt(debited) }}</b></span><span>累计入账 <b>{{ fmt(credited) }}</b></span></div>
+        <div class="wallet-stats"><span>累计使用 <b>{{ fmt(debited) }}</b></span><span>累计入账 <b>{{ fmt(credited) }}</b></span><span v-if="wallet?.lifetime_adjusted_down">管理减少 <b>{{ fmt(wallet.lifetime_adjusted_down) }}</b></span></div>
       </section>
 
       <section class="account-grid">

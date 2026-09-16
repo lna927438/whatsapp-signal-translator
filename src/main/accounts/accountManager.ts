@@ -1,4 +1,5 @@
 import { accountNames } from '../../shared/accountConfig'
+import { orderedAccounts } from '../../shared/accountOrder'
 import { normalizeQuality } from '../../shared/translationPolicy'
 import { safeStorage } from 'electron'
 import { normalizeProxy } from '../network/accountProxy'
@@ -59,12 +60,30 @@ export class AccountManager {
     })
   }
 
+  async reorder(platform: Platform, ids: string[]): Promise<AccountRecord[]> {
+    if (!['whatsapp', 'signal'].includes(platform) || !Array.isArray(ids) || ids.length > 1000 || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new Error('账号顺序无效，请重试。')
+    return this.serialized(async () => {
+      const accounts = await this.store.read(), platformRows = accounts.filter(account => account.platform === platform)
+      if (ids.length !== platformRows.length || platformRows.some(account => !ids.includes(account.id))) throw new Error('账号列表已变化，请重试。')
+      const order = new Map(ids.map((id, index) => [id, index]))
+      for (const account of platformRows) account.tabOrder = order.get(account.id)
+      await this.store.write(accounts)
+      return accounts.map(record => this.publicRecord(record))
+    })
+  }
+
   async update(id: string, patch: Partial<AccountRecord>): Promise<AccountRecord | undefined> {
     return this.serialized(async () => {
       const accounts = await this.store.read()
       const i = accounts.findIndex((a) => a.id === id)
       if (i < 0) return undefined
+      const previousPinned = accounts[i].pinned
       accounts[i] = { ...accounts[i], ...this.preparePatch(patch), id: accounts[i].id, platform: accounts[i].platform }
+      if (patch.pinned !== undefined && accounts[i].pinned !== previousPinned) {
+        const others = orderedAccounts(accounts.filter(account => account.platform === accounts[i].platform && account.id !== id))
+        const ordered = accounts[i].pinned ? [accounts[i], ...others] : [...others, accounts[i]]
+        ordered.forEach((account, index) => { account.tabOrder = index })
+      }
       await this.store.write(accounts)
       return this.publicRecord(accounts[i])
     })

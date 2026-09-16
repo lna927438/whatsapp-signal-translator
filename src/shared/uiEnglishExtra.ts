@@ -1,4 +1,13 @@
 export const uiEnglishExtra: Readonly<Record<string,string>> = {
+  '拖动排序；双击编辑备注':'Drag to reorder; double-click to edit the note',
+  '账号顺序未保存，请重试。':'The account order was not saved. Try again.',
+  '账号顺序无效，请重试。':'The account order is invalid. Try again.',
+  '账号列表已变化，请重试。':'The account list has changed. Try again.',
+  '深色主题':'Dark theme',
+  '墨黑':'Charcoal',
+  '柔和深灰':'Soft dark gray',
+  '主题选项无效。':'Invalid theme option.',
+  '管理员累计减少：{0} 字符':'Total removed by an administrator: {0} characters',
   '安全验证':'Security verification',
   '验证码不正确，请输入验证器中当前的六位验证码。':'That code is not valid. Enter the current six-digit code from your authenticator.',
   '登录状态已更新，请重新验证。':'Your sign-in session has changed. Verify again.',

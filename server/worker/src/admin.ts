@@ -70,7 +70,7 @@ export function validateMutation(body: unknown) {
   const keys:Record<string,string[]>={
     'provider.funding.confirm':['currency','cumulativeTopUps','cumulativeCashRefunds','balanceFetchedAt','reference'],
     'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference','timezone','provisional'],
-    'wallet.adjust':['amount','expectedBalance'], 'translation.refund':[],
+    'wallet.adjust':['amount','expectedBalance'], 'wallet.remove':['amount','expectedBalance'], 'translation.refund':[],
     'user.update':['status','plan_code'], 'user.note':['note','expectedRevision'], 'order.create':['plan_code'], 'order.settle':['reference'], 'order.cancel':[],
     'plan.save':['name','characters','price','currency','active'], 'role.set':['role'],
     'version.save':['channel','url','sha256','notes','active'], 'announcement.save':['title','body','level','active','starts_at','ends_at'],
@@ -86,6 +86,7 @@ export function validateMutation(body: unknown) {
       for(const k of ['cumulativeTopUps','cumulativeCashRefunds'])if(!/^\d{1,12}(\.\d{1,12})?$/.test(string(d[k],1,25)))fail()
       if(!Number.isFinite(Date.parse(string(d.balanceFetchedAt,1,40))))fail();break
     case 'wallet.add': integer(d.amount,1,1000000000);break
+    case 'wallet.remove': integer(d.amount,1,1000000000);integer(d.expectedBalance,0,Number.MAX_SAFE_INTEGER);break
     case 'cost.reconcile':
       choice(target,['deepseek','openai']);string(d.reference,3,200)
       if(d.timezone!==undefined)choice(d.timezone,[target==='openai'?'UTC':'Asia/Shanghai'])

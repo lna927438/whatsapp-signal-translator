@@ -12,6 +12,8 @@ test('desktop notification modes, click navigation and close-to-tray execute the
  focused=false;runtime.notifyAccount('a','Work');assert.equal(notifications.length,1);assert.equal(notifications[0].options.silent,true);assert.equal(notifications[0].options.body,'Work 有新消息');notifications[0].events.click();assert.equal(shown,1);assert.equal(sent[0][1].accountId,'a')
  let prevented=false;events.close({preventDefault:()=>{prevented=true}});assert.equal(prevented,true);assert.equal(hidden,1)
  runtime.applyDesktopOptions({notifications:'off',closeToTray:false});runtime.notifyAccount('a','Work');assert.equal(notifications.length,1);prevented=false;events.close({preventDefault:()=>{prevented=true}});assert.equal(prevented,false)
+ focused=true;runtime.applyDesktopOptions({notifications:'always',closeToTray:false,notificationSound:true,hideNotificationNames:true});runtime.notifyAccount('signal','Private contact');assert.equal(notifications.length,2);assert.equal(notifications[1].options.silent,false);assert.equal(notifications[1].options.body,'有新的聊天消息')
+ runtime.notifyAccount('signal','Private contact',{silent:true,hideNames:true});assert.equal(notifications[2].options.silent,true);assert.equal(notifications[2].options.body,'有新的聊天消息')
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
 

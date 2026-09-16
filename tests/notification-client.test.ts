@@ -29,7 +29,7 @@ test('journal serializes concurrent receipts, separates users and stores no mess
 test('toast stays above native content without taking focus and follows parent visibility',async()=>{
  const s=setup(),{NotificationWindow}=s.h.load('src/main/notificationWindow.ts');const seen:string[]=[];const win=new NotificationWindow(s.parent,{action:async()=>{},displayed:(k:string)=>seen.push(k),hidden:()=>{}})
  const data={key:'test',title:'Hello',body:'Message',category:'Notice',level:'info',brand:'HelloDog',actionLabel:'',closeLabel:'Close',detailsLabel:'Details',errorLabel:'Error'}
- try{await win.show(data);const popup=s.windows[1];assert.equal(popup.options.focusable,false);assert.equal(popup.options.skipTaskbar,true);assert.equal(popup.options.parent,s.parent);assert.equal(popup.visible,true)
+ try{await win.show(data);const popup=s.windows[1];assert.equal(popup.options.transparent,false);assert.equal(popup.options.backgroundColor,'#191e24');assert.equal(popup.options.focusable,false);assert.equal(popup.options.skipTaskbar,true);assert.equal(popup.options.parent,s.parent);assert.equal(popup.visible,true)
   await s.invoke('notice-window:painted',popup,'test');assert.deepEqual(seen,['test']);assert.equal(s.parent.focused,true)
   s.parent.focused=false;s.parent.emit('blur');assert.equal(popup.visible,false);await s.invoke('notice-window:painted',popup,'test');assert.equal(seen.length,1)
   s.parent.focused=true;s.parent.emit('focus');assert.equal(popup.visible,true);win.setBlocked(true);assert.equal(popup.visible,false);win.setBlocked(false);assert.equal(popup.visible,true)
@@ -60,4 +60,26 @@ test('notification payload and action URLs remain bounded and fixed to the offic
  assert.equal(noticeActionUrl('download'),'https://hellodog.net/download');assert.equal(noticeActionUrl('none'),null)
  assert.throws(()=>clientNotices({notices:[notice({title:'x'.repeat(121)})]}));assert.throws(()=>clientNotices({notices:[notice({action:'javascript:'})]}))
  for(const b of [{x:0,y:0,width:980,height:700},{x:-1400,y:40,width:1200,height:800}]){const r=noticeWindowBounds(b);assert.ok(r.x>=b.x&&r.x+r.width<=b.x+b.width);assert.ok(r.y>=b.y&&r.y+r.height<=b.y+b.height-76)}
+})
+
+test('manual refresh bypasses passive backoff, details routes locally, open uses the fixed official URL',async()=>{
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),n=notice({action:'download'}),sent:any[]=[];let reads=0
+ s.parent.webContents.send=(...args:any[])=>sent.push(args)
+ const manager=new ClientNotifications(s.parent,{notice:async()=>({available:false,show:false})},()=> 'A',async()=>{reads++;return {notices:[{...n}]}},async()=>({accepted:true}))
+ try{
+  manager.setIdentity();await delay();const before=reads
+  await manager.refresh();assert.equal(reads,before)
+  await s.invoke('notices:refresh',s.parent);assert.equal(reads,before+1)
+  const popup=s.windows[1];await s.invoke('notice-window:action',popup,n.id+':1','details')
+  assert.equal(popup.visible,false);assert.ok(sent.some(args=>args[0]==='ui:open-notices'));assert.equal(s.opened.length,0)
+  await s.invoke('notices:action',s.parent,n.id+':1','open');assert.deepEqual(s.opened,['https://hellodog.net/download']);assert.equal(manager.snapshot().unread,0)
+  assert.throws(()=>s.handlers.get('notices:snapshot')!({sender:s.parent.webContents,senderFrame:{}}),/登录/)
+ }finally{s.parent.destroy();assert.equal(s.handlers.size,0)}
+})
+
+test('acknowledging an update clears the unread badge while its download stays available',async()=>{
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts')
+ const update={available:true,show:true,latestVersion:'99.0.0',currentVersion:'0.0.0'}
+ const manager=new ClientNotifications(s.parent,{notice:async()=>update,snooze:async()=>({...update,show:false})},()=> 'A',async()=>({notices:[]}),async()=>({accepted:true}))
+ try{manager.setIdentity();await delay();assert.equal(manager.snapshot().unread,1);await s.invoke('notices:action',s.parent,'update:99.0.0','dismiss');assert.equal(manager.snapshot().unread,0);assert.equal(manager.snapshot().update.available,true)}finally{s.parent.destroy()}
 })
