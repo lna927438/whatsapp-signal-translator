@@ -31,7 +31,7 @@ test('parallel admin/cron refreshes make one provider call and preserve both exa
  assert.equal(calls,1);assert.equal(responses.filter(x=>x.sync.status==='fresh').length,1)
  const fresh=await refreshDeepSeekBalance(env);assert.equal(calls,1)
  assert.equal(fresh.balances[0].total,'123456789.123456789012');assert.equal(fresh.balances[1].total,'-0.01')
- assert.equal(fresh.snapshotAt,fresh.fetchedAt);assert.ok(!JSON.stringify(fresh).includes('scope'))
+ assert.equal(fresh.snapshotAt,fresh.fetchedAt);assert.ok(!JSON.stringify(fresh).includes('scope_digest'));assert.ok(!JSON.stringify(fresh).includes('credentialDigest'))
  assert.equal((await db.query('select * from translator_private.provider_balance_snapshots')).rows.length,1)
  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
 })

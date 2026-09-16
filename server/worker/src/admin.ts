@@ -1,6 +1,6 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
 import { billingSyncStatusWithHistory, syncOfficialCostsWithStatus, enabledBillingProviders, BillingSyncError, type BillingSyncEnv } from './billingSync'
-import {refreshDeepSeekBalance} from './deepseekBalance'
+import {refreshDeepSeekBalance,deepSeekCredentialDigest} from './deepseekBalance'
 import {currentOfficialBillScopes,officialReportingBasis} from './officialBillScopes'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
@@ -28,6 +28,10 @@ export const adminErrors: Record<string, [number, string]> = {
   not_found: [404, '没有找到这条记录。'],
   operation_conflict: [409, '此操作编号已有不同的内容，请重新核对。'],
   stale_balance: [409, '余额已变化，请刷新用户详情后重新核对调整金额。'],
+  stale_provider_balance: [409, '官方余额已更新或尚未同步，请刷新后再登记。'],
+  funding_balance_inconsistent: [409, '累计充值与官方充值余额不一致，请核对充值及退款。'],
+  funding_totals_decreased: [409, '累计充值和累计退回付款不能减少，请核对历史记录。'],
+  funding_movement_not_observed: [409, '尚未观察到充值到账，请等官方余额更新后再登记。'],
   stale_note: [409, '备注已在另一处修改。请刷新用户详情，查看最新备注后再保存。'],
   stale_notice: [409, '通知已在另一处修改，请刷新后重新编辑。'],
   invalid_recipient: [400, '没有找到这个登录邮箱，请核对接收用户。'],
@@ -64,6 +68,7 @@ export function validateMutation(body: unknown) {
   if (!uuid.test(operationId)) fail()
   const d=body.data
   const keys:Record<string,string[]>={
+    'provider.funding.confirm':['currency','cumulativeTopUps','cumulativeCashRefunds','balanceFetchedAt','reference'],
     'user.clear-content':[], 'wallet.add':['amount'], 'cost.reconcile':['from','to','officialUsd','officialTokens','officialRequests','reference','timezone','provisional'],
     'wallet.adjust':['amount','expectedBalance'], 'translation.refund':[],
     'user.update':['status','plan_code'], 'user.note':['note','expectedRevision'], 'order.create':['plan_code'], 'order.settle':['reference'], 'order.cancel':[],
@@ -72,10 +77,14 @@ export function validateMutation(body: unknown) {
     'notice.save':['title','body','level','active','starts_at','ends_at','popup','audience','recipient','action','expectedRevision']
   }
   if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&['timezone','provisional'].includes(k)))) fail()
-  if (!['plan.save','version.save','cost.reconcile'].includes(action) && !uuid.test(target)) fail()
+  if (!['plan.save','version.save','cost.reconcile','provider.funding.confirm'].includes(action) && !uuid.test(target)) fail()
   if ('active' in d && typeof d.active !== 'boolean') fail()
   if ('plan_code' in d && !/^[a-z][a-z0-9_-]{0,39}$/.test(string(d.plan_code,1,40))) fail()
   switch(action) {
+    case 'provider.funding.confirm':
+      choice(target,['deepseek']);choice(d.currency,['USD']);string(d.reference,3,200)
+      for(const k of ['cumulativeTopUps','cumulativeCashRefunds'])if(!/^\d{1,12}(\.\d{1,12})?$/.test(string(d[k],1,25)))fail()
+      if(!Number.isFinite(Date.parse(string(d.balanceFetchedAt,1,40))))fail();break
     case 'wallet.add': integer(d.amount,1,1000000000);break
     case 'cost.reconcile':
       choice(target,['deepseek','openai']);string(d.reference,3,200)
@@ -234,6 +243,12 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
       return identity
     },
     async rpc(name,args){
+      if(name==='admin_mutate'&&args.p_action==='provider.funding.confirm'){
+        if(args.p_target!=='deepseek'||!enabledBillingProviders(env).includes('deepseek'))throw new AdminError('billing_not_configured')
+        const scope=await deepSeekCredentialDigest(env.DEEPSEEK_API_KEY)
+        if(!scope)throw new AdminError('billing_not_configured')
+        return call('confirm_deepseek_funding',{p_actor:args.p_actor,p_operation:args.p_operation,p_reason:args.p_reason,p_data:args.p_data,p_scope:scope})
+      }
       if(name==='admin_mutate'&&args.p_action==='cost.reconcile'){
         const scopes=await currentOfficialBillScopes(env),provider=args.p_target
         if(provider!=='openai'&&provider!=='deepseek')throw new AdminError('invalid_request')

@@ -1,12 +1,21 @@
 import type {BillingSyncEnv} from './billingSync'
 
 type BalanceError='provider_permission'|'provider_rate_limited'|'provider_unavailable'|'provider_invalid_response'|'storage_unavailable'|'timeout'
+export interface DeepSeekFundingStatus {
+ basis:'confirmed_paid_funding_minus_official_paid_balance';scope:'current_account_lifetime';currency:'USD'
+ status:'ready'|'stale'|'unconfigured'|'needs_confirmation';reason:string|null
+ cumulativeTopUps:string|null;cumulativeCashRefunds:string|null;netPaidFunding:string|null
+ paidBalance:string|null;grantedBalance:string|null;usedPaid:string|null
+ balanceFetchedAt:string|null;confirmedAt:string|null;basisSource:'owner_confirmation'|null
+}
 export interface DeepSeekBalanceStatus {
  provider:'deepseek';available:boolean|null;balances:Array<{currency:'USD'|'CNY';total:string;granted:string;paid:string}>
  fetchedAt:string|null;snapshotAt:string|null;checkedAt:string;stale:boolean
+ funding?:DeepSeekFundingStatus
  sync:{status:'fresh'|'refreshing'|'stale'|'error'|'not_configured';lastAttemptAt:string|null;lastError:string|null;lastErrorAt:string|null;nextRefreshAt:string|null;refreshIntervalSeconds:30;staleAfterSeconds:120}
 }
 const emptyStatus=():DeepSeekBalanceStatus=>({provider:'deepseek',available:null,balances:[],fetchedAt:null,snapshotAt:null,checkedAt:new Date().toISOString(),stale:true,
+ funding:{basis:'confirmed_paid_funding_minus_official_paid_balance',scope:'current_account_lifetime',currency:'USD',status:'unconfigured',reason:'provider_not_configured',cumulativeTopUps:null,cumulativeCashRefunds:null,netPaidFunding:null,paidBalance:null,grantedBalance:null,usedPaid:null,balanceFetchedAt:null,confirmedAt:null,basisSource:null},
  sync:{status:'not_configured',lastAttemptAt:null,lastError:null,lastErrorAt:null,nextRefreshAt:null,refreshIntervalSeconds:30,staleAfterSeconds:120}})
 class BalanceFailure extends Error{constructor(readonly code:BalanceError){super(code)}}
 
@@ -68,7 +77,9 @@ export async function refreshDeepSeekBalance(env:BillingSyncEnv):Promise<DeepSee
  // A lost database reply retries one identical token/result. It never repeats
  // the provider query or creates a second balance observation.
  for(let retry=0;retry<2;retry++)try{return publicStatus(await balanceRpc(env,'finish_deepseek_balance_refresh',{...args,p_result:payload,p_error:error}))}catch{
-  if(retry===1)return {...publicStatus(claim),checkedAt:new Date().toISOString(),stale:true,sync:{...claim.sync,status:'error',lastError:'storage_unavailable',lastErrorAt:new Date().toISOString()}}
+  if(retry===1)return {...publicStatus(claim),checkedAt:new Date().toISOString(),stale:true,
+   ...(claim.funding?{funding:{...claim.funding,...(claim.funding.status==='ready'?{status:'stale' as const,reason:'balance_not_fresh'}:{})}}:{}),
+   sync:{...claim.sync,status:'error',lastError:'storage_unavailable',lastErrorAt:new Date().toISOString()}}
  }
  throw new BalanceFailure('storage_unavailable')
 }
