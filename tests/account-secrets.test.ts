@@ -15,6 +15,7 @@ function harness(secure = true) {
     exports, Buffer, process,
     require(name: string) {
       if (name === '../../shared/accountConfig') return require('../src/shared/accountConfig.ts')
+      if (name === '../../shared/accountOrder') return require('../src/shared/accountOrder.ts')
       if (name === '../../shared/translationPolicy') return require('../src/shared/translationPolicy.ts')
       if (name === 'electron') return { safeStorage: {
         isEncryptionAvailable: () => secure,
