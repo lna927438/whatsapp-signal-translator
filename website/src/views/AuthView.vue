@@ -185,7 +185,7 @@ async function verifyRecovery() {
     const { data: profile, error: profileError } = await client.from('profiles').select('username').eq('id', userId).maybeSingle()
     if (profileError) throw profileError
     recoveredUsername.value = String(profile?.username || data.user?.user_metadata?.username || '未设置用户名')
-    await client.auth.signOut()
+    await client.auth.signOut({ scope: 'local' })
     mode.value = 'recovered-username'
     message.value = '邮箱验证成功，已找到与该邮箱绑定的账号。'
   } catch (e: any) {
