@@ -36,6 +36,7 @@ import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoi
 import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread } from './desktopRuntime'
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
+import { createGoogleVoiceAccess } from './platforms/googleVoice/googleVoiceAccess'
 
 interface TranslatePayload {
   text: string
@@ -88,6 +89,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!owner || !onlineIdentity?.accessToken) throw new Error('请先登录在线账号。')
     return { owner, authorized: () => onlineIdentity?.userId === owner && identityRevision === revision }
   }
+  const openGoogleVoice = createGoogleVoiceAccess(app.getPath('userData'), taskIdentity)
 
   const voice = new VoiceRecognition(app.isPackaged ? join(process.resourcesPath,'voice') : join(app.getAppPath?.()||join(__dirname,'../..'),'resources/voice/bin'),join(app.getPath('temp'),'hellodog-voice'))
   ipcMain.handle('voice:recognize',async(event,id:string,bytes:Uint8Array)=>{
@@ -455,6 +457,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   }
   ipcMain.handle('platform:refresh', (event, id: string) => { requireMain(event); return refreshAccount(id) })
   ipcMain.handle('app:official-website', async event => { requireMain(event); await shell.openExternal('https://hellodog.net/download'); return true })
+  ipcMain.handle('app:google-voice', event => { requireMain(event); return openGoogleVoice() })
   ipcMain.handle('accounts:unread-snapshot', async event => { requireMain(event); await requireAuth(); return accountUnreadSnapshot() })
   ipcMain.handle('signal:typing-snapshot', async event => { requireMain(event); await requireAuth(); return signal.typingSnapshot() })
   const openAccountMenu = async (id: string) => {

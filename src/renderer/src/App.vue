@@ -5,6 +5,7 @@ import { t, uiLanguage, languageName, uiError } from './lib/uiLocale'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AccountSetup from './components/AccountSetup.vue'
 import UiIcon from './components/UiIcon.vue'
+import GoogleVoiceLauncher from './components/GoogleVoiceLauncher.vue'
 import AccountNavigation from './components/AccountNavigation.vue'
 import WorkspaceTools from './components/WorkspaceTools.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
@@ -504,6 +505,7 @@ onUnmounted(() => {
         <button v-for="platform in (['whatsapp','signal'] as const)" :key="platform" class="platform-entry compact-tool" :class="{active:selected && activePlatform === platform}" :title="platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" :aria-label="(platform === 'whatsapp' ? 'WhatsApp' : 'Signal') + (platformUnread(platform) ? ' · ' + platformUnread(platform) + t(' 条未读') : '')" @click="choosePlatform(platform)" @contextmenu.prevent="platformMenu(platform)">
           <img :src="`./${platform}.svg`" alt="" /><span v-if="platformUnread(platform)" class="unread-badge">{{ platformUnread(platform) > 99 ? '99+' : platformUnread(platform) }}</span>
         </button>
+        <GoogleVoiceLauncher @error="error = $event" />
         <button class="compact-tool" @click="showAccountFinder" :title="t('搜索账号 (Ctrl+K)')" :aria-label="t('搜索账号')"><UiIcon name="search" /></button>
         <div class="utility-spacer"></div>
         <template v-if="!collapsed">

@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   restartApp: () => ipcRenderer.invoke('app:restart'),
   refreshAccount: (id: string) => ipcRenderer.invoke('platform:refresh', id),
   openOfficialWebsite: () => ipcRenderer.invoke('app:official-website'),
+  openGoogleVoice: () => ipcRenderer.invoke('app:google-voice'),
   getAccountUnread: () => ipcRenderer.invoke('accounts:unread-snapshot'),
   signalTypingSnapshot: () => ipcRenderer.invoke('signal:typing-snapshot'),
   displaySignalMessage: (id:string,message:any) => ipcRenderer.invoke('signal:display-message',id,{account:message.account,peer:message.peer,timestamp:message.timestamp,fromMe:message.fromMe}),
