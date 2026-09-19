@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 type DispatchRow = {
   owner: string; windowId: string; conversationId: string; requestId: string
   originalHash: string; translatedHash: string; state: 'uncertain' | 'sent' | 'not-sent'
+  migratedTextHash?: string
   createdAt: number; resolvedAt?: number; attempts: number
 }
 export type GoogleVoiceDispatchData = { records: DispatchRow[] }
@@ -29,6 +30,13 @@ export class GoogleVoiceDispatchLedger {
     this.writes = work
     return work
   }
+  async snapshot(owner: string, windowId: string, conversationId: string, authorized: () => boolean) {
+    await this.writes.catch(() => undefined)
+    if (!authorized()) throw new Error('登录状态已变化。')
+    const data = await this.storage.read()
+    if (!authorized() || !Array.isArray(data.records)) throw new Error('发送记录暂时无法核对。')
+    return structuredClone(data.records.filter(row => row.owner === owner && row.windowId === windowId && row.conversationId === conversationId))
+  }
   async status(owner: string, windowId: string, conversationId: string, text: string, authorized: () => boolean) {
     await this.writes.catch(() => undefined)
     const data = await this.storage.read()
@@ -37,7 +45,8 @@ export class GoogleVoiceDispatchLedger {
     const row = data.records.find(row => row.owner === owner && row.windowId === windowId && row.conversationId === conversationId && (row.originalHash === originalHash || row.translatedHash === originalHash) && row.state === 'uncertain')
     return row ? { state: 'uncertain' as const, requestId: row.requestId, attempt: row.attempts, createdAt: row.createdAt } : { state: 'clear' as const }
   }
-  reserve(owner: string, windowId: string, conversationId: string, requestId: string, text: string, translated: string, authorized: () => boolean) {
+  reserve(owner: string, windowId: string, conversationId: string, requestId: string, text: string, translated: string, authorized: () => boolean, migratedTextHash?: string) {
+    if (migratedTextHash !== undefined && !/^[a-f0-9]{64}$/.test(migratedTextHash)) throw new Error('旧草稿指纹无效。')
     return this.transact(authorized, data => {
       const scoped = data.records.filter(row => row.owner === owner && row.windowId === windowId && row.conversationId === conversationId)
       const originalHash = digest(text), translatedHash = digest(translated)
@@ -46,8 +55,9 @@ export class GoogleVoiceDispatchLedger {
       if (previous && (previous.state !== 'not-sent' || previous.originalHash !== originalHash || previous.translatedHash !== translatedHash)) throw new Error('此发送授权已经使用，请核对发送记录。')
       if (previous) {
         previous.state = 'uncertain'; previous.createdAt = Date.now(); previous.attempts++
+        if (migratedTextHash) previous.migratedTextHash = migratedTextHash
         delete previous.resolvedAt
-      } else data.records.push({ owner, windowId, conversationId, requestId, originalHash, translatedHash, state: 'uncertain', createdAt: Date.now(), attempts: 1 })
+      } else data.records.push({ owner, windowId, conversationId, requestId, originalHash, translatedHash, state: 'uncertain', createdAt: Date.now(), attempts: 1, ...(migratedTextHash ? { migratedTextHash } : {}) })
       return { authorized: true as const, requestId, attempt: previous?.attempts || 1 }
     })
   }

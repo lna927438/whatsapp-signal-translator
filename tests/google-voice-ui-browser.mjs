@@ -32,6 +32,9 @@ try {
         reliabilityHistory: async () => ['wa1', 'signal1', 'v1', 'v3'].map((accountId, index) => ({ requestId: 'synthetic-history-' + accountId, request: { accountId, targetLanguage: 'zh-CN', text: 'Synthetic text' }, sourceCharacters: 14, chargedCharacters: 14, createdAt: 1700000000000 + index, state: 'charged', translated: '样例译文' })),
         updateInfo: async () => ({ currentVersion: 'synthetic' }), contentRetention: async () => ({ days: 0 }),
         noticesSnapshot: async () => ({ notices: [], unread: 0 }), getAccountUnread: async () => ({}),
+        getGoogleVoicePermissions: async () => ({microphone:false,notifications:false}),
+        setGoogleVoicePermission: async (_id,permission,allowed) => ({microphone:permission==='microphone'&&allowed,notifications:permission==='notifications'&&allowed}),
+        backGoogleVoiceWindow: async () => ({state:'ready',canGoBack:false}),
         listGoogleVoiceWindows: async () => structuredClone(window.__voiceRecords),
         addGoogleVoiceWindow: async () => { const record = { id: 'v' + nextId, label: 'Voice ' + nextId++, tabOrder: window.__voiceRecords.length }; window.__voiceRecords.push(record); return structuredClone(record) },
         updateGoogleVoiceWindow: async (id, patch) => { const record = window.__voiceRecords.find(row => row.id === id); Object.assign(record, patch); return structuredClone(record) },
@@ -56,7 +59,7 @@ try {
     assert.equal(await page.locator('.account-toolbar').count(), 0)
     assert.equal(await page.locator('.workspace-status').count(), 0)
     assert.equal(await page.locator('.account-navigation.side').count(), 0, 'Voice always uses top window tabs')
-    assert.match(await page.locator('.voice-protection-status').innerText(), /请以网页助手显示的保护状态为准/)
+    assert.match(await page.locator('.voice-protection-status').innerText(), /已内置短信翻译/)
     const voiceQuota = page.locator('.voice-protection-status .quota-text')
     await page.waitForFunction(() => document.querySelector('.voice-protection-status .quota-text')?.textContent.includes('100,000'))
     assert.equal(await voiceQuota.evaluate(node => node.classList.contains('low')), false)
@@ -88,11 +91,13 @@ try {
     await page.locator('[data-account-id="v2"] .account-close').click()
     assert.equal(await page.locator('[data-account-id="v2"]').count(), 0)
     assert.equal(await page.locator('[data-account-id="v3"] [aria-current="true"]').count(), 1)
-    await page.getByRole('button', { name: '连接翻译', exact: true }).click()
-    const pairing = page.getByRole('dialog', { name: '连接 Google Voice 翻译' })
-    await pairing.getByRole('textbox').waitFor()
-    assert.equal(await pairing.getByRole('textbox').inputValue(), 'SYNTHETIC-PAIRING-CODE')
-    assert.match(await pairing.innerText(), /配对成功本身不代表发送保护已生效/)
+    await page.getByRole('button', { name: '翻译与通话', exact: true }).click()
+    const pairing = page.getByRole('dialog', { name: 'Google Voice 设置' })
+    await pairing.getByRole('checkbox', {name:'通话麦克风'}).waitFor()
+    await pairing.getByRole('checkbox', {name:'通话麦克风'}).check()
+    assert.deepEqual(await page.evaluate(()=>window.__calls.filter(call=>call[0]==='setGoogleVoicePermission').at(-1).slice(1)),['v3','microphone',true])
+    assert.match(await pairing.innerText(), /已内置短信翻译/)
+    assert.equal(await pairing.getByRole('textbox').count(),0)
     await page.screenshot({ path: fileURLToPath(new URL('voice-pairing-' + position + '.png', folder)) })
     await page.keyboard.press('Escape')
     await pairing.waitFor({ state: 'detached' })
@@ -114,11 +119,14 @@ try {
     assert.equal(await recovery.getByRole('button', { name: 'Synthetic quick reply', exact: true }).isDisabled(), true, 'Voice must never insert a quick reply into a previous WhatsApp account')
     await recovery.locator('footer').getByRole('button', { name: '关闭', exact: true }).click()
     await recovery.waitFor({ state: 'detached' })
-    await page.getByRole('button', { name: '重新接入窗口', exact: true }).click()
+    await page.getByRole('button', { name: '重新加载页面', exact: true }).click()
     assert.equal(await page.evaluate(() => window.__calls.filter(call => call[0] === 'refreshGoogleVoiceWindow').at(-1)[1]), 'v3')
-    await page.getByRole('button', { name: '在独立窗口中打开', exact: true }).click()
-    await page.getByRole('button', { name: '打开窗口', exact: true }).waitFor()
-    await page.getByRole('button', { name: '打开窗口', exact: true }).click()
+    assert.equal(await page.getByRole('button', { name: '在独立窗口中打开', exact: true }).count(),0)
+    await page.evaluate(()=>window.__events.onGoogleVoiceState({id:'v3',state:'error',message:'Synthetic navigation failed'}))
+    await page.getByRole('alert').filter({hasText:'Synthetic navigation failed'}).first().waitFor()
+    await page.evaluate(()=>window.__events.onGoogleVoiceState({id:'v3',state:'ready',canGoBack:true}))
+    await page.getByRole('button', {name:'返回上一页',exact:true}).click()
+    assert.equal(await page.evaluate(()=>window.__calls.filter(call=>call[0]==='backGoogleVoiceWindow').at(-1)[1]),'v3')
     await page.getByRole('button', { name: 'Signal', exact: true }).click()
     const draft = page.getByRole('textbox', { name: 'Synthetic Signal draft' })
     await draft.fill('Keep this draft')
@@ -158,10 +166,10 @@ try {
     const calls = await page.evaluate(() => window.__calls)
     assert.ok(calls.some(call => call[0] === 'setOverlayOpen' && call[1] === true))
     assert.ok(calls.some(call => call[0] === 'setOverlayOpen' && call[1] === false))
-    results.push({ position, width, height, passed: true, nativeHostSimulated: true, signalDraftRetained: true, googleWindowCountAfterAdd: 1, accountMutations: calls.filter(call => ['addAccount', 'updateAccount', 'removeAccount', 'reorderAccounts'].includes(call[0])).length })
+    results.push({ position, width, height, passed: true, embeddedViewSimulated: true, signalDraftRetained: true, googleWindowCountAfterAdd: 1, accountMutations: calls.filter(call => ['addAccount', 'updateAccount', 'removeAccount', 'reorderAccounts'].includes(call[0])).length })
     await page.evaluate(() => window.__dispose()); await page.close()
   }
 } finally { await browser.close() }
-const report = { passed: true, at: new Date().toISOString(), scope: 'Real App.vue and Google Voice components in Edge with synthetic desktop IPC and Signal draft component. Native Chrome hosting, login, SMS, billing and extension pairing are not verified here.', syntheticOnly: true, realGoogleVoiceAccounts: false, realSmsSent: 0, realPairingCodesGenerated: 0, results }
+const report = { passed: true, at: new Date().toISOString(), scope: 'Real App.vue and Google Voice components in Edge with synthetic embedded-view IPC and Signal draft component. Live Google login, SMS delivery, calling and cloud billing are not verified here.', syntheticOnly: true, realGoogleVoiceAccounts: false, realSmsSent: 0, results }
 await writeFile(new URL('embedded-browser-results.json', folder), JSON.stringify(report, null, 2) + '\n')
 console.log(JSON.stringify(report))

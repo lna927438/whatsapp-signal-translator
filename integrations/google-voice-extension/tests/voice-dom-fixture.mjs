@@ -46,7 +46,7 @@ try {
   await page.addInitScript(() => {
     window.fixtureRoots = []; const original = Element.prototype.attachShadow
     Element.prototype.attachShadow = function (options) { const root = original.call(this, options); window.fixtureRoots.push(root); return root }
-    window.chrome = { runtime: { id: 'kigfaejcipjibnmnpinplphfldjahknn', sendMessage: message => window.fixtureBridge(message, location.href), onMessage: { addListener: listener => { window.extensionMessage = listener } } } }
+    window.chrome = { runtime: { id: 'kigfaejcipjibnmnpinplphfldjahknn', sendMessage: message => window.fixtureBridge(message, location.href), onMessage: { addListener: listener => { window.extensionMessage = listener }, removeListener: listener => { if (window.extensionMessage === listener) window.extensionMessage = null } } } }
   })
   // Run even earlier than document_start: observe Document safely before the
   // document element exists, and install interception before site handlers.
@@ -91,9 +91,11 @@ try {
   assert.equal(await page.locator('textarea.message-input').inputValue(), 'Newline fixture\n'); assert.equal(nativeCalls.length, modifierCalls)
   checks.push('IME modifier Enter keypress keyup and paragraph events cannot submit; Shift Enter retains newline without translation')
   await prepare('切换会话样例'); await panelHas('发送前预览')
-  await page.evaluate(() => history.pushState({}, '', '/u/6/messages?itemId=t.fixture-other'))
-  const callsBeforeChangedThread = nativeCalls.length; await clickPanel('确认发送'); await panelHas('HelloDog · 尚未完成')
-  assert.equal(nativeCalls.length, callsBeforeChangedThread); assert.equal(dispatchData.records.length, 0)
+  await page.evaluate(() => { window.oldConfirm = [...window.fixtureRoots].reverse().find(root => root.host.isConnected).querySelector('.actions button'); history.pushState({}, '', '/u/6/messages?itemId=t.fixture-other') })
+  const callsBeforeChangedThread = nativeCalls.filter(call => call.op === 'authorize').length
+  await page.evaluate(() => window.oldConfirm.click())
+  await page.waitForFunction(() => !window.fixtureRoots.some(root => root.host.isConnected && root.textContent.includes('发送前预览')))
+  assert.equal(nativeCalls.filter(call => call.op === 'authorize').length, callsBeforeChangedThread); assert.equal(dispatchData.records.length, 0)
   await page.evaluate(() => history.pushState({}, '', '/u/6/messages?itemId=t.fixture-one'))
   checks.push('conversation changed after preview prevents native authorization and send')
   await prepare('你好'); await panelHas('发送前预览'); assert.deepEqual(await page.evaluate(() => window.sent), [])

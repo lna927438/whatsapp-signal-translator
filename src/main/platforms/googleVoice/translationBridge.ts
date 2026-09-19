@@ -6,17 +6,30 @@ import { hasBlockedChinese, alreadyInTargetLanguage } from '../../translation/ou
 import { validateTranslation } from '../../translation/translationValidation'
 import { qualityKey } from '../../../shared/translationPolicy'
 import type { GoogleVoiceDispatchLedger } from './dispatchLedger'
+import { GoogleVoiceDraftRecoveryError, recoverGoogleVoiceDraft } from './draftRecovery'
 
-type Translator=Pick<TranslationEngine,'existingOutgoing'|'preserveOutgoingRequest'|'prepareOutgoingRequest'|'preserveIncomingRequest'|'translate'|'cached'|'translateIncoming'>
+type Translator=Pick<TranslationEngine,'history'|'existingOutgoing'|'preserveOutgoingRequest'|'prepareOutgoingRequest'|'preserveIncomingRequest'|'translate'|'cached'|'translateIncoming'>
 export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:()=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger) {
   return async(owner:string,accountId:string,operation:string,payload:unknown,authorized:()=>boolean):Promise<unknown>=>{
     const requireIdentity=()=>{if(!authorized())throw new Error('登录状态已变化。')}
     requireIdentity();const preferences=await runtime();requireIdentity()
     if(operation==='status')return {connected:true,localLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,
       receiveAutoTranslate:preferences.receiveAutoTranslate,sendAutoTranslate:preferences.sendAutoTranslate,blockChineseSend:true,historyMode:preferences.historyMode,translationsVisible:preferences.translationsVisible!==false}
-    const raw=payload as {id?:unknown;conversationId?:unknown;text?:unknown;direction?:unknown;manual?:unknown;translated?:unknown;requestId?:unknown;outcome?:unknown;confirmed?:unknown;attempt?:unknown}
+    const raw=payload as {id?:unknown;conversationId?:unknown;text?:unknown;direction?:unknown;manual?:unknown;translated?:unknown;requestId?:unknown;recoveryRequestId?:unknown;outcome?:unknown;confirmed?:unknown;attempt?:unknown}
     if(!raw || typeof raw.conversationId!=='string' || !/^[\w-]{1,160}$/.test(raw.conversationId))throw new Error('对话无效。')
     const conversationId='google-voice:'+raw.conversationId
+    const recover=async(known?:{id:string;requestId:string})=>{
+      if(typeof raw.text!=='string' || !raw.text.trim() || Array.from(raw.text).length>10000)throw new Error('草稿无效。')
+      const history=await translator.history();requireIdentity()
+      const attempts=await dispatch.snapshot(owner,accountId,conversationId,authorized);requireIdentity()
+      return recoverGoogleVoiceDraft({owner,accountId,conversationId,text:raw.text},history,attempts,known)
+    }
+    // Called only by the main-owned draft allocator; no browser storage or
+    // renderer-supplied identity is used to recover the immutable receipt.
+    if(operation==='recover-draft'){
+      const restored=await recover()
+      return restored?{state:'recovered',id:restored.id,requestId:restored.requestId}:{state:'new'}
+    }
     if(operation==='dispatch-status'){
       if(typeof raw.text!=='string' || !raw.text.trim() || Array.from(raw.text).length>10000)throw new Error('草稿无效。')
       return dispatch.status(owner,accountId,conversationId,raw.text,authorized)
@@ -38,25 +51,35 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
         requireIdentity()
         return dispatch.reserve(owner,accountId,conversationId,raw.requestId,raw.text,raw.text,authorized)
       }
-      const original=await translator.existingOutgoing(raw.requestId,accountId,conversationId,raw.text,raw.translated)
+      // TranslationEngine persists source text after trim(). Verify that exact
+      // canonical receipt while retaining the untouched editor text below for
+      // dispatch hashes and the preload's final draft comparison.
+      const original=await translator.existingOutgoing(raw.requestId,accountId,conversationId,raw.text.trim(),raw.translated)
       if(original.messageId!==raw.id)throw new Error('译文回执不属于本条短信。')
       if(!preferences.sendAutoTranslate || original.targetLanguage!==preferences.targetLanguage || qualityKey(original.quality)!==qualityKey(preferences.translationQuality))throw new Error('翻译设置已变化，请重新核对译文。')
       requireIdentity();if(hasBlockedChinese(raw.translated,original.targetLanguage))throw new Error('译文仍含中文，已阻止发送。')
       validateTranslation(original,raw.translated);await credit.check(owner,original,true,true);requireIdentity()
-      return dispatch.reserve(owner,accountId,conversationId,raw.requestId,raw.text,raw.translated,authorized)
+      return dispatch.reserve(owner,accountId,conversationId,raw.requestId,raw.text,raw.translated,authorized,
+        raw.recoveryRequestId===undefined?undefined:createHash('sha256').update(raw.text.trim()).digest('hex'))
     }
     if(!['incoming','outgoing'].includes(String(raw.direction)))throw new Error('翻译方向无效。')
     const outgoing=raw.direction==='outgoing'
     if(outgoing && (await dispatch.status(owner,accountId,conversationId,raw.text,authorized)).state==='uncertain')throw new Error('此短信的发送结果待确认，请先核对，不能重新翻译扣费。')
     requireIdentity()
-    if(outgoing && plainAllowed){
+    let restored:TranslationRequest|undefined
+    if(outgoing && raw.recoveryRequestId!==undefined){
+      if(typeof raw.recoveryRequestId!=='string' || !/^send-(?:gv|retry)-[a-f0-9]{64}$/.test(raw.recoveryRequestId))throw new GoogleVoiceDraftRecoveryError('incomplete')
+      restored=(await recover({id:raw.id,requestId:raw.recoveryRequestId}))!.request
+      if(!preferences.sendAutoTranslate || restored.targetLanguage!==preferences.targetLanguage || qualityKey(restored.quality)!==qualityKey(preferences.translationQuality))throw new GoogleVoiceDraftRecoveryError('settings')
+    }
+    if(outgoing && plainAllowed && !restored){
       if(hasBlockedChinese(raw.text,preferences.targetLanguage))throw new Error('请开启发送翻译，中文原文已阻止发送。')
       return {enabled:true,text:raw.text,requestId:plainRequest.requestId,untranslated:true}
     }
     const requestId=(outgoing?'send-gv-':'gv-')+createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,raw.direction,raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality])).digest('hex')
     let request:TranslationRequest={text:raw.text,accountId,conversationId,messageId:raw.id,requestId,
       sourceLanguage:outgoing?preferences.localLanguage:'auto',targetLanguage:outgoing?preferences.targetLanguage:preferences.localLanguage,quality:preferences.translationQuality}
-    request=outgoing?await translator.preserveOutgoingRequest(request):await translator.preserveIncomingRequest(request)
+    request=restored || (outgoing?await translator.preserveOutgoingRequest(request):await translator.preserveIncomingRequest(request))
     requireIdentity()
     if(outgoing){
       request=await translator.prepareOutgoingRequest(request);requireIdentity()

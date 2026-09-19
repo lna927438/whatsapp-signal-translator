@@ -10,10 +10,8 @@ if ($Prerelease) {
 } elseif ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'A stable release version is required.' }
 $output = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $root ('release/v' + $version) }
 if ((Test-Path -LiteralPath $output) -and (Get-ChildItem -LiteralPath $output -Force | Select-Object -First 1)) { throw 'Build output must be a new or empty directory; existing artifacts are preserved.' }
-& (Join-Path $PSScriptRoot 'build-google-voice-host.ps1')
-& (Join-Path $PSScriptRoot 'build-google-voice-messaging.ps1')
-& $node integrations/google-voice-extension/build-content.mjs
-if ($LASTEXITCODE -ne 0) { throw 'Google Voice extension build failed.' }
+# Google Voice now runs in the bundled sandboxed preload. Legacy external
+# browser hosts and the manually installed extension are development-only.
 & $node scripts/verify-signal-security.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Signal security core verification failed.' }
 & $node scripts/verify-voice-resources.mjs

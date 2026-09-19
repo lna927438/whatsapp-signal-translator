@@ -7,6 +7,7 @@ protectedFiles.add('contact-notes-v1.json')
 protectedFiles.add('google-voice-windows-v1.json')
 protectedFiles.add('google-voice-pairs-v1.json')
 protectedFiles.add('google-voice-dispatch-v1.json')
+protectedFiles.add('google-voice-embedded-drafts-v1.json')
 const pendingWrites = new Map<string, Promise<void>>()
 const encryptedPrefix = 'hellodog-encrypted-v1:'
 

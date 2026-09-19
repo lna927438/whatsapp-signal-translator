@@ -1,110 +1,197 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {EventEmitter} from 'node:events'
-import {mainHarness} from './main-harness.ts'
-function deferred<T=void>(){let resolve!:(value:T)=>void,reject!:(error:Error)=>void;const promise=new Promise<T>((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject}}
-const tick=()=>new Promise<void>(resolve=>setImmediate(resolve))
-function fixture(){
- let owner='owner-a',authRevision=0
- const calls:any[]=[],hosts:FakeHost[]=[],launchers:FakeLauncher[]=[],getGates=new Map<string,Promise<void>>()
- const recordsData=['a','b'].map((id,tabOrder)=>({id,owner,label:id,tabOrder,browser:'chrome'}))
- const records={get:async(who:string,id:string)=>{await getGates.get(id);const row=recordsData.find(row=>row.owner===who&&row.id===id);if(!row)throw new Error('missing');return row},update:async(who:string,id:string,patch:any)=>{const row=await records.get(who,id);Object.assign(row,patch);return row}}
- let attachGate:Promise<void>|undefined,detachGate:Promise<void>|undefined,attachFailure=false,detachFailure=false,discoveryCount=1
- class FakeLauncher{
-  constructor(public profile:string){launchers.push(this)}
-  resolveDetails=async()=>this.details()
-  details(){return{browser:'chrome',executable:'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',profile:this.profile}}
-  async open(authorized:()=>boolean){assert.ok(authorized());calls.push(['launch',this.profile]);return{browser:'chrome',launched:true}}
-  async openExtensions(authorized:()=>boolean){assert.ok(authorized());calls.push(['extensions',this.profile])}
- }
- class FakeHost{
-  visible=false;ready=false;profile='';disconnected?:((error?:Error)=>void);captures:any
-  constructor(){hosts.push(this)}
-  async attach(configuration:any,authorized:()=>boolean){this.captures=configuration;this.profile=configuration.profile;calls.push(['attach',this.profile]);const waiting=attachGate;attachGate=undefined;await waiting;if(!authorized())throw new Error('cancelled identity');if(attachFailure)throw new Error('attach failed');this.ready=true}
-  onDisconnected(callback:(error?:Error)=>void){this.disconnected=callback;return()=>{}}
-  setBounds(value:any){calls.push(['bounds',this.profile,value])}
-  setVisible(value:boolean){this.visible=value;calls.push(['visible',this.profile,value])}
-  focus(){calls.push(['focus',this.profile])}
-  async detach(){calls.push(['detach',this.profile]);await detachGate;if(detachFailure)throw new Error('recovery unconfirmed');this.ready=false;this.disconnected?.()}
- }
- class FakeWindow extends EventEmitter{
-  destroyed=false;visible=true;minimized=false;closeCalls=0
-  webContents={send:(...args:any[])=>calls.push(['send',...args]),getZoomFactor:()=>1}
-  getBounds(){return{x:0,y:0,width:900,height:700}}
-  isDestroyed(){return this.destroyed}isVisible(){return this.visible}isMinimized(){return this.minimized}
-  getNativeWindowHandle(){const result=Buffer.alloc(8);result.writeBigUInt64LE(100n);return result}
-  close(){this.closeCalls++;const event={defaultPrevented:false,preventDefault(){this.defaultPrevented=true}};this.emit('close',event);if(!event.defaultPrevented){this.destroyed=true;this.emit('closed')}}
- }
- const window=new FakeWindow()
- const h=mainHarness({app:{isPackaged:false,getAppPath:()=> 'D:\\HelloDog',getPath:()=> 'D:\\HelloDog\\data'},screen:{getDisplayMatching:()=>({scaleFactor:1})}},undefined,{
-  './officialWindow':{GoogleVoiceOfficialWindow:FakeLauncher},
-  './windowRecords':{googleVoiceProfileRoot:(root:string,who:string,id:string)=>root+'\\'+who+'\\'+id},
-  './nativeWindowHost':{GoogleVoiceNativeWindowHost:FakeHost,discoverGoogleVoiceWindows:async(_helper:string,_exe:string,profile:string)=>Array.from({length:discoveryCount},(_,index)=>({hwnd:String(profile.endsWith('a')?201+index:301+index),pid:20,startTicks:'639000000000000000'}))}
- })
- const {GoogleVoiceWorkspace}=h.load('src/main/platforms/googleVoice/workspace.ts')
- const workspace=new GoogleVoiceWorkspace(window,records,()=>{const saved=owner,revision=authRevision;return{owner,authorized:()=>!!owner&&owner===saved&&revision===authRevision}})
- return{workspace,window,records,calls,hosts,launchers,getGates,setAttachGate:(value:Promise<void>)=>attachGate=value,setDetachGate:(value:Promise<void>|undefined)=>detachGate=value,setAttachFailure:(value:boolean)=>attachFailure=value,setDetachFailure:(value:boolean)=>detachFailure=value,setDiscoveryCount:(value:number)=>discoveryCount=value,setOwner:(value:string)=>{owner=value;authRevision++}}
+import { EventEmitter } from 'node:events'
+import { mainHarness } from './main-harness.ts'
+
+const A = 'gv-10000000-0000-4000-8000-000000000001', B = 'gv-20000000-0000-4000-8000-000000000002'
+function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes }); return { promise, resolve } }
+function fixture() {
+  let owner = 'owner-a', authRevision = 0, zoom = 1
+  const calls: any[] = [], views: FakeView[] = [], sessions = new Map<string, any>(), getGates = new Map<string, Promise<void>>()
+  const data = [A, B].map((id, tabOrder) => ({ id, owner, label: id, tabOrder, browser: 'chrome', closed: false }))
+  const records = {
+    list: async (who: string) => data.filter(row => row.owner === who && !row.closed),
+    get: async (who: string, id: string) => { await getGates.get(id); const row = data.find(row => row.id === id && row.owner === who && !row.closed); if (!row) throw new Error('missing'); return row },
+    add: async (who: string) => { const row = { id: 'gv-30000000-0000-4000-8000-000000000003', owner: who, label: 'Google Voice 3', tabOrder: 2, browser: 'chrome', closed: false }; data.push(row); return row },
+    update: async (who: string, id: string, patch: any) => { const row = await records.get(who, id); Object.assign(row, patch); return row },
+    reorder: async (who: string, ids: string[]) => { const rows = await records.list(who); rows.forEach(row => { row.tabOrder = ids.indexOf(row.id) }); return rows.sort((a, b) => a.tabOrder - b.tabOrder) }
+  }
+  function fromPartition(key: string): any {
+    if (!sessions.has(key)) sessions.set(key, Object.assign(new EventEmitter(), { partition: key, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDisplayMediaRequestHandler() {} }))
+    return sessions.get(key)
+  }
+  class FakeContents extends EventEmitter {
+    destroyed = false; url = ''; reloads = 0; history = false; focused = false; session: any; mainFrame: any; sent: any[] = []; open: any
+    navigationHistory = { canGoBack: () => this.history, goBack: () => { calls.push(['back']) } }
+    constructor(options: any = {}) { super(); this.session = options.session || fromPartition(options.partition); const wc = this; this.mainFrame = { get url() { return wc.url }, detached: false } }
+    getURL() { return this.url } isDestroyed() { return this.destroyed }
+    loadURL(url: string) { this.url = url; calls.push(['load', url]); return Promise.resolve() }
+    setWindowOpenHandler(callback: any) { this.open = callback }
+    focus() { this.focused = true }
+    send(...args: any[]) { this.sent.push(args); calls.push(['send', ...args]) }
+    reload() { this.reloads++ }
+    close() { this.destroyed = true; this.emit('destroyed') }
+    getZoomFactor() { return zoom }
+  }
+  class FakeView {
+    visible = false; bounds: any; webContents: FakeContents
+    constructor(public options: any) { this.webContents = options.webContents || new FakeContents(options.webPreferences); views.push(this) }
+    setVisible(value: boolean) { this.visible = value } setBounds(value: any) { this.bounds = value } setBackgroundColor() {}
+  }
+  class FakeWindow extends EventEmitter {
+    destroyed = false; visible = true; minimized = false; webContents = new FakeContents(); children: FakeView[] = []
+    contentView = { addChildView: (view: FakeView) => this.children.push(view), removeChildView: (view: FakeView) => { this.children = this.children.filter(item => item !== view) } }
+    getContentSize() { return [1400, 1000] } isDestroyed() { return this.destroyed } isVisible() { return this.visible } isMinimized() { return this.minimized }
+    close() { this.destroyed = true; this.emit('closed') }
+  }
+  const window = new FakeWindow()
+  const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition }, screen: { getDisplayMatching: () => { throw new Error('Native DPI conversion must not be used') } } })
+  const { GoogleVoiceWorkspace } = h.load('src/main/platforms/googleVoice/workspace.ts')
+  const identity = () => { if (!owner) throw new Error('not logged in'); const saved = owner, revision = authRevision; return { owner, authorized: () => owner === saved && revision === authRevision } }
+  const workspace = new GoogleVoiceWorkspace(window, records, identity, { preloadPath: 'D:/HelloDog/preload/googleVoice.js' })
+  workspace.setBounds({ x: 50, y: 100, width: 900, height: 650 })
+  return { workspace, window, records, data, calls, views, sessions, getGates, setOwner: (value: string) => { owner = value; authRevision++ }, setZoom: (value: number) => { zoom = value; window.webContents.emit('zoom-changed') } }
 }
-test('main workspace reuses an existing dedicated window instead of spawning a duplicate after restart',async()=>{
- const h=fixture();assert.equal((await h.workspace.focus('a')).state,'ready')
- assert.equal(h.calls.filter(row=>row[0]==='launch').length,0);assert.equal(h.hosts[0].visible,true)
- await h.workspace.external('a');assert.equal(h.calls.filter(row=>row[0]==='launch').length,0)
- assert.equal((await h.workspace.focus('a')).state,'ready');assert.equal(h.calls.filter(row=>row[0]==='launch').length,0)
+
+test('workspace opens actual child views, preserves record identities and never binds a Chrome process', async () => {
+  const h = fixture(); assert.equal((await h.workspace.focus(A)).state, 'loading')
+  assert.equal(h.views.length, 1); assert.equal(h.window.children.length, 1); assert.equal(h.views[0].visible, true)
+  assert.equal(h.views[0].options.webPreferences.preload, 'D:/HelloDog/preload/googleVoice.js')
+  await h.workspace.focus(A); assert.equal(h.views.length, 1)
+  assert.equal(h.data[0].browser, 'chrome'); assert.equal(h.data[0].id, A)
 })
-test('closing a nonselected record preserves the active native window and its focus',async()=>{
- const h=fixture();await h.workspace.focus('a');await h.workspace.focus('b');await h.workspace.close('a')
- assert.equal(h.hosts[1].visible,true);assert.equal(h.calls.filter(row=>row[0]==='detach').length,1)
+
+test('workspace CRUD remains owner-scoped and safe metadata excludes storage and owner details', async () => {
+  const h = fixture(), listed = await h.workspace.list()
+  assert.equal(listed.length, 2); assert.equal(listed[0].owner, undefined)
+  assert.equal((await h.workspace.update(A, { label: 'Primary' })).label, 'Primary')
+  assert.equal((await h.workspace.reorder([B, A]))[0].id, B)
+  assert.equal((await h.workspace.add()).label, 'Google Voice 3')
+  await assert.rejects(h.workspace.update(A, {}), /名称无效/)
 })
-test('a late record lookup cannot restore an earlier selection',async()=>{
- const h=fixture(),gate=deferred();h.getGates.set('a',gate.promise)
- const earlier=h.workspace.focus('a');await h.workspace.focus('b');gate.resolve();assert.equal((await earlier).state,'cancelled')
- assert.equal(h.hosts.length,1);assert.equal(h.hosts[0].visible,true);assert.ok(h.hosts[0].profile.endsWith('b'))
+
+test('a late record lookup cannot restore an earlier selection or create an abandoned view', async () => {
+  const h = fixture(), gate = deferred(); h.getGates.set(A, gate.promise)
+  const earlier = h.workspace.focus(A); await h.workspace.focus(B); gate.resolve()
+  assert.equal((await earlier).state, 'cancelled'); assert.equal(h.views.length, 1); assert.equal(h.views[0].visible, true)
 })
-test('a late native attachment stays hidden when another window has become active',async()=>{
- const h=fixture(),gate=deferred();h.setAttachGate(gate.promise)
- const earlier=h.workspace.focus('a');await tick();await h.workspace.focus('b');gate.resolve()
- assert.equal((await earlier).state,'cancelled');assert.equal(h.hosts[0].visible,false);assert.equal(h.hosts[1].visible,true)
+
+test('hide cancels pending focus and preserves the view and its page draft', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  h.views[0].webContents.url = 'https://voice.google.com/u/0/messages?itemId=synthetic'
+  h.workspace.hide(); assert.equal(h.views[0].visible, false); assert.equal(h.views[0].webContents.destroyed, false)
+  await h.workspace.focus(A); assert.equal(h.views[0].webContents.url.includes('itemId=synthetic'), true)
+  const gate = deferred(); h.getGates.set(B, gate.promise); const pending = h.workspace.focus(B); h.workspace.hide(); gate.resolve()
+  assert.equal((await pending).state, 'cancelled'); assert.equal(h.views.length, 1)
 })
-test('global recovery blocks new focus and external operations until every host acknowledges detach',async()=>{
- const h=fixture();await h.workspace.focus('a');const gate=deferred();h.setDetachGate(gate.promise)
- const stopping=h.workspace.detachAll();await tick()
- assert.equal((await h.workspace.focus('b')).state,'cancelled');await assert.rejects(h.workspace.external('b'),/状态已变化/)
- assert.equal(h.hosts.length,1);gate.resolve();await stopping
- assert.equal((await h.workspace.focus('b')).state,'ready')
+
+test('overlay and minimization hide all content and restore only the selected account', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B)
+  h.workspace.setOverlayOpen(true); assert.ok(h.views.every(view => !view.visible))
+  h.workspace.setOverlayOpen(false); assert.equal(h.views[0].visible, false); assert.equal(h.views[1].visible, true)
+  h.window.minimized = true; h.window.emit('minimize'); assert.ok(h.views.every(view => !view.visible))
+  h.window.minimized = false; h.window.emit('restore'); assert.equal(h.views[1].visible, true)
 })
-test('an attachment whose restoration fails remains tracked and prevents destroying the parent',async()=>{
- const h=fixture();h.setAttachFailure(true);h.setDetachFailure(true)
- await assert.rejects(h.workspace.focus('a'),/recovery unconfirmed/)
- await assert.rejects(h.workspace.focus('a'),/恢复尚未确认/)
- h.window.close();await tick();assert.equal(h.window.destroyed,false);assert.ok(h.calls.some(row=>row[0]==='send'))
- h.setDetachFailure(false);h.window.close();await tick();await tick();assert.equal(h.window.destroyed,true)
+
+test('CSS bounds use main UI zoom exactly once without monitor DPI scaling', async () => {
+  const h = fixture(); h.setZoom(1.25); await h.workspace.focus(A)
+  assert.equal(h.views[0].bounds.x, 63); assert.equal(h.views[0].bounds.y, 125)
+  assert.equal(h.views[0].bounds.width, 1125); assert.equal(h.views[0].bounds.height, 813)
+  h.setZoom(1); assert.equal(h.views[0].bounds.width, 900)
+  h.workspace.setBounds({ x: 0, y: 0, width: 0, height: 0 }); assert.equal(h.views[0].visible, false)
 })
-test('close waits for pending attach cancellation and its confirmed restoration',async()=>{
- const h=fixture(),attach=deferred(),detach=deferred();h.setAttachGate(attach.promise)
- const opening=h.workspace.focus('a');await tick();h.setDetachGate(detach.promise);h.window.close()
- assert.equal(h.window.destroyed,false);attach.resolve();await tick();assert.equal(h.window.destroyed,false)
- detach.resolve();assert.equal((await opening).state,'cancelled');await tick();await tick();assert.equal(h.window.destroyed,true)
+
+test('external and extension compatibility actions remain inside the same client view', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  await h.workspace.external(A); assert.equal((await h.workspace.extensionSetup(A)).embedded, true)
+  assert.equal(h.views.length, 1); assert.equal(h.window.children.length, 1)
+  assert.equal(h.calls.filter(call => call[0] === 'load').length, 1)
 })
-test('switching owner cancels delayed attachment and never displays an old owner window',async()=>{
- const h=fixture(),gate=deferred();h.setAttachGate(gate.promise);const opening=h.workspace.focus('a');await tick()
- h.setOwner('owner-b');const stopping=h.workspace.detachAll();gate.resolve();assert.equal((await opening).state,'cancelled');await stopping
- assert.equal(h.hosts[0].visible,false);assert.equal(h.hosts[0].ready,false)
+
+test('refresh reloads the real embedded page and back uses its own Chromium history', async () => {
+  const h = fixture(); await h.workspace.focus(A); h.views[0].webContents.history = true
+  assert.equal(await h.workspace.back(A), true); assert.equal((await h.workspace.refresh(A)).state, 'loading')
+  assert.equal(h.views[0].webContents.reloads, 1); assert.equal(h.calls.filter(call => call[0] === 'back').length, 1)
 })
-test('external request invalidates a pending attach instead of allowing it to return inside later',async()=>{
- const h=fixture(),gate=deferred();h.setAttachGate(gate.promise);const opening=h.workspace.focus('a');await tick()
- const external=h.workspace.external('a');await tick();gate.resolve();assert.equal((await opening).state,'cancelled');assert.equal((await external).state,'external')
- assert.equal(h.hosts[0].ready,false);assert.equal(h.calls.filter(row=>row[0]==='launch').length,0)
+
+test('closing an inactive account preserves the active one and marks only its own record closed', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B); await h.workspace.close(A)
+  assert.equal(h.views[0].webContents.destroyed, true); assert.equal(h.views[1].visible, true)
+  assert.equal(h.data[0].closed, true); assert.equal(h.data[1].closed, false)
 })
-test('extension setup detaches only its own window and opens management in that profile',async()=>{
- const h=fixture();await h.workspace.focus('a');await h.workspace.focus('b');await h.workspace.extensionSetup('a')
- assert.equal(h.hosts[1].visible,true);assert.equal(h.calls.filter(row=>row[0]==='extensions').length,1);assert.ok(h.calls.find(row=>row[0]==='extensions')[1].endsWith('a'))
+
+test('logout destroys live views immediately, cancels pending opens and retains persistent session storage', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  const session = h.views[0].webContents.session, gate = deferred(); h.getGates.set(B, gate.promise)
+  const pending = h.workspace.focus(B); await h.workspace.detachAll(); gate.resolve()
+  assert.equal((await pending).state, 'cancelled'); assert.equal(h.views[0].webContents.destroyed, true)
+  assert.equal(h.data[0].closed, false); assert.equal(h.sessions.get(session.partition), session)
+  await h.workspace.focus(A); assert.equal(h.views[1].webContents.session, session)
 })
-test('multiple matching native windows fail closed without launching or guessing a target',async()=>{
- const h=fixture();h.setDiscoveryCount(2);await assert.rejects(h.workspace.focus('a'),/唯一识别/)
- assert.equal(h.hosts.length,0);assert.equal(h.calls.filter(row=>row[0]==='launch').length,0)
+
+test('owner change or same-owner reauthentication invalidates trusted in-flight translation authorization', async () => {
+  const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents, event = { sender: wc, senderFrame: wc.mainFrame }
+  const page = h.workspace.trustedPage(event); assert.equal(page.owner, 'owner-a'); assert.equal(page.accountId, A); assert.equal(page.authorized(), true)
+  h.setOwner('owner-a'); assert.equal(page.authorized(), false)
+  const renewed = h.workspace.trustedPage(event); assert.equal(renewed.authorized(), true)
+  h.setOwner('owner-b'); assert.equal(renewed.authorized(), false); assert.throws(() => h.workspace.trustedPage(event), /页面或登录状态已变化/)
 })
-test('overlay and minimize hide embedded surfaces and restore only the active surface',async()=>{
- const h=fixture();await h.workspace.focus('a');await h.workspace.focus('b');h.workspace.setOverlayOpen(true);assert.ok(h.hosts.every(host=>!host.visible))
- h.workspace.setOverlayOpen(false);assert.equal(h.hosts[1].visible,true);h.window.minimized=true;h.window.emit('minimize');assert.ok(h.hosts.every(host=>!host.visible))
- h.window.minimized=false;h.window.emit('restore');assert.equal(h.hosts[0].visible,false);assert.equal(h.hosts[1].visible,true)
+
+test('settings changes, closing and logout revoke registered page contexts across await boundaries', async () => {
+  const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents, event = { sender: wc, senderFrame: wc.mainFrame }
+  let page = h.workspace.trustedPage(event); h.workspace.invalidateContext(); assert.equal(page.authorized(), false)
+  page = h.workspace.trustedPage(event); await h.workspace.close(A); assert.equal(page.authorized(), false)
+  assert.throws(() => h.workspace.trustedPage(event), /主页面/)
+  await h.workspace.focus(B); const other = h.views[1].webContents
+  page = h.workspace.trustedPage({ sender: other, senderFrame: other.mainFrame }); await h.workspace.detachAll(); assert.equal(page.authorized(), false)
+})
+
+test('consent is explicit per account and ownership is rechecked after local record lookup', async () => {
+  const h = fixture(); assert.equal((await h.workspace.getPermissions(A)).microphone, false)
+  await h.workspace.focus(A); await h.workspace.focus(B)
+  assert.equal((await h.workspace.setPermissionConsent(A, 'microphone', true)).microphone, true)
+  assert.equal((await h.workspace.getPermissions(B)).microphone, false)
+  assert.equal((await h.workspace.setPermissionConsent(A, 'notifications', true)).notifications, true)
+  await assert.rejects(h.workspace.setPermissionConsent(A, 'camera', true), /权限无效/)
+  const gate = deferred(); h.getGates.set(A, gate.promise); const pending = h.workspace.setPermissionConsent(A, 'microphone', false)
+  h.setOwner('owner-b'); gate.resolve(); await assert.rejects(pending, /状态已变化/)
+})
+
+test('page state and navigation failures are pushed without private URLs or stale owner data', async () => {
+  const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents
+  wc.url = 'https://voice.google.com/u/0/messages?itemId=private-conversation'; wc.emit('dom-ready')
+  let event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+  assert.equal(event.state, 'ready'); assert.equal(event.id, A); assert.ok(!JSON.stringify(event).includes('private-conversation'))
+  wc.emit('will-navigate', { preventDefault() {} }, 'https://unknown.invalid/path?secret=private')
+  event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+  assert.equal(event.state, 'ready'); assert.match(event.message, /https:\/\/unknown.invalid/); assert.ok(!event.message.includes('secret'))
+  wc.emit('did-fail-load', {}, -105, 'https://private', wc.url, true)
+  event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+  assert.equal(event.state, 'error'); assert.equal(h.views[0].visible, false)
+  const count = h.calls.length; h.setOwner('owner-b'); wc.emit('dom-ready'); assert.equal(h.calls.length, count)
+})
+
+test('closing the parent cleans up all child contents without a native detach acknowledgment loop', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B); h.window.close()
+  assert.ok(h.views.every(view => view.webContents.destroyed)); assert.equal(h.data.some(row => row.closed), false)
+  assert.equal((await h.workspace.focus(A)).state, 'cancelled')
+})
+
+test('unexpected destruction reports a retryable error and retry recreates the same persistent account', async () => {
+  const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents, session = wc.session
+  wc.emit('dom-ready')
+  const page = h.workspace.trustedPage({ sender: wc, senderFrame: wc.mainFrame })
+  wc.close()
+  const event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+  assert.equal(event.state, 'error'); assert.match(event.message, /页面意外关闭/); assert.equal(event.canGoBack, false)
+  assert.equal(page.authorized(), false); assert.equal(h.data[0].closed, false); assert.equal(h.window.children.length, 0)
+  assert.equal((await h.workspace.focus(A)).state, 'loading')
+  assert.equal(h.views.length, 2); assert.equal(h.views[1].webContents.session, session); assert.equal(h.views[1].visible, true)
+})
+
+test('intentional close and logout do not emit misleading unexpected-closure errors', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B)
+  await h.workspace.close(A); await h.workspace.detachAll()
+  const errors = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state' && call[2].state === 'error')
+  assert.equal(errors.length, 0); assert.equal(h.data[0].closed, true); assert.equal(h.data[1].closed, false)
 })

@@ -80,15 +80,15 @@ test('Latest Voice selection wins over an earlier failed native startup', async 
   voice.dispose()
 })
 
-test('Opening failure retains the selected record and allows retry', async () => {
-  const { voice, api } = fixture()
+test('Opening failure retains the selected record and retries with a reload', async () => {
+  const { voice, api, calls } = fixture()
   await voice.enter()
   api.focusGoogleVoiceWindow = async () => { throw new Error('Browser unavailable') }
   await voice.focus('two')
   assert.equal(voice.state.value, 'error')
   assert.equal(voice.selectedId.value, 'two')
-  api.focusGoogleVoiceWindow = async () => {}
   await voice.retry()
+  assert.deepEqual(calls.at(-1), ['refresh', 'two'])
   assert.equal(voice.state.value, 'ready')
   voice.dispose()
 })
@@ -145,5 +145,27 @@ test('Refresh and independent-window actions stay on the selected Voice window',
   await voice.external()
   assert.deepEqual(calls.at(-1), ['external', 'one'])
   assert.equal(voice.state.value, 'idle')
+  voice.dispose()
+})
+
+test('A late focus response cannot hide a newer embedded navigation failure',async()=>{
+  const {voice,api}=fixture();await voice.enter()
+  const pending=deferred<unknown>();api.focusGoogleVoiceWindow=()=>pending.promise
+  const focusing=voice.focus('two');await Promise.resolve()
+  voice.acceptState({id:'two',state:'error',message:'Official navigation failed'})
+  pending.resolve({state:'ready'});await focusing
+  assert.equal(voice.state.value,'error');assert.equal(voice.message.value,'Official navigation failed')
+  voice.acceptState({id:'one',state:'ready'});assert.equal(voice.state.value,'error')
+  voice.acceptState({id:'two',state:'ready',canGoBack:true});assert.equal(voice.state.value,'ready');assert.equal(voice.canGoBack.value,true)
+  voice.dispose()
+})
+
+test('Document loading and back state follow embedded updates, never an external-window handoff',async()=>{
+  const {voice,api,calls}=fixture();api.focusGoogleVoiceWindow=async()=>({state:'loading'})
+  await voice.enter();assert.equal(voice.state.value,'loading')
+  voice.acceptState({id:'one',state:'ready',canGoBack:true})
+  api.backGoogleVoiceWindow=async id=>{calls.push(['back',id]);return {state:'ready',canGoBack:false}}
+  await voice.back();assert.deepEqual(calls.at(-1),['back','one']);assert.equal(voice.canGoBack.value,false)
+  voice.leave();voice.acceptState({id:'one',state:'error',message:'late'});assert.equal(voice.message.value,'')
   voice.dispose()
 })

@@ -36,10 +36,9 @@ import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoi
 import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread } from './desktopRuntime'
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
-import { createGoogleVoiceAccess } from './platforms/googleVoice/googleVoiceAccess'
 import { GoogleVoiceWorkspace } from './platforms/googleVoice/workspace'
 import { GoogleVoiceRecords, type GoogleVoiceData } from './platforms/googleVoice/windowRecords'
-import { GoogleVoiceExtensionBridge, GoogleVoicePipeServer, extensionId, type BridgeData } from './platforms/googleVoice/extensionBridge'
+import { GoogleVoiceEmbeddedTranslation, type GoogleVoiceEmbeddedDraftData } from './platforms/googleVoice/embeddedTranslation'
 import { createGoogleVoiceTranslator } from './platforms/googleVoice/translationBridge'
 import { GoogleVoiceDispatchLedger, type GoogleVoiceDispatchData } from './platforms/googleVoice/dispatchLedger'
 
@@ -94,9 +93,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!owner || !onlineIdentity?.accessToken) throw new Error('请先登录在线账号。')
     return { owner, authorized: () => onlineIdentity?.userId === owner && identityRevision === revision }
   }
-  const openGoogleVoice = createGoogleVoiceAccess(app.getPath('userData'), taskIdentity)
   const googleVoiceRecords = new GoogleVoiceRecords(new JsonStore<GoogleVoiceData>('google-voice-windows-v1.json',{windows:[]},true))
-  const googleVoice = new GoogleVoiceWorkspace(mainWindow,googleVoiceRecords,taskIdentity)
+  const googleVoice = new GoogleVoiceWorkspace(mainWindow,googleVoiceRecords,taskIdentity,{preloadPath:join(__dirname,'../preload/googleVoice.js')})
   let workspaceSelection=0
   let workspaceFocusWrites:Promise<unknown>=Promise.resolve()
   const focusWorkspace=(action:()=>Promise<unknown>)=>{
@@ -163,41 +161,26 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return cloudRead(path, (force, rejectedToken) => sessions.token(owner, force, rejectedToken))
   }
   const outgoingCredit = new OutgoingCredit(() => onlineIdentity?.userId || '', () => cloudRequest('/api/me'), id => translator.outgoingSettlement(id))
-  const googleVoiceBridge = new GoogleVoiceExtensionBridge(new JsonStore<BridgeData>('google-voice-pairs-v1.json',{pairs:[]},true),taskIdentity,
-    async(owner,id)=>{try{await googleVoiceRecords.get(owner,id);return true}catch{return false}},
-    createGoogleVoiceTranslator(translator,outgoingCredit,()=>settings.runtime(),new GoogleVoiceDispatchLedger(new JsonStore<GoogleVoiceDispatchData>('google-voice-dispatch-v1.json',{records:[]},true))))
-  const googleVoicePipe = new GoogleVoicePipeServer(googleVoiceBridge)
-  let googleVoiceRegistration:Promise<void> | undefined
-  const ensureGoogleVoiceBridge=()=>{
-    if(!googleVoiceRegistration){
-      const host=app.isPackaged?join(process.resourcesPath,'native/GoogleVoiceMessagingHost.exe'):join(app.getAppPath(),'resources/native/GoogleVoiceMessagingHost.exe')
-      googleVoiceRegistration=googleVoicePipe.register(app.getPath('userData'),host)
-      void googleVoiceRegistration.catch(()=>{googleVoiceRegistration=undefined})
-    }
-    return googleVoiceRegistration
-  }
-  mainWindow.once('closed',()=>{void googleVoicePipe.stop()})
+  const embeddedVoiceTranslation = new GoogleVoiceEmbeddedTranslation<Electron.IpcMainInvokeEvent>({
+    trustedPage:event=>googleVoice.trustedPage(event),
+    translate:createGoogleVoiceTranslator(translator,outgoingCredit,()=>settings.runtime(),new GoogleVoiceDispatchLedger(new JsonStore<GoogleVoiceDispatchData>('google-voice-dispatch-v1.json',{records:[]},true))),
+    storage:new JsonStore<GoogleVoiceEmbeddedDraftData>('google-voice-embedded-drafts-v1.json',{records:{}},true)
+  })
+  // This channel has its own registered-webContents, main-frame and owner check.
+  // Google pages never receive the trusted shell's general IPC permissions.
+  electronIpcMain.handle('google-voice:translate-request',(event,message)=>embeddedVoiceTranslation.request(event,message))
   ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
   ipcMain.handle('google-voice:add',event=>{requireMain(event);return googleVoice.add()})
   ipcMain.handle('google-voice:update',(event,id:string,patch:{label?:string})=>{requireMain(event);return googleVoice.update(id,patch)})
   ipcMain.handle('google-voice:reorder',(event,ids:string[])=>{requireMain(event);return googleVoice.reorder(ids)})
-  ipcMain.handle('google-voice:focus',async(event,id?:string)=>{requireMain(event);taskIdentity();return focusWorkspace(async()=>{await ensureGoogleVoiceBridge();return googleVoice.focus(id)})})
+  ipcMain.handle('google-voice:focus',async(event,id?:string)=>{requireMain(event);taskIdentity();return focusWorkspace(()=>googleVoice.focus(id))})
   ipcMain.handle('google-voice:close',(event,id:string)=>{requireMain(event);return googleVoice.close(id)})
   ipcMain.handle('google-voice:refresh',(event,id:string)=>{requireMain(event);return focusWorkspace(()=>googleVoice.refresh(id))})
+  ipcMain.handle('google-voice:back',(event,id:string)=>{requireMain(event);return googleVoice.back(id)})
+  ipcMain.handle('google-voice:permissions',(event,id:string)=>{requireMain(event);return googleVoice.getPermissions(id)})
+  ipcMain.handle('google-voice:permission',(event,id:string,permission:'microphone'|'notifications',allowed:boolean)=>{requireMain(event);return googleVoice.setPermissionConsent(id,permission,allowed)})
   ipcMain.handle('google-voice:external',(event,id:string)=>{requireMain(event);return googleVoice.external(id)})
-  ipcMain.handle('google-voice:translation-setup',async(event,id:string)=>{
-    requireMain(event);const identity=taskIdentity();await googleVoiceRecords.get(identity.owner,id)
-    await ensureGoogleVoiceBridge()
-    const extensionDirectory=app.isPackaged?join(process.resourcesPath,'google-voice-extension'):join(app.getAppPath(),'integrations/google-voice-extension')
-    if(!identity.authorized())throw new Error('登录状态已变化。')
-    await googleVoice.extensionSetup(id)
-    if(!identity.authorized())throw new Error('登录状态已变化。')
-    const code=await googleVoiceBridge.code(id)
-    clipboard.writeText(code)
-    const error=await shell.openPath(extensionDirectory)
-    if(error)throw new Error('无法打开扩展目录，请检查安装是否完整。')
-    return {code,expiresInSeconds:300,extensionDirectory,extensionId,translationReady:false}
-  })
+  ipcMain.handle('google-voice:translation-setup',(event,id:string)=>{requireMain(event);return googleVoice.getPermissions(id)})
 
   const cloudBackedProfile = async () => {
     const local = await profile.get()
@@ -518,7 +501,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   }
   ipcMain.handle('platform:refresh', (event, id: string) => { requireMain(event); return refreshAccount(id) })
   ipcMain.handle('app:official-website', async event => { requireMain(event); await shell.openExternal('https://hellodog.net/download'); return true })
-  ipcMain.handle('app:google-voice', event => { requireMain(event); return openGoogleVoice() })
+  ipcMain.handle('app:google-voice', async event => { requireMain(event);const rows=await googleVoice.list();const row=rows[0]||await googleVoice.add();return focusWorkspace(()=>googleVoice.focus(row.id)) })
   ipcMain.handle('accounts:unread-snapshot', async event => { requireMain(event); await requireAuth(); return accountUnreadSnapshot() })
   ipcMain.handle('signal:typing-snapshot', async event => { requireMain(event); await requireAuth(); return signal.typingSnapshot() })
   const openAccountMenu = async (id: string) => {
@@ -688,7 +671,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('settings:save', async (event, value) => { requireMain(event); await requireAuth(); const previous = await settings.get();
     try { applyDesktopOptions(value); await settings.save(value) } catch (error) { applyDesktopOptions(previous); throw error }
     mainWindow.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system')
-    setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); signalDesktop.refresh(); return true })
+    setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); signalDesktop.refresh(); googleVoice.invalidateContext(); return true })
   ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => { await requireAuth(); return accountRuntime(accountId, conversationId) })
   ipcMain.handle('whatsapp:contact-note', async (event, accountId: string, peer: string) => {
     const { owner, authorized } = taskIdentity()

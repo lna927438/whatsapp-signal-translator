@@ -13,6 +13,7 @@ export class GoogleVoiceDomAdapter {
   constructor(document, location) {
     this.document = document; this.location = location; this.current = null
     this.revisions = new WeakMap(); this.attachmentEntries = new WeakSet(); this.allowedButton = null
+    this.settleCancels = new Set(); this.disposed = false
     this.onInput = event => {
       if (event.target?.matches?.('gv-message-entry textarea.message-input')) this.revisions.set(event.target, (this.revisions.get(event.target) || 0) + 1)
       if (event.target?.matches?.('gv-message-entry input[type="file"]')) this.attachmentEntries.add(event.target.closest('gv-message-entry'))
@@ -28,6 +29,7 @@ export class GoogleVoiceDomAdapter {
     } catch { return null }
   }
   inspect() {
+    if (this.disposed) return null
     const route = this.route(), thread = one(this.document, 'gv-thread-details'), entry = one(this.document, 'gv-message-entry')
     if (!route || !thread || !entry || this.document.querySelector('gv-message-party-picker')) return null
     const composer = one(entry, 'textarea.message-input'), sendButton = one(entry, 'button.send-button[aria-label="Send message"]')
@@ -81,8 +83,12 @@ export class GoogleVoiceDomAdapter {
     const expected = this.lastWrite, view = this.document.defaultView
     await new Promise((resolve, reject) => {
       let frame, done = false
-      const timer = view.setTimeout(() => { done = true; view.cancelAnimationFrame(frame); reject(new Error('页面未完成输入更新，请核对发送状态。')) }, 1500)
-      frame = view.requestAnimationFrame(() => { if (!done) frame = view.requestAnimationFrame(() => { if (!done) { done = true; view.clearTimeout(timer); resolve() } }) })
+      const finish = error => { if (done) return; done = true; view.clearTimeout(timer); view.cancelAnimationFrame(frame); this.settleCancels.delete(cancel); error ? reject(error) : resolve() }
+      const cancel = () => finish(new Error('页面已离开，请核对发送状态。'))
+      const timer = view.setTimeout(() => finish(new Error('页面未完成输入更新，请核对发送状态。')), 1500)
+      this.settleCancels.add(cancel)
+      if (this.disposed) { cancel(); return }
+      frame = view.requestAnimationFrame(() => { if (!done) frame = view.requestAnimationFrame(() => finish()) })
     })
     const now = this.snapshot()
     if (!now || !expected || now.composer !== expected.composer || now.sendButton !== expected.sendButton || now.conversationId !== expected.conversationId || now.text !== expected.text || now.revision !== expected.revision) throw new Error('输入更新期间草稿或会话变化，请核对发送状态。')
@@ -123,5 +129,5 @@ export class GoogleVoiceDomAdapter {
     const rect = item.element.getBoundingClientRect(), view = this.document.defaultView
     return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < view.innerHeight && rect.right > 0 && rect.left < view.innerWidth
   }
-  dispose() { this.document.defaultView.removeEventListener('input', this.onInput, true); this.document.defaultView.removeEventListener('change', this.onInput, true) }
+  dispose() { this.disposed = true; this.current = null; for (const cancel of this.settleCancels) cancel(); this.document.defaultView.removeEventListener('input', this.onInput, true); this.document.defaultView.removeEventListener('change', this.onInput, true) }
 }

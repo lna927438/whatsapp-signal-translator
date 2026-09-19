@@ -16,7 +16,8 @@ export class SendGuard {
     this.adapter = adapter; this.bridge = bridge; this.randomId = randomId
     this.state = 'idle'; this.job = null
   }
-  assertSupported() { if (this.adapter.supported !== true) throw new Error('页面版本尚未支持；发送保护未启用。') }
+  invalidate() { this.invalidated = true; this.state = 'failed'; this.job = null }
+  assertSupported() { if (this.invalidated) throw new Error('账号或页面已变化，请重新准备预览。'); if (this.adapter.supported !== true) throw new Error('页面版本尚未支持；发送保护未启用。') }
   async prepare() {
     this.assertSupported()
     if (['preparing', 'authorizing'].includes(this.state)) throw new Error('当前请求处理中，不可重复发送。')
@@ -33,9 +34,11 @@ export class SendGuard {
     this.state = 'preparing'
     try {
       const status = await this.bridge.status()
+      this.assertSupported()
       if (!status.connected || typeof status.targetLanguage !== 'string') throw new Error('客户端未连接或目标语言未就绪。')
       if (this.bridge.dispatchStatus) {
         const pending = await this.bridge.dispatchStatus({ conversationId: original.conversationId, text: original.text })
+        this.assertSupported()
         if (pending.state === 'uncertain') {
           if (!Number.isSafeInteger(pending.attempt) || pending.attempt < 1) throw new Error('此前发送记录无效。')
           job.pendingRequestId = pending.requestId; job.pendingAttempt = pending.attempt; this.state = 'uncertain'; throw new Error('此前发送结果尚未核对，请先确认是否已发送。')
@@ -44,12 +47,14 @@ export class SendGuard {
       }
       if (this.bridge.logicalId) {
         const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text })
+        this.assertSupported()
         if (!result || !/^[a-f0-9-]{36}$/i.test(result.id)) throw new Error('草稿编号尚未确认。')
         job.id = result.id
       }
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('草稿或会话已变化，未提交翻译。')
       const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text })
       const translated = translatedValue(await this.bridge.translate(payload))
+      this.assertSupported()
       if (hasForbiddenHan(translated.text, status.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
       job.translated = translated; job.targetLanguage = status.targetLanguage
@@ -66,6 +71,7 @@ export class SendGuard {
     try {
       // Host must validate current owner/record/language/wallet/settled translation.
       const result = await this.bridge.authorize({ id: job.id, conversationId: original.conversationId, text: original.text, translated: job.translated.text, requestId: job.translated.requestId })
+      this.assertSupported()
       if (result?.authorized !== true || result.requestId !== job.translated.requestId || !Number.isSafeInteger(result.attempt) || result.attempt < 1) throw new Error('发送授权未完成，已保留草稿。')
       // Authorization has durably reserved this dispatch. Even DOM write failure
       // now requires explicit outcome reconciliation before any further attempt.
@@ -74,6 +80,7 @@ export class SendGuard {
       if (hasForbiddenHan(job.translated.text, job.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
       if (!this.adapter.replace(original, job.translated.text)) throw new Error('译文未写入，已阻止发送。')
       if (this.adapter.settle) await this.adapter.settle()
+      this.assertSupported()
       const current = this.adapter.snapshot()
       if (!sameTarget(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.targetLanguage)) throw new Error('输入框或目标核对失败，已阻止发送。')
       // No await between final target/text checks and the only permitted click.
@@ -84,9 +91,11 @@ export class SendGuard {
     } catch (error) { if (this.state !== 'uncertain') this.state = 'failed'; throw error }
   }
   async resolve(outcome) {
+    this.assertSupported()
     const job = this.job
     if (this.state !== 'uncertain' || !job?.pendingRequestId || !job.pendingAttempt || !['sent', 'not-sent'].includes(outcome) || !this.bridge.dispatchResolve) throw new Error('没有可核对的发送记录。')
     const result = await this.bridge.dispatchResolve({ conversationId: job.original.conversationId, requestId: job.pendingRequestId, attempt: job.pendingAttempt, outcome, confirmed: true })
+    this.assertSupported()
     if (result?.resolved !== true) throw new Error('发送结果核对未完成。')
     this.state = 'idle'; this.job = null
     return result

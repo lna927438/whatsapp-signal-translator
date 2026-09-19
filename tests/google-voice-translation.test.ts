@@ -8,18 +8,32 @@ import type { RuntimeSettings, TranslationRequest } from '../src/main/types.ts'
 
 function harness(){
   const preferences:RuntimeSettings={provider:'openai',localLanguage:'zh-CN',targetLanguage:'en-US',receiveAutoTranslate:true,sendAutoTranslate:true,blockChineseSend:true,groupTranslate:false,fontSize:13,translationColor:'#fff',historyMode:'visible'}
-  let valid=true,balance=true,translated='Hello, how are you?',incomingCalls=0;const checks:boolean[]=[],requests:TranslationRequest[]=[],paid=new Map<string,string>()
-  const engine={existingOutgoing:async(requestId:string,accountId:string,conversationId:string,text:string,result:string)=>{
+  let valid=true,balance=true,translated='Hello, how are you?',incomingCalls=0,providerCalls=0;const checks:boolean[]=[],requests:TranslationRequest[]=[],paid=new Map<string,string>()
+  const engine={history:async()=>[],existingOutgoing:async(requestId:string,accountId:string,conversationId:string,text:string,result:string)=>{
     const request=requests.find(row=>row.requestId===requestId&&row.accountId===accountId&&row.conversationId===conversationId&&row.text===text)
     if(!request||paid.get(requestId)!==result)throw new Error('unverified');return request
   },preserveOutgoingRequest:async(request:TranslationRequest)=>request,preserveIncomingRequest:async(request:TranslationRequest)=>request,prepareOutgoingRequest:async(request:TranslationRequest)=>request,
-  translate:async(request:TranslationRequest)=>{requests.push(request);paid.set(request.requestId!,translated);return translated},cached:async()=>undefined,translateIncoming:async()=>{incomingCalls++;return '你好'}}
+  // Mirror the actual engine's canonical stored source and settled-ID reuse.
+  translate:async(request:TranslationRequest)=>{if(!paid.has(request.requestId!)){requests.push({...request,text:request.text.trim()});paid.set(request.requestId!,translated);providerCalls++}return paid.get(request.requestId!)!},cached:async()=>undefined,translateIncoming:async()=>{incomingCalls++;return '你好'}}
   let dispatchData:GoogleVoiceDispatchData={records:[]}
   const dispatch=new GoogleVoiceDispatchLedger({read:async()=>structuredClone(dispatchData),write:async value=>{dispatchData=structuredClone(value)}})
   const run=createGoogleVoiceTranslator(engine,{check:async(_owner,_request,_translate,fresh)=>{checks.push(!!fresh);if(!balance)throw new Error('no balance')}},async()=>preferences,dispatch)
   const payload={direction:'outgoing',id:'message-1',conversationId:'conversation-1',text:'你好，你好吗？'}
-  return {run,payload,preferences,checks,requests,get incomingCalls(){return incomingCalls},setBalance:(value:boolean)=>balance=value,setResult:(value:string)=>translated=value,setIdentity:(value:boolean)=>valid=value,authorized:()=>valid}
+  return {run,payload,preferences,checks,requests,get incomingCalls(){return incomingCalls},get providerCalls(){return providerCalls},setBalance:(value:boolean)=>balance=value,setResult:(value:string)=>translated=value,setIdentity:(value:boolean)=>valid=value,authorized:()=>valid}
 }
+
+test('editor whitespace uses the canonical engine receipt and keeps the original dispatch fingerprint',async()=>{
+  const h=harness(),payload={...h.payload,text:' \n你好，你好吗？\n '}
+  const answer:any=await h.run('owner','window','translate',payload,h.authorized)
+  const repeated:any=await h.run('owner','window','translate',payload,h.authorized)
+  assert.equal(repeated.requestId,answer.requestId);assert.equal(h.providerCalls,1)
+  assert.equal(h.requests[0].text,payload.text.trim())
+  await assert.rejects(h.run('owner','window','authorize',{...payload,text:'不同的中文内容',requestId:answer.requestId,translated:answer.text},h.authorized))
+  const authorization:any=await h.run('owner','window','authorize',{...payload,requestId:answer.requestId,translated:answer.text},h.authorized)
+  assert.equal(authorization.authorized,true);assert.equal(h.providerCalls,1)
+  assert.equal((await h.run('owner','window','dispatch-status',payload,h.authorized) as any).state,'uncertain')
+  assert.equal((await h.run('owner','window','dispatch-status',{...payload,text:payload.text.trim()},h.authorized) as any).state,'clear')
+})
 test('outgoing uses existing billing flow and validates exact result again before sending',async()=>{
   const h=harness(),answer:any=await h.run('owner','window','translate',h.payload,h.authorized)
   assert.match(answer.requestId,/^send-gv-/);assert.deepEqual(h.checks,[false,true])

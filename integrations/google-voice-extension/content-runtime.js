@@ -1,11 +1,25 @@
-(() => {
-  'use strict'
-  if (window !== window.top || location.origin !== 'https://voice.google.com') return
+import { validId, translatedValue } from './protocol.mjs'
+import { SendGuard } from './send-guard.mjs'
+import { GoogleVoiceDomAdapter } from './voice-adapter.mjs'
+
+/** Shared isolated-world UI. The transport is supplied by the extension or preload. */
+export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
+  if (window !== window.top || location.origin !== 'https://voice.google.com' || typeof sendRequest !== 'function') return null
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
-  let panel, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false
+  let panel, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
+  const removers = []
+  function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
+  function invalidate() {
+    epoch++; runtimeStatus = null; statusAt = 0; guard?.invalidate(); guard = null; guardConversation = null; pending = null
+    removeMessageViews(); panel?.remove(); panel = null
+    currentUrl = location.href
+    if (!disposed) scheduleScan()
+  }
+  function checkNavigation() { if (currentUrl !== location.href) invalidate() }
 
   function showPanel(title, value, actions = [], note = '请核对内容。只有点击“确认发送”才会提交短信。') {
+    if (disposed) return
     panel?.remove(); panel = document.createElement('div')
     panel.style.cssText = 'position:fixed;bottom:24px;right:24px;width:min(440px,90vw);z-index:2147483647;'
     const shadow = panel.attachShadow({ mode: 'closed' }), style = document.createElement('style')
@@ -25,7 +39,11 @@
     ;(document.body || document.documentElement).append(panel)
   }
   async function request(type, payload) {
-    const answer = await chrome.runtime.sendMessage({ v: 1, type: 'voice.' + type, ...(payload ? { payload } : {}) })
+    checkNavigation()
+    if (disposed || location.origin !== 'https://voice.google.com') throw new Error('页面已离开，操作已停止。')
+    const startedEpoch = epoch, startedUrl = location.href
+    const answer = await sendRequest({ v: 1, type: 'voice.' + type, ...(payload ? { payload } : {}) })
+    if (disposed || epoch !== startedEpoch || location.href !== startedUrl) throw new Error('账号或页面已变化，操作已停止，未发送短信。')
     if (!answer?.ok) { const error = new Error(typeof answer?.error === 'string' ? answer.error : 'HelloDog 尚未完成操作，已保留原文。'); error.code = answer?.code; throw error }
     return answer.result
   }
@@ -42,21 +60,27 @@
     else showPanel('HelloDog · 尚未完成', value, [], '不会发送中文原文，不会自动重发。未知页面结构不保证全部发送入口均已识别。')
   }
   async function prepareOutgoing() {
+    checkNavigation()
+    const startedEpoch = epoch
     if (!await adapter.refresh()) throw new Error('当前短信会话或附件编辑器尚未支持，已阻止此发送操作。')
+    if (disposed || epoch !== startedEpoch) return
     const snapshot = adapter.snapshot()
     if (!guard || guardConversation !== snapshot.conversationId) { guard = new SendGuard(adapter, bridge); guardConversation = snapshot.conversationId }
     const active = guard
     showPanel('HelloDog · 正在准备预览', '正在核对连接、此前发送结果及翻译。请保留草稿。', [], '此时尚未发送短信。')
-    const preview = await active.prepare()
+    let preview
+    try { preview = await active.prepare() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
     if (guard !== active || adapter.snapshot()?.conversationId !== snapshot.conversationId) throw new Error('会话已变化，译文未发送。')
     showPanel(preview.untranslated ? 'HelloDog · 原文无需翻译' : 'HelloDog · 发送前预览', preview.text, [{ label: '确认发送', run: async () => {
-      await active.confirm()
+      try { await active.confirm() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
+      if (disposed || epoch !== startedEpoch) return
       showPanel('HelloDog · 已提交', '已执行一次原站发送操作。送达情况以 Google Voice 官方聊天为准。', [], '可以继续编辑其他短信。同文再次发送前需要先核对此次结果；不会自动重发。')
     } }])
   }
   // Installed before the app's document handlers. Unknown new-recipient and
   // attachment surfaces using these known controls are blocked, not guessed.
-  for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'click', 'submit', 'paste', 'drop']) window.addEventListener(type, event => {
+  for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'click', 'submit', 'paste', 'drop']) listen(window, type, event => {
+    checkNavigation()
     const intent = adapter.eventIntent(event)
     if (!intent) return
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
@@ -83,10 +107,14 @@
     const key = item.conversationId + ':' + item.id, cached = messages.get(key)
     if (cached?.work || cached?.text) return cached?.text
     const state = cached || {}; messages.set(key, state); const startedEpoch = epoch
-    state.work = true; state.error = false; renderMessageViews(state)
+    state.work = true; state.error = false; state.deferred = false; renderMessageViews(state)
     try {
-      const value = translatedValue(await bridge.translate({ id: item.id, conversationId: item.conversationId, direction: 'incoming', text: item.text, manual }))
+      const result = await bridge.translate({ id: item.id, conversationId: item.conversationId, direction: 'incoming', text: item.text, manual })
       if (epoch !== startedEpoch) return
+      // Mode/cache misses are a normal receipt, not a failed translation. Do
+      // not repeatedly query/charge a disabled message on the polling loop.
+      if (result?.enabled === false) { state.deferred = true; return }
+      const value = translatedValue(result)
       state.text = value.text
     } catch (error) { if (epoch === startedEpoch) { state.error = error?.code !== 'busy'; state.retryAfter = error?.code === 'busy' ? Date.now() + 2000 : 0; if (manual) showError(error) } }
     finally { state.work = false; renderMessageViews(state); scheduleScan() }
@@ -129,26 +157,33 @@
   }
   async function scan() {
     scanTimer = null
-    if (scanBusy) return
+    checkNavigation()
+    if (disposed || scanBusy) return
     scanBusy = true
+    const startedEpoch = epoch
     try {
-      const supported = await adapter.refresh(); toolbar(supported)
+      const supported = await adapter.refresh()
+      if (disposed || startedEpoch !== epoch) return
+      toolbar(supported)
       if (!supported) return
       if (Date.now() - statusAt > 10000 && !autoBusy && !['preparing', 'authorizing'].includes(guard?.state)) {
         statusAt = Date.now()
         try {
           const next = await bridge.status()
-          if (runtimeStatus?.localLanguage !== next.localLanguage) { epoch++; removeMessageViews() }
+          if (disposed || startedEpoch !== epoch) return
+          if (runtimeStatus && runtimeStatus.localLanguage !== next.localLanguage) invalidate()
+          else if (['receiveAutoTranslate', 'historyMode', 'translationsVisible'].some(key => runtimeStatus?.[key] !== next[key])) for (const state of messages.values()) state.deferred = false
           runtimeStatus = next
-        } catch { runtimeStatus = null }
+        } catch { if (disposed || startedEpoch !== epoch) return; runtimeStatus = null }
         toolbar(true)
       }
       const items = await adapter.messages()
+      if (disposed || startedEpoch !== epoch) return
       let nextAuto
       for (const item of items) {
         if (!adapter.validMessage(item)) continue
         const state = addMessage(item)
-        if (!nextAuto && state && !state.work && !state.text && !state.error && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && adapter.visibleMessage(item)) nextAuto = item
+        if (!nextAuto && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && adapter.visibleMessage(item)) nextAuto = item
       }
       if (nextAuto && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && runtimeStatus.historyMode === 'visible' && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
         autoBusy = true
@@ -156,15 +191,29 @@
       }
     } finally { scanBusy = false }
   }
-  function scheduleScan() { if (!scanTimer) scanTimer = setTimeout(() => { void scan().catch(() => {}) }, 250) }
-  new MutationObserver(changes => { if (changes.some(change => !change.target.closest?.('[data-hellodog-voice]'))) scheduleScan() }).observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly'] })
-  window.addEventListener('popstate', scheduleScan); window.addEventListener('scroll', scheduleScan, true); document.addEventListener('visibilitychange', scheduleScan)
-  setInterval(scheduleScan, 10000); scheduleScan()
+  function scheduleScan() { if (!disposed && !scanTimer) scanTimer = setTimeout(() => { void scan().catch(() => {}) }, 250) }
+  const observer = new MutationObserver(changes => { checkNavigation(); if (changes.some(change => !change.target.closest?.('[data-hellodog-voice]'))) scheduleScan() })
+  observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly'] })
+  listen(window, 'popstate', () => { checkNavigation(); scheduleScan() }); listen(window, 'hashchange', checkNavigation)
+  listen(window, 'scroll', scheduleScan, true); listen(document, 'visibilitychange', () => { if (document.visibilityState === 'visible') for (const state of messages.values()) state.deferred = false; scheduleScan() })
+  // Check only the URL each second; rendered message scans remain event driven.
+  let lastMaintenance = Date.now()
+  const pollTimer = setInterval(() => { checkNavigation(); if (Date.now() - lastMaintenance >= 10000) { lastMaintenance = Date.now(); scheduleScan() } }, 1000)
+  listen(window, 'pagehide', event => {
+    dispose()
+    // BFCache resumes a document without running its preload/content script
+    // again. Reinstall the same isolated guard before the restored page is used.
+    if (event.persisted) {
+      restoreListener = () => { restoreListener = null; installGoogleVoiceRuntime({ sendRequest, subscribe }) }
+      window.addEventListener('pageshow', restoreListener, { once: true })
+    }
+  })
+  scheduleScan()
 
-  chrome.runtime.onMessage.addListener((message, sender, reply) => {
-    if (sender.id !== chrome.runtime.id || message?.v !== 1) return
+  const unsubscribe = subscribe?.((message, reply = () => {}) => {
+    if (disposed || message?.v !== 1) return
     if (message.type === 'voice.connection-changed') {
-      epoch++; runtimeStatus = null; statusAt = 0; guard = null; guardConversation = null; removeMessageViews(); panel?.remove(); scheduleScan(); return
+      invalidate(); return
     }
     if (message.type === 'selection.open' && validId(message.id)) { pending = { id: message.id, ticket: documentTicket }; reply({ ticket: documentTicket }); return }
     if (message.type === 'selection.begin' && validId(message.id) && typeof message.key === 'string' && /^[a-f0-9]{64}$/.test(message.key)) {
@@ -178,4 +227,13 @@
     if (typeof value !== 'string' || Array.from(value).length > 8000) return
     showPanel(message.error ? 'HelloDog · 翻译未完成' : 'HelloDog · 选中文字翻译', value, [], '仅预览，不会自动填写或发送。发送保护仅适用于已识别的纯文本短信编辑器。')
   })
-})()
+  function dispose() {
+    if (restoreListener) { window.removeEventListener('pageshow', restoreListener); restoreListener = null }
+    if (disposed) return
+    disposed = true; invalidate(); clearTimeout(scanTimer); clearInterval(pollTimer)
+    observer.disconnect(); adapter.dispose(); bar?.remove(); bar = null
+    for (const remove of removers.splice(0)) remove()
+    unsubscribe?.(); logicalIds.clear()
+  }
+  return { dispose, invalidate }
+}

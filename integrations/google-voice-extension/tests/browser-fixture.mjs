@@ -51,7 +51,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.sent), ['Hello fixture'])
 
   // Verify actual production preview rendering and document-bound reply ticket.
-  await page.evaluate(() => { window.chrome = { runtime: { id: 'kigfaejcipjibnmnpinplphfldjahknn', onMessage: { addListener: fn => { window.extensionMessage = fn } } } } })
+  await page.evaluate(() => { window.chrome = { runtime: { id: 'kigfaejcipjibnmnpinplphfldjahknn', onMessage: { addListener: fn => { window.extensionMessage = fn }, removeListener: fn => { if (window.extensionMessage === fn) window.extensionMessage = null } } } } })
   await page.addScriptTag({ content: await readFile(new URL('content.js', root), 'utf8') })
   const proof = await page.evaluate(() => {
     let response; const id = crypto.randomUUID(), sender = { id: chrome.runtime.id }

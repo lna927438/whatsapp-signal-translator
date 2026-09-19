@@ -176,6 +176,32 @@ test('strict successful path dispatches translated text once and stays unconfirm
   assert.equal(value.state, 'uncertain'); assert.equal(s.sent(), 1); assert.equal(s.snapshot.text, 'Hello')
   await assert.rejects(s.guard.confirm()); assert.equal(s.sent(), 1)
 })
+test('context invalidation while translating discards the preview and preserves the original draft', async () => {
+  const f = guardSetup(); let finish
+  f.bridge.translate = () => new Promise(resolve => { finish = resolve })
+  const pending = f.guard.prepare()
+  await new Promise(resolve => setImmediate(resolve))
+  f.guard.invalidate(); finish({ enabled: true, text: 'Hello', requestId: 'fixture-invalidated' })
+  await assert.rejects(pending, /变化/)
+  assert.equal(f.replaced(), 0); assert.equal(f.sent(), 0)
+  await assert.rejects(f.guard.confirm(), /变化/)
+})
+test('context invalidation during authorization cannot replace or dispatch a draft', async () => {
+  const f = guardSetup(); await f.guard.prepare(); let finish
+  f.bridge.authorize = () => new Promise(resolve => { finish = resolve })
+  const pending = f.guard.confirm(); f.guard.invalidate()
+  finish({ authorized: true, requestId: 'gv-fixture-1', attempt: 1 })
+  await assert.rejects(pending, /变化/)
+  assert.equal(f.replaced(), 0); assert.equal(f.sent(), 0)
+})
+test('context invalidation during input settling cannot dispatch an already replaced draft', async () => {
+  const f = guardSetup(); await f.guard.prepare(); let finish
+  f.adapter.settle = () => new Promise(resolve => { finish = resolve })
+  const pending = f.guard.confirm(); await new Promise(resolve => setImmediate(resolve))
+  f.guard.invalidate(); finish()
+  await assert.rejects(pending, /变化/)
+  assert.equal(f.replaced(), 1); assert.equal(f.sent(), 0)
+})
 test('uncertain send blocks the same original and translated draft but permits another draft', async () => {
   const s = guardSetup(); await s.guard.prepare(); await s.guard.confirm()
   await assert.rejects(s.guard.prepare(), /待确认/)
