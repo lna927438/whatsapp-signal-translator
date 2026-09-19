@@ -90,11 +90,33 @@ export class GoogleVoiceOfficialWindow {
   private inFlight?: Promise<GoogleVoiceLaunchResult>
   private lastLaunch?: { result: GoogleVoiceLaunchResult; at: number }
 
-  constructor(userData: string, dependencies: Partial<GoogleVoiceLauncherDependencies> = {}) {
+  constructor(userData: string, dependencies: Partial<GoogleVoiceLauncherDependencies> = {}, private readonly preferredBrowser?: GoogleVoiceBrowser) {
     const root = localAbsoluteDirectory(userData)
     if (!root) throw new Error('Google Voice 数据目录无效，请检查 HelloDog 的储存设置。')
     this.profileRoot = path.join(root, 'official-browser')
     this.dependencies = { ...defaults, ...dependencies }
+  }
+
+  /** Privileged process metadata, never returned directly to the renderer. */
+  details(): { browser: GoogleVoiceBrowser; executable: string; profile: string } | undefined {
+    return this.selected && { ...this.selected, profile: path.join(this.profileRoot, this.selected.browser) }
+  }
+
+  async resolveDetails(): Promise<{ browser: GoogleVoiceBrowser; executable: string; profile: string } | undefined> {
+    if(this.dependencies.platform!=='win32')return
+    const deadline=performance.now()+this.dependencies.operationTimeoutMs
+    const choices=this.selected?[this.selected]:candidates(this.dependencies.environment).filter(item=>!this.preferredBrowser || item.browser===this.preferredBrowser)
+    for(const candidate of choices)if(await beforeDeadline(this.dependencies.isFile(candidate.executable),deadline)){
+      this.selected=candidate;return this.details()
+    }
+  }
+
+  async openExtensions(authorized:()=>boolean):Promise<void>{
+    requireAuthorized(authorized)
+    const details=await this.resolveDetails();requireAuthorized(authorized)
+    if(!details)throw new Error('找不到此窗口使用的浏览器。')
+    await beforeDeadline(this.dependencies.createDirectory(details.profile),performance.now()+this.dependencies.operationTimeoutMs);requireAuthorized(authorized)
+    await this.start(details.executable,details.profile,this.dependencies.launchTimeoutMs,details.browser)
   }
 
   open(authorized: () => boolean = () => true): Promise<GoogleVoiceLaunchResult> {
@@ -114,7 +136,7 @@ export class GoogleVoiceOfficialWindow {
   private async launch(authorized: () => boolean): Promise<GoogleVoiceLaunchResult> {
     if (this.dependencies.platform !== 'win32') throw new Error('Google Voice 独立窗口目前仅支持 Windows。')
     const deadline = performance.now() + this.dependencies.operationTimeoutMs
-    const choices = this.selected ? [this.selected] : candidates(this.dependencies.environment)
+    const choices = this.selected ? [this.selected] : candidates(this.dependencies.environment).filter(item => !this.preferredBrowser || item.browser === this.preferredBrowser)
     let installed = false
     for (const candidate of choices) {
       const exists = await beforeDeadline(this.dependencies.isFile(candidate.executable), deadline)
@@ -155,17 +177,21 @@ export class GoogleVoiceOfficialWindow {
     throw new Error('未找到已安装的 Chrome 或 Edge，请先安装其中一个浏览器，再打开 Google Voice。')
   }
 
-  private start(executable: string, profile: string, timeoutMs: number): Promise<void> {
+  private start(executable: string, profile: string, timeoutMs: number, managementBrowser?:GoogleVoiceBrowser): Promise<void> {
     let child: ChildProcess
     try {
       // Chromium's app and user-data-dir switches preserve the official site and
       // keep its persistent login separate without weakening browser security.
-      child = this.dependencies.spawn(executable, [
+      const args=managementBrowser?[
+        `--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check','--new-window',
+        managementBrowser==='chrome'?'chrome://extensions/':'edge://extensions/'
+      ]:[
         `--app=${OFFICIAL_URL}`,
         `--user-data-dir=${profile}`,
         '--no-first-run',
         '--no-default-browser-check'
-      ], { shell: false, detached: true, windowsHide: false, stdio: 'ignore' })
+      ]
+      child = this.dependencies.spawn(executable, args, { shell: false, detached: true, windowsHide: false, stdio: 'ignore' })
     } catch {
       return Promise.reject(new BrowserStartFailure())
     }

@@ -4,7 +4,7 @@ import {readFile,readdir,stat} from 'node:fs/promises'
 import {resolve,relative,extname} from 'node:path'
 import {fileURLToPath} from 'node:url'
 const root=fileURLToPath(new URL('../',import.meta.url)),findings=[]
-const textExtensions=new Set(['.ts','.js','.mjs','.cjs','.vue','.json','.yaml','.yml','.toml','.md','.html','.txt','.ps1','.sh','.sql','.env','.map'])
+const textExtensions=new Set(['.ts','.js','.mjs','.cjs','.cs','.vue','.json','.yaml','.yml','.toml','.md','.html','.txt','.ps1','.sh','.sql','.env','.map'])
 const git=args=>execFileSync('git',args,{cwd:root,maxBuffer:128*1024*1024,windowsHide:true})
 function inspect(content,path){
   const text=content.toString('utf8');if(text.includes('\0'))return
@@ -18,7 +18,7 @@ for(const file of git(['ls-files','-z']).toString().split('\0').filter(Boolean))
   try{inspect(await readFile(resolve(root,file)),file);sourceFiles++}catch(e){if(e.code!=='ENOENT')throw e}
 }
 async function tree(dir){try{for(const entry of await readdir(dir,{withFileTypes:true})){const path=resolve(dir,entry.name);if(entry.isDirectory())await tree(path);else if(textExtensions.has(extname(path))&&(await stat(path)).size<32*1024*1024){inspect(await readFile(path),relative(root,path));buildFiles++}}}catch(e){if(e.code!=='ENOENT')throw e}}
-for(const dir of ['src','server/worker/src','website/src','resources/security','security','scripts','.github','supabase/migrations','out','website/dist'])await tree(resolve(root,dir))
+for(const dir of ['src','server/worker/src','website/src','resources/security','resources/native','integrations/google-voice-extension','security','scripts','.github','supabase/migrations','out','website/dist'])await tree(resolve(root,dir))
 if(!process.argv.includes('--no-history')){
   const ids=new Set(git(['rev-list','--objects','--all']).toString().split('\n').filter(Boolean).filter(line=>textExtensions.has(extname(line.slice(41)))).map(line=>line.slice(0,40)))
   for(const id of ids){const size=Number(git(['cat-file','-s',id]).toString());if(size>8*1024*1024)continue;inspect(git(['cat-file','blob',id]),'git-blob:'+id);historyBlobs++}

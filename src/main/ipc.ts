@@ -37,6 +37,11 @@ import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread } from '
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
 import { createGoogleVoiceAccess } from './platforms/googleVoice/googleVoiceAccess'
+import { GoogleVoiceWorkspace } from './platforms/googleVoice/workspace'
+import { GoogleVoiceRecords, type GoogleVoiceData } from './platforms/googleVoice/windowRecords'
+import { GoogleVoiceExtensionBridge, GoogleVoicePipeServer, extensionId, type BridgeData } from './platforms/googleVoice/extensionBridge'
+import { createGoogleVoiceTranslator } from './platforms/googleVoice/translationBridge'
+import { GoogleVoiceDispatchLedger, type GoogleVoiceDispatchData } from './platforms/googleVoice/dispatchLedger'
 
 interface TranslatePayload {
   text: string
@@ -90,6 +95,21 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return { owner, authorized: () => onlineIdentity?.userId === owner && identityRevision === revision }
   }
   const openGoogleVoice = createGoogleVoiceAccess(app.getPath('userData'), taskIdentity)
+  const googleVoiceRecords = new GoogleVoiceRecords(new JsonStore<GoogleVoiceData>('google-voice-windows-v1.json',{windows:[]},true))
+  const googleVoice = new GoogleVoiceWorkspace(mainWindow,googleVoiceRecords,taskIdentity)
+  let workspaceSelection=0
+  let workspaceFocusWrites:Promise<unknown>=Promise.resolve()
+  const focusWorkspace=(action:()=>Promise<unknown>)=>{
+    const selection=++workspaceSelection
+    googleVoice.hide();whatsapp.hideAll();signalDesktop.focus('')
+    const work=workspaceFocusWrites.catch(()=>undefined).then(async()=>{
+      if(selection!==workspaceSelection || mainWindow.isDestroyed())return {state:'cancelled'}
+      try{return await action()}finally{
+        if(selection!==workspaceSelection){googleVoice.hide();whatsapp.hideAll();signalDesktop.focus('')}
+      }
+    })
+    workspaceFocusWrites=work;return work
+  }
 
   const voice = new VoiceRecognition(app.isPackaged ? join(process.resourcesPath,'voice') : join(app.getAppPath?.()||join(__dirname,'../..'),'resources/voice/bin'),join(app.getPath('temp'),'hellodog-voice'))
   ipcMain.handle('voice:recognize',async(event,id:string,bytes:Uint8Array)=>{
@@ -143,6 +163,41 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return cloudRead(path, (force, rejectedToken) => sessions.token(owner, force, rejectedToken))
   }
   const outgoingCredit = new OutgoingCredit(() => onlineIdentity?.userId || '', () => cloudRequest('/api/me'), id => translator.outgoingSettlement(id))
+  const googleVoiceBridge = new GoogleVoiceExtensionBridge(new JsonStore<BridgeData>('google-voice-pairs-v1.json',{pairs:[]},true),taskIdentity,
+    async(owner,id)=>{try{await googleVoiceRecords.get(owner,id);return true}catch{return false}},
+    createGoogleVoiceTranslator(translator,outgoingCredit,()=>settings.runtime(),new GoogleVoiceDispatchLedger(new JsonStore<GoogleVoiceDispatchData>('google-voice-dispatch-v1.json',{records:[]},true))))
+  const googleVoicePipe = new GoogleVoicePipeServer(googleVoiceBridge)
+  let googleVoiceRegistration:Promise<void> | undefined
+  const ensureGoogleVoiceBridge=()=>{
+    if(!googleVoiceRegistration){
+      const host=app.isPackaged?join(process.resourcesPath,'native/GoogleVoiceMessagingHost.exe'):join(app.getAppPath(),'resources/native/GoogleVoiceMessagingHost.exe')
+      googleVoiceRegistration=googleVoicePipe.register(app.getPath('userData'),host)
+      void googleVoiceRegistration.catch(()=>{googleVoiceRegistration=undefined})
+    }
+    return googleVoiceRegistration
+  }
+  mainWindow.once('closed',()=>{void googleVoicePipe.stop()})
+  ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
+  ipcMain.handle('google-voice:add',event=>{requireMain(event);return googleVoice.add()})
+  ipcMain.handle('google-voice:update',(event,id:string,patch:{label?:string})=>{requireMain(event);return googleVoice.update(id,patch)})
+  ipcMain.handle('google-voice:reorder',(event,ids:string[])=>{requireMain(event);return googleVoice.reorder(ids)})
+  ipcMain.handle('google-voice:focus',async(event,id?:string)=>{requireMain(event);taskIdentity();return focusWorkspace(async()=>{await ensureGoogleVoiceBridge();return googleVoice.focus(id)})})
+  ipcMain.handle('google-voice:close',(event,id:string)=>{requireMain(event);return googleVoice.close(id)})
+  ipcMain.handle('google-voice:refresh',(event,id:string)=>{requireMain(event);return focusWorkspace(()=>googleVoice.refresh(id))})
+  ipcMain.handle('google-voice:external',(event,id:string)=>{requireMain(event);return googleVoice.external(id)})
+  ipcMain.handle('google-voice:translation-setup',async(event,id:string)=>{
+    requireMain(event);const identity=taskIdentity();await googleVoiceRecords.get(identity.owner,id)
+    await ensureGoogleVoiceBridge()
+    const extensionDirectory=app.isPackaged?join(process.resourcesPath,'google-voice-extension'):join(app.getAppPath(),'integrations/google-voice-extension')
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    await googleVoice.extensionSetup(id)
+    if(!identity.authorized())throw new Error('登录状态已变化。')
+    const code=await googleVoiceBridge.code(id)
+    clipboard.writeText(code)
+    const error=await shell.openPath(extensionDirectory)
+    if(error)throw new Error('无法打开扩展目录，请检查安装是否完整。')
+    return {code,expiresInSeconds:300,extensionDirectory,extensionId,translationReady:false}
+  })
 
   const cloudBackedProfile = async () => {
     const local = await profile.get()
@@ -282,18 +337,22 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (event.sender.id !== mainWindow.webContents.id) throw new Error('登录会话只能由主窗口更新。')
     const previous = onlineIdentity
     onlineIdentity = identity?.userId ? identity : null
+    if (previous?.userId !== onlineIdentity?.userId) identityRevision += 1
+    // Update billing identity synchronously before any native-window teardown
+    // awaits, so no browser request can mix a new wallet with an old session.
+    translator.setOnlineSession(onlineIdentity?.userId, onlineIdentity?.accessToken)
     sessions.changed()
     outgoingCredit.invalidate()
     accountStatus.setIdentity(onlineIdentity?.userId, onlineIdentity?.accessToken)
     notifications.setIdentity()
     if (previous?.userId !== onlineIdentity?.userId) {
+      googleVoice.hide()
+      await googleVoice.detachAll()
       clearAccountUnread()
       signalDesktop.stopAll()
-      identityRevision += 1
       whatsapp.resetViews()
       signal.setOnlineUser(onlineIdentity?.userId || '')
     }
-    translator.setOnlineSession(onlineIdentity?.userId, onlineIdentity?.accessToken)
     if (onlineIdentity && (previous?.userId !== onlineIdentity.userId || previous?.username !== onlineIdentity.username || previous?.email !== onlineIdentity.email)) {
       const updated = { username: onlineIdentity.username, email: onlineIdentity.email }
       identityWrites = identityWrites.catch(() => {}).then(() => profile.updateIdentity(updated))
@@ -314,6 +373,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
   ipcMain.handle('auth:login', (_e, input: { identifier: string; password: string; remember?: boolean }) => auth.login(input))
   ipcMain.handle('auth:logout', async () => {
+    googleVoice.hide()
     signalDesktop.stopAll()
     onlineIdentity = null
     sessions.changed()
@@ -324,6 +384,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     translator.setOnlineSession(null, null)
     whatsapp.resetViews()
     signal.setOnlineUser('')
+    await googleVoice.detachAll()
     return auth.logout()
   })
   ipcMain.handle('auth:reset-password', (_e, input: { identifier: string; recoveryCode: string; newPassword: string }) => auth.resetPassword(input))
@@ -394,7 +455,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
   ipcMain.handle('profile:topup', async (_e, characters: number, note?: string) => { await requireAuth(); return profile.addCharacters(characters, note || '字符充值') })
 
-  ipcMain.handle('platform:focus', async (_e, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => {
+  ipcMain.handle('platform:focus', async (_e, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => focusWorkspace(async()=>{
     await requireAuth()
     signalDesktop.focus('')
     if (args.platform === 'signal' && args.accountId) {
@@ -409,9 +470,9 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     }
     else whatsapp.hideAll()
     return true
-  })
-  ipcMain.handle('ui:set-overlay-open', async (_e, open: boolean) => { await requireAuth(); whatsapp.setOverlayOpen(Boolean(open)); signalDesktop.setOverlayOpen(Boolean(open)); notifications.setOverlayOpen(Boolean(open)); return true })
-  ipcMain.handle('ui:set-content-bounds', (event, bounds) => { requireMain(event); whatsapp.setContentBounds(bounds); signalDesktop.setBounds(bounds) })
+  }))
+  ipcMain.handle('ui:set-overlay-open', (event, open: boolean) => { requireMain(event); whatsapp.setOverlayOpen(Boolean(open)); signalDesktop.setOverlayOpen(Boolean(open)); googleVoice.setOverlayOpen(Boolean(open)); notifications.setOverlayOpen(Boolean(open)); return true })
+  ipcMain.handle('ui:set-content-bounds', (event, bounds) => { requireMain(event); whatsapp.setContentBounds(bounds); signalDesktop.setBounds(bounds); googleVoice.setBounds(bounds) })
   ipcMain.handle('cloud:read', async (event, path: string) => {
     requireMain(event); await requireAuth()
     if (!['/api/me', '/api/wallet', '/api/usage', '/api/account-snapshot'].includes(path)) throw new Error('不支持此请求。')

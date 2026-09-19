@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-signal-translator",
-  "version": "0.5.15-beta.1",
+  "version": "0.5.15-beta.2",
   "private": true,
   "packageManager": "pnpm@11.5.2",
   "author": "lna927438",
@@ -64,8 +64,15 @@
         "from": "resources/native",
         "to": "native",
         "filter": [
-          "SignalWindowHost.exe"
+          "SignalWindowHost.exe",
+          "GoogleVoiceWindowHost.exe",
+          "GoogleVoiceMessagingHost.exe"
         ]
+      },
+      {
+        "from": "integrations/google-voice-extension",
+        "to": "google-voice-extension",
+        "filter": ["**/*", "!tests/**/*", "!node_modules/**/*"]
       },
       {
         "from": "integrations/notices",

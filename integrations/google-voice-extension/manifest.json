@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "HelloDog · Google Voice 翻译助手",
+  "version": "0.2.0",
+  "description": "翻译已识别会话的可见纯文本短信，发送前预览确认；保留待核对记录，不自动重发。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAws2GWBvXq5uWhHBJeIXshFMJjWSiR9hhJZa+IBzn2QMlLhfy4u+Hh4WCVtQSdISP+n9CRe4GJgLaxMoYjlF7jKthZ95iRLVcpjg2Hia4/DLUfxqGpaXCpNUv4R2lOQ/+9621OB+Afn0gCX1oa+32VZAzvMc9I8hip2YTi62YFVoifyv7xKOY6JdfC4ZoKqSuIPs2KtogWosxksy9gOx/BR+0C911diIe+RjRRqnG8Fc0TNsf0GooIyA1hkace985AYrlqAV0m73XygEay31AkHN5Bo9rsV1e+K9IQAjzIY16T1LohkLyTrjmjW/N237n4OU/pjLANn0dnPP33OhsvQIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://voice.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.mjs",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "HelloDog · Google Voice"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://voice.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "ISOLATED"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

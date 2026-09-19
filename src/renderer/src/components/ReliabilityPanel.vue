@@ -5,18 +5,20 @@ import { computed, onMounted, onUnmounted, ref, nextTick } from 'vue'
 import ChatHelp from './ChatHelp.vue'
 import VoiceFileTool from './VoiceFileTool.vue'
 const api = window.desktopAPI
-const props = defineProps<{ accounts: any[]; selectedId?: string; initialTab?: string }>()
+const props = defineProps<{ accounts: any[]; selectedId?: string; historyAccounts?: any[]; historySelectedId?: string; initialTab?: string }>()
 const emit = defineEmits(['close', 'updated'])
 const tab = ref(props.initialTab || 'history'), history = ref<any[]>([]), health = ref<any>(null), update = ref<any>(null)
 const busy = ref(false), message = ref(''), selected = ref<any>(null), correction = ref(''), source = ref(''), target = ref('')
-const filter = ref(props.selectedId || ''), confirmNew = ref(false), diagnostics = ref(''), selectedAccounts = ref<string[]>([])
+const filter = ref(props.historySelectedId ?? props.selectedId ?? ''), confirmNew = ref(false), diagnostics = ref(''), selectedAccounts = ref<string[]>([])
 const channel = ref('stable'), quickReplies = ref<string[]>([]), replySearch = ref('')
 const revisionTone = ref('')
 const retention = ref(0)
 async function saveRetention() { await run(async () => { await api.setContentRetention(Number(retention.value)); retention.value = (await api.contentRetention()).days }, t('本机保留期已处理。')) }
 const filteredReplies = computed(() => quickReplies.value.filter(text => text.toLowerCase().includes(replySearch.value.toLowerCase())))
 async function copyText(text: string) { await run(() => navigator.clipboard.writeText(text), t('已复制。')) }
-const names = computed(() => Object.fromEntries(props.accounts.map(item => [item.id, item.label])))
+const historyAccounts = computed(() => props.historyAccounts ?? props.accounts)
+const hasAdditionalHistoryAccounts = computed(() => historyAccounts.value.some(item => !props.accounts.some(account => account.id === item.id)))
+const names = computed(() => Object.fromEntries(historyAccounts.value.map(item => [item.id, item.label])))
 const rows = computed(() => history.value.filter(item => !filter.value || item.request.accountId === filter.value))
 const labels = computed<Record<string, string>>(() => ({ queued: t('待处理'), pending: t('待确认 / 待结算'), charged: t('已扣费'), free: t('免费处理'), cached: t('缓存恢复'), failed: t('失败，未扣费') }))
 const updateLabels = computed<Record<string,string>>(() => ({available:t('待下载'),downloading:t('下载中'),interrupted:t('下载中断，可续传'),verified:t('校验通过'),opened:t('安装结果待确认'),installed:t('已安装')}))
@@ -60,8 +62,8 @@ onUnmounted(() => { disposed = true; if (timer) clearInterval(timer) })
       <nav class="settings-tabs"><button v-for="item in [{id:'history',name:t('翻译记录')},{id:'runtime',name:t('账号与运行')},{id:'help',name:t('快捷操作')},{id:'privacy',name:t('隐私与诊断')},{id:'updates',name:t('版本与更新')}]" :key="item.id" :aria-pressed="tab === item.id" @click="tab = item.id">{{ item.name }}</button></nav>
       <div class="reliability-scroll">
         <section v-if="tab === 'history'">
-          <div class="reliability-actions"><select v-model="filter" :aria-label="t('翻译记录账号')"><option value="">{{ t('全部账号') }}</option><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.label }}</option></select><button class="secondary" :disabled="busy" @click="run(() => api.recoverTranslations(), t('已尝试核对原请求。仍待确认的翻译可展开明细查看原因；发送结果需在原对话核对。'))">{{ t('核对待确认请求') }}</button></div>
-          <p class="muted">{{ t('同一任务重试沿用原编号。缓存恢复不新增扣费。不同消息即使文字相同也独立处理。') }}</p>
+          <div class="reliability-actions"><select v-model="filter" :aria-label="t('翻译记录账号')"><option value="">{{ t('全部账号') }}</option><option v-for="account in historyAccounts" :key="account.id" :value="account.id">{{ account.label }}</option></select><button class="secondary" :disabled="busy" @click="run(() => api.recoverTranslations(), t('已尝试核对原请求。仍待确认的翻译可展开明细查看原因；发送结果需在原对话核对。'))">{{ t('核对待确认请求') }}</button></div>
+          <p class="muted">{{ hasAdditionalHistoryAccounts ? (uiLanguage === 'en' ? 'Retries keep the original request. Restoring a translation does not add a charge. Google Voice reuses translations for matching conversation, direction, text and full timestamp.' : '同一任务重试沿用原编号，缓存恢复不新增扣费。Google Voice 会复用同一会话、方向、正文和完整时间相同的历史译文。') : t('同一任务重试沿用原编号。缓存恢复不新增扣费。不同消息即使文字相同也独立处理。') }}</p>
           <div v-if="!selected" class="receipt-list"><button v-for="item in rows" :key="item.requestId" class="receipt-row" @click="openRecord(item)"><span><b>{{ names[item.request.accountId] || t('手动翻译') }} · {{ item.request.targetLanguage }}</b><small>{{ date(item.createdAt) }}{{ t(' · 原文 ') }}{{ item.sourceCharacters }}{{ t(' 字符') }}</small><code>{{ item.requestId }}</code></span><span><b>{{ item.lastAccess === 'cache' ? t('缓存命中，本次 0 字符') : item.lastAccess === 'correction' ? t('已手动修正，本次 0 字符') : labels[item.state] }}</b><small>{{ item.state === 'charged' ? t('原请求扣费 ') + item.chargedCharacters + t(' 字符') : labels[item.state] }}</small></span></button></div>
           <p v-if="!selected && !rows.length">{{ t('暂无本机翻译记录。旧版的云端记录仍可在个人中心查看。') }}</p>
           <label v-if="selected">{{ t('单条重译语气 ') }}<select v-model="revisionTone"><option value="">{{ t('沿用原请求') }}</option><option value="natural">{{ t('自然') }}</option><option value="business">{{ t('商务') }}</option></select><small>{{ t(' 仅在确认“作为新翻译”后使用。') }}</small></label>

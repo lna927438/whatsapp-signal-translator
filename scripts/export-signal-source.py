@@ -17,7 +17,7 @@ with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive
             count += 1
     paths = []
     for directory in ['src','scripts','security','.github/workflows','resources/security','resources/brand','tests','integrations/hellodog-source','integrations/notices',
-                      'server/worker/src','website/src','website/public','supabase/migrations']:
+                      'integrations/google-voice-extension','server/worker/src','website/src','website/public','supabase/migrations']:
         paths.extend((root / directory).rglob('*'))
     paths.extend((root / 'resources/native').glob('*.cs'))
     paths.extend((root / 'resources/voice').glob('*.json'))
@@ -31,7 +31,7 @@ with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive
     paths.extend(root / 'server/worker' / name for name in ['package.json','pnpm-lock.yaml','pnpm-workspace.yaml','wrangler.jsonc','worker-configuration.d.ts','README.md'])
     for source in sorted(set(paths)):
         name=source.relative_to(root)
-        if source.is_file() and not any(part in ['node_modules','verification','__pycache__','.git'] or part.startswith('.env') for part in name.parts):
+        if source.is_file() and not any(part in ['node_modules','verification','artifacts','__pycache__','.git'] or part.startswith('.env') for part in name.parts):
             archive.write(source,'hellodog/'+name.as_posix())
             count+=1
 with target.open('rb') as file: digest=hashlib.file_digest(file,'sha256').hexdigest()

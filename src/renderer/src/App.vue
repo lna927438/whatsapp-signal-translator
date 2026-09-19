@@ -6,6 +6,9 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AccountSetup from './components/AccountSetup.vue'
 import UiIcon from './components/UiIcon.vue'
 import GoogleVoiceLauncher from './components/GoogleVoiceLauncher.vue'
+import GoogleVoiceNavigation from './components/GoogleVoiceNavigation.vue'
+import GoogleVoiceContent from './components/GoogleVoiceContent.vue'
+import GoogleVoiceTranslationSetup from './components/GoogleVoiceTranslationSetup.vue'
 import AccountNavigation from './components/AccountNavigation.vue'
 import WorkspaceTools from './components/WorkspaceTools.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
@@ -20,6 +23,7 @@ import { AccountWrites } from './lib/accountWrites'
 import { RemoteSnapshot } from './lib/remoteSnapshot'
 import { prepareBeforeRestart } from './lib/restartState'
 import { orderedAccounts } from '../../shared/accountOrder'
+import { useGoogleVoiceWorkspace, type GoogleVoiceWindow } from './lib/googleVoiceWorkspace'
 
 const props = defineProps<{ userId: string }>()
 
@@ -87,6 +91,38 @@ async function showAccountFinder() { finderOpen.value = true; await window.deskt
 async function closeAccountFinder() { finderOpen.value = false; await window.desktopAPI.setOverlayOpen(false) }
 async function selectFromFinder(account: Account) { await closeAccountFinder(); await select(account) }
 const contentArea = ref<HTMLElement | null>(null)
+const googleVoice = useGoogleVoiceWorkspace({
+  api: () => window.desktopAPI,
+  beforeFocus: async () => { await nextTick(); if (contentArea.value) { const { x, y, width, height } = contentArea.value.getBoundingClientRect(); await window.desktopAPI.setContentBounds({ x, y, width, height }) } },
+  reportError: message => { error.value = message }
+})
+const { active: googleVoiceActive, windows: googleVoiceWindows, selectedId: googleVoiceSelectedId, state: googleVoiceState, message: googleVoiceMessage, busy: googleVoiceBusy } = googleVoice
+const translationHistoryAccounts = computed(() => [...accounts.value, ...googleVoiceWindows.value])
+const voiceRenaming = ref<GoogleVoiceWindow | null>(null), voiceNewLabel = ref(''), voiceRenameInput = ref<HTMLInputElement>()
+const voiceTranslationTarget = ref<GoogleVoiceWindow | null>(null)
+async function openGoogleVoiceTranslation() {
+  if (!googleVoice.selected.value) return
+  try { await window.desktopAPI.setOverlayOpen(true); voiceTranslationTarget.value = googleVoice.selected.value }
+  catch (e: any) { error.value = uiError(e?.message) }
+}
+async function closeGoogleVoiceTranslation() {
+  voiceTranslationTarget.value = null
+  try { await window.desktopAPI.setOverlayOpen(false) } catch (e: any) { error.value = uiError(e?.message) }
+}
+async function renameGoogleVoice(record: GoogleVoiceWindow) {
+  if (!record || googleVoiceBusy.value) return
+  try {
+    await window.desktopAPI.setOverlayOpen(true)
+    voiceRenaming.value = record; voiceNewLabel.value = record.label
+    await nextTick(); voiceRenameInput.value?.focus(); voiceRenameInput.value?.select()
+  } catch (e: any) { error.value = uiError(e?.message) }
+}
+async function finishGoogleVoiceRename(save: boolean) {
+  if (googleVoiceBusy.value) return
+  if (save && voiceRenaming.value && !await googleVoice.rename(voiceRenaming.value.id, voiceNewLabel.value)) return
+  voiceRenaming.value = null
+  try { await window.desktopAPI.setOverlayOpen(false) } catch (e: any) { error.value = uiError(e?.message) }
+}
 const platformFilter = ref('all'), groupFilter = ref('all')
 const unread = ref<Record<string, number>>({})
 const activePlatform = ref<'whatsapp'|'signal'>('whatsapp')
@@ -151,6 +187,7 @@ function updateBounds() {
 }
 watch(collapsed, async value => { localStorage.setItem('hellodog:sidebar-collapsed', String(value)); await nextTick(); updateBounds() })
 async function home() {
+  googleVoice.leave()
   selected.value = null
   await window.desktopAPI.focusPlatform({ platform: 'signal' })
 }
@@ -172,6 +209,7 @@ async function finishRename(save: boolean) {
 function onShortcut(event: KeyboardEvent) {
   if (event.key === 'F5' || (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'r') {
     event.preventDefault()
+    if (googleVoiceActive.value) { void googleVoice.refresh(); return }
     if (selected.value) void window.desktopAPI.refreshAccount(selected.value.id).catch((e: any) => { error.value = e?.message || t('刷新未完成，草稿已保留。') })
     return
   }
@@ -179,6 +217,8 @@ function onShortcut(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key === '/') { event.preventDefault(); void openReliability('help'); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); collapsed.value = !collapsed.value }
   if (event.key === 'Escape') {
+    if (voiceTranslationTarget.value) { void closeGoogleVoiceTranslation(); return }
+    if (voiceRenaming.value) { void finishGoogleVoiceRename(false); return }
     if (showNotices.value) { void closeNotices(); return }
     if (showQuality.value) { void closeQuality(); return }
     if (showReliability.value) void closeReliability()
@@ -292,6 +332,7 @@ async function addSignalRecord() { await openSetup('signal') }
 
 async function select(account: Account) {
   const started = performance.now()
+  googleVoice.leave()
   selected.value = account
   activePlatform.value = account.platform
   lastAccounts.set(account.platform, account.id)
@@ -318,7 +359,7 @@ function setFeedback(state: 'idle'|'saving'|'saved'|'error', message: string) {
 }
 
 const accountWrites = new AccountWrites()
-const removeRestartPreparation = prepareBeforeRestart(() => accountWrites.flush())
+const removeRestartPreparation = prepareBeforeRestart(async () => { await accountWrites.flush(); await googleVoice.flush() })
 onUnmounted(removeRestartPreparation)
 function mergeAccountFields(id: string, fields: Record<string, unknown>) {
   if (selected.value?.id === id) selected.value = { ...selected.value, ...fields }
@@ -485,6 +526,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   disposed = true
+  googleVoice.dispose()
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('focus', invalidateProfile)
   window.removeEventListener('online', onNetworkRecovery); window.removeEventListener('offline', invalidateProfile)
@@ -498,14 +540,14 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell compact-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-theme="settings?.workspaceTheme || 'charcoal'" :data-platform="selected?.platform || 'whatsapp'" :style="{gridTemplateColumns: (navigationPosition === 'side' ? 208 : 52) + 'px minmax(0,1fr)'}">
+  <div class="app-shell compact-shell" :class="{ 'sidebar-collapsed': collapsed }" :data-theme="settings?.workspaceTheme || 'charcoal'" :data-platform="googleVoiceActive ? 'google-voice' : selected?.platform || 'whatsapp'" :style="{gridTemplateColumns: (!googleVoiceActive && navigationPosition === 'side' ? 208 : 52) + 'px minmax(0,1fr)'}">
     <aside class="sidebar compact-account-sidebar" :aria-label="t('账号与应用导航')">
       <nav class="platform-rail" :aria-label="t('应用种类')">
         <button class="brand compact-tool" @click="home" :title="t('HelloDog 工作台')" :aria-label="t('HelloDog 工作台')"><img src="/hellodog-icon.webp" alt="HelloDog" /></button>
-        <button v-for="platform in (['whatsapp','signal'] as const)" :key="platform" class="platform-entry compact-tool" :class="{active:selected && activePlatform === platform}" :title="platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" :aria-label="(platform === 'whatsapp' ? 'WhatsApp' : 'Signal') + (platformUnread(platform) ? ' · ' + platformUnread(platform) + t(' 条未读') : '')" @click="choosePlatform(platform)" @contextmenu.prevent="platformMenu(platform)">
+        <button v-for="platform in (['whatsapp','signal'] as const)" :key="platform" class="platform-entry compact-tool" :class="{active:!googleVoiceActive && selected && activePlatform === platform}" :title="platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" :aria-label="(platform === 'whatsapp' ? 'WhatsApp' : 'Signal') + (platformUnread(platform) ? ' · ' + platformUnread(platform) + t(' 条未读') : '')" @click="choosePlatform(platform)" @contextmenu.prevent="platformMenu(platform)">
           <img :src="`./${platform}.svg`" alt="" /><span v-if="platformUnread(platform)" class="unread-badge">{{ platformUnread(platform) > 99 ? '99+' : platformUnread(platform) }}</span>
         </button>
-        <GoogleVoiceLauncher @error="error = $event" />
+        <GoogleVoiceLauncher :active="googleVoiceActive" @select="googleVoice.enter" />
         <button class="compact-tool" @click="showAccountFinder" :title="t('搜索账号 (Ctrl+K)')" :aria-label="t('搜索账号')"><UiIcon name="search" /></button>
         <div class="utility-spacer"></div>
         <template v-if="!collapsed">
@@ -518,7 +560,7 @@ onUnmounted(() => {
         <button class="compact-tool" @click="openSettings" :title="t('设置与连接诊断')" :aria-label="t('设置与连接诊断')"><UiIcon name="settings" /></button>
         <button class="compact-tool" :aria-expanded="!collapsed" :title="t('切换功能栏')" :aria-label="t('切换功能栏')" @click="collapsed = !collapsed"><UiIcon name="more" /></button>
       </nav>
-      <AccountNavigation v-if="navigationPosition === 'side'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="side" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)" />
+      <AccountNavigation v-if="!googleVoiceActive && navigationPosition === 'side'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="side" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)" />
     </aside>
     <TranslationQualityEditor v-if="showQuality && selected" :account="selected" :conversation="selectedConversation || undefined" @close="closeQuality" @updated="qualityUpdated" /><div v-if="finderOpen" class="compact-finder-backdrop" @click.self="closeAccountFinder" @keydown.esc.stop="closeAccountFinder">
       <section class="compact-finder" role="dialog" aria-modal="true" :aria-label="t('搜索和添加账号')">
@@ -530,30 +572,41 @@ onUnmounted(() => {
       </section>
     </div>
     <div class="workspace">
-      <AccountNavigation v-if="navigationPosition === 'top'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="top" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)"><template #tools><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></template></AccountNavigation>
-      <header v-if="navigationPosition === 'side' || !selected" class="workspace-header compact-workspace-header"><h1>{{ selected?.note || selected?.label || t('你的聊天，世界都听得懂。') }}</h1><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></header>
-      <section v-if="selected" class="account-toolbar" :class="{ 'toolbar-compact': selected.toolbarCollapsed }" :inert="selected.toolbarCollapsed">
+      <GoogleVoiceNavigation v-if="googleVoiceActive" :windows="googleVoiceWindows" :selected-id="googleVoiceSelectedId" :busy="googleVoiceBusy" :loading="googleVoiceState === 'loading'" @select="googleVoice.focus($event.id)" @add="googleVoice.add" @rename="renameGoogleVoice" @close="googleVoice.close($event.id)" @reorder="googleVoice.reorder" @refresh="googleVoice.refresh" @external="googleVoice.external" @translation="openGoogleVoiceTranslation" />
+      <div v-if="googleVoiceActive" class="voice-protection-status" role="status"><span class="voice-protection-copy">{{ uiLanguage === 'en' ? 'SMS translation beta: check the helper’s protection status on the page. If a send is unconfirmed, check the conversation before trying again.' : '短信翻译测试版：请以网页助手显示的保护状态为准。发送结果不明时，先核对会话再操作。' }}</span><span class="quota-text" :class="{ low: quotaLow }" aria-live="polite" :title="quotaLow ? t('剩余字符不足 50,000，请及时补充；字符用完后无法发送翻译消息。') : undefined">{{ t('余 ') }}{{ remainingCharsLabel }}{{ t(' 字符') }}<b v-if="quotaLow">{{ t(' · 余额不足 50,000') }}</b></span></div>
+      <AccountNavigation v-if="!googleVoiceActive && navigationPosition === 'top'" :accounts="platformAccounts" :ordering="orderingAccounts" @reorder="reorderAccounts" :selected-id="selected?.id" :unread="unread" :platform="activePlatform" position="top" @select="select" @menu="accountMenu" @add="openSetup(activePlatform)" @search="showAccountFinder" @remove="remove" @remark="account => renameAccount(account,true)" @caption="account => renameAccount(account,true,true)"><template #tools><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></template></AccountNavigation>
+      <header v-if="!googleVoiceActive && (navigationPosition === 'side' || !selected)" class="workspace-header compact-workspace-header"><h1>{{ selected?.note || selected?.label || t('你的聊天，世界都听得懂。') }}</h1><WorkspaceTools :selected="Boolean(selected)" :collapsed="selected?.toolbarCollapsed" :line="lineLabel" :offline="runtimeHealth?.online === false" @settings="openSettings" @help="openReliability('help')" @toggle="selected && patchSelected({ toolbarCollapsed: !selected.toolbarCollapsed })" @menu="selected && accountMenu(selected)" /></header>
+      <section v-if="!googleVoiceActive && selected" class="account-toolbar" :class="{ 'toolbar-compact': selected.toolbarCollapsed }" :inert="selected.toolbarCollapsed">
         <div class="language-control"><label><span>{{ t('我使用的语言') }}</span><select :value="localLanguage" @change="setStringField('localLanguage', $event)"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ languageName(language) }}</option></select></label><span class="language-arrow">⇄</span><label><span>{{ contactLabel || t('对方的语言') }}</span><select :value="targetLanguage" @change="setTargetLanguage"><option v-for="language in languages.filter(x => x.code !== 'auto')" :key="language.code" :value="language.code">{{ languageName(language) }}</option></select></label></div>
         <div class="translation-toggles"><label><input type="checkbox" :checked="receiveAutoTranslate" @change="patchSelected({ receiveAutoTranslate: !receiveAutoTranslate })" />{{ t('接收翻译') }}</label><label><input type="checkbox" :checked="sendAutoTranslate" @change="patchSelected({ sendAutoTranslate: !sendAutoTranslate })" />{{ t('发送翻译') }}</label><label><input type="checkbox" :checked="blockChineseSend" disabled :title="t('外语消息仍含中文时禁止发送，翻译失败保留草稿。')" />{{ t('拦截中文原文') }}</label><label><input type="checkbox" :checked="groupTranslate" @change="patchSelected({ groupTranslate: !groupTranslate })" />{{ t('群组翻译') }}</label></div>
         <button class="text-button" @click="openQuality" :title="t('设置当前账号或联系人的语气与术语')">{{ t('术语') }}</button><label class="tone-control">{{ t('语气') }}<select :value="selected.translationQuality?.tone || ''" @change="patchSelected({ translationQuality: { ...selected?.translationQuality, tone: ($event.target as HTMLSelectElement).value || undefined } })"><option value="">{{ t('跟随全局') }}</option><option value="natural">{{ t('自然') }}</option><option value="business">{{ t('商务') }}</option></select></label><label class="tone-control" :title="t('只影响当前账号；自动翻译未缓存的历史消息会按正常规则计费')">{{ t('历史') }}<select :value="selected.historyMode || ''" @change="patchSelected({ historyMode: ($event.target as HTMLSelectElement).value || undefined })"><option value="">{{ t('跟随全局') }}</option><option value="new">{{ t('新消息自动') }}</option><option value="visible">{{ t('可见消息自动') }}</option><option value="manual">{{ t('点击翻译') }}</option></select></label><div class="display-controls" role="group" :aria-label="t('译文显示')"><label>{{ t('译文字号') }}<select :value="fontSize" @change="setNumberField('fontSize', $event)"><option v-for="size in [12,13,14,15,16,18]" :key="size" :value="size">{{ size }} px</option></select></label><label :title="t('译文颜色')">{{ t('颜色') }}<input type="color" :value="translationColor" @change="setStringField('translationColor', $event)" /></label><button class="text-button" @click="patchSelected({ translationsVisible: selected.translationsVisible === false })">{{ selected.translationsVisible === false ? t('显示译文') : t('隐藏译文') }}</button></div>
       </section>
-      <div v-if="selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ uiError(selectedLiveStatus.message) }}</span></div><button v-if="selectedLiveStatus.state === 'error'" class="text-button" @click="openReliability('history')">{{ t('翻译恢复') }}</button><button v-if="runtimeHealth?.pendingSends?.some((task:any) => task.accountId === selected?.id)" class="text-button" @click="openReliability('runtime')">{{ t('处理未发送消息') }}</button><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" :title="t('查看代理设置')">{{ t('独立代理已配置') }}</button><span class="save-feedback" :class="controlFeedback.state" role="status">{{ uiError(controlFeedback.message) }}</span><button v-if="undoChange?.id === selected.id" class="text-button" @click="undoAccountChange">{{ t('撤销修改') }}</button><span class="quota-text" :class="{ low: quotaLow }" role="status" aria-live="polite" :title="quotaLow ? t('剩余字符不足 50,000，请及时补充；字符用完后无法发送翻译消息。') : undefined">{{ t('余 ') }}{{ remainingCharsLabel }}{{ t(' 字符') }}<b v-if="quotaLow">{{ t(' · 余额不足 50,000') }}</b></span></div>
-      <main ref="contentArea" class="content" :class="{ 'signal-content': selectedIsSignal }">
-        <div v-if="selected?.runtimeMode === 'paused'" class="paused-account"><h2>{{ t('此账号已暂停') }}</h2><p>{{ t('恢复后继续收消息和查询原翻译任务。') }}</p><button class="primary" @click="openReliability('runtime')">{{ t('管理账号运行') }}</button></div>
-        <SignalNativeView v-else-if="selectedIsSignal && selected?.signalEngine === 'desktop'" :key="'desktop-' + selected!.id" :account-record="selected!" @changed="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
-        <SignalView v-else-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
-        <div v-else-if="!selected" class="welcome"><section class="app-center"><h2>{{ t('应用中心') }}</h2><div class="platform-cards"><button @click="addWhatsApp"><img :src="'./whatsapp.svg'" alt="" />WhatsApp<small>{{ accounts.filter(a => a.platform === 'whatsapp').length }}{{ t(' 个账号 · 添加窗口') }}</small></button><button @click="addSignalRecord"><img :src="'./signal.svg'" alt="" />Signal<small>{{ accounts.filter(a => a.platform === 'signal').length }}{{ t(' 个账号 · 添加窗口') }}</small></button></div></section>
+      <div v-if="!googleVoiceActive && selected" class="workspace-status"><div class="live-status" :class="selectedLiveStatus.state"><i></i><span>{{ uiError(selectedLiveStatus.message) }}</span></div><button v-if="selectedLiveStatus.state === 'error'" class="text-button" @click="openReliability('history')">{{ t('翻译恢复') }}</button><button v-if="runtimeHealth?.pendingSends?.some((task:any) => task.accountId === selected?.id)" class="text-button" @click="openReliability('runtime')">{{ t('处理未发送消息') }}</button><button v-if="selected.proxy?.enabled" class="proxy-chip" @click="openSetup(selected.platform, selected)" :title="t('查看代理设置')">{{ t('独立代理已配置') }}</button><span class="save-feedback" :class="controlFeedback.state" role="status">{{ uiError(controlFeedback.message) }}</span><button v-if="undoChange?.id === selected.id" class="text-button" @click="undoAccountChange">{{ t('撤销修改') }}</button><span class="quota-text" :class="{ low: quotaLow }" role="status" aria-live="polite" :title="quotaLow ? t('剩余字符不足 50,000，请及时补充；字符用完后无法发送翻译消息。') : undefined">{{ t('余 ') }}{{ remainingCharsLabel }}{{ t(' 字符') }}<b v-if="quotaLow">{{ t(' · 余额不足 50,000') }}</b></span></div>
+      <main ref="contentArea" class="content" :class="{ 'signal-content': !googleVoiceActive && selectedIsSignal }">
+        <div v-if="selected?.runtimeMode === 'paused'" v-show="!googleVoiceActive" class="paused-account"><h2>{{ t('此账号已暂停') }}</h2><p>{{ t('恢复后继续收消息和查询原翻译任务。') }}</p><button class="primary" @click="openReliability('runtime')">{{ t('管理账号运行') }}</button></div>
+        <SignalNativeView v-show="!googleVoiceActive" v-else-if="selectedIsSignal && selected?.signalEngine === 'desktop'" :key="'desktop-' + selected!.id" :account-record="selected!" @changed="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
+        <SignalView v-show="!googleVoiceActive" v-else-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
+        <div v-else-if="!selected" v-show="!googleVoiceActive" class="welcome"><section class="app-center"><h2>{{ t('应用中心') }}</h2><div class="platform-cards"><button @click="addWhatsApp"><img :src="'./whatsapp.svg'" alt="" />WhatsApp<small>{{ accounts.filter(a => a.platform === 'whatsapp').length }}{{ t(' 个账号 · 添加窗口') }}</small></button><button @click="addSignalRecord"><img :src="'./signal.svg'" alt="" />Signal<small>{{ accounts.filter(a => a.platform === 'signal').length }}{{ t(' 个账号 · 添加窗口') }}</small></button></div></section>
           <div class="welcome-copy"><span class="eyebrow">SAY HELLO, GO FURTHER.</span><h2>{{ t('让交流少一点距离。') }}<br /><em>{{ t('多一点 Hello。') }}</em></h2><p>{{ t('连接你的聊天账号，用熟悉的语言，聊更远的世界。') }}</p><div class="welcome-actions"><button class="primary" @click="addWhatsApp"><UiIcon name="plus" />{{ t('添加 WhatsApp') }}</button><button class="secondary" @click="addSignalRecord()">{{ t('添加 Signal') }}</button></div><small>{{ t('已有账号？从左侧选择，继续上一次对话。') }}</small></div><img class="welcome-dog" src="/hellodog-icon.webp" :alt="t('HelloDog 小狗')" />
           <div class="welcome-cards"><button @click="openSettings"><UiIcon name="signal" /><b>{{ t('先检查连接') }}</b><p>{{ t('检测线路、登录与翻译服务，定位问题。') }}</p><span>{{ t('打开连接诊断 →') }}</span></button><button @click="openProfile"><UiIcon name="user" /><b>{{ t('字符余额，一目了然') }}</b><p>{{ t('剩余 ') }}{{ remainingCharsLabel }}{{ t(' 字符，查看真实消费记录。') }}</p><span>{{ t('打开个人中心 →') }}</span></button><article><UiIcon name="shield" /><b>{{ t('恢复中断的消息') }}</b><p>{{ t('失败保留草稿，发送结果不明确时由你确认。') }}</p><span>{{ t('账号右键 · 更多实用操作') }}</span></article></div>
         </div>
+        <GoogleVoiceContent v-if="googleVoiceActive" :state="googleVoiceState" :message="googleVoiceMessage" :has-windows="googleVoiceWindows.length > 0" :busy="googleVoiceBusy" @add="googleVoice.add" @retry="googleVoice.retry" />
       </main>
     </div>
     <AccountSetup v-if="setup" :platform="setup.platform" :account="setup.account" :languages="languages" :owner="props.userId" @close="closeSetup" @saved="setupSaved" />
     <NotificationCenter v-if="showNotices" :snapshot="notices" @close="closeNotices" @updated="value => notices=value" />
     <SettingsPanel v-if="showSettings" @close="closeSettings" @updated="reloadSettings" />
-    <ReliabilityPanel v-if="showReliability" :accounts="accounts" :selected-id="selected?.id" :initial-tab="reliabilityTab" @close="closeReliability" @updated="reload" />
+    <ReliabilityPanel v-if="showReliability" :accounts="accounts" :selected-id="googleVoiceActive ? undefined : selected?.id" :history-accounts="translationHistoryAccounts" :history-selected-id="googleVoiceActive ? googleVoiceSelectedId : selected?.id" :initial-tab="reliabilityTab" @close="closeReliability" @updated="reload" />
     <PersonalCenter v-if="showProfile" @close="closeProfile" @updated="onProfileUpdated" />
+    <GoogleVoiceTranslationSetup v-if="voiceTranslationTarget" :window-id="voiceTranslationTarget.id" :window-label="voiceTranslationTarget.label" @close="closeGoogleVoiceTranslation" />
     <div v-if="renaming" class="modal-backdrop" @click.self="finishRename(false)"><form class="panel rename-panel" @submit.prevent="finishRename(true)"><header><h2>{{ editingCaption ? t('编辑红色备注') : editingRemark ? t('编辑备注') : t('给账号取个名字') }}</h2><button type="button" @click="finishRename(false)" :aria-label="t('关闭')">×</button></header><label>{{ editingCaption ? t('独立红色备注') : editingRemark ? t('账号备注') : t('账号名称') }}<input v-model="newLabel" :maxlength="editingCaption ? 120 : editingRemark ? 80 : 60" :required="!editingRemark" autofocus /></label><footer><button type="button" class="secondary" @click="finishRename(false)">{{ t('取消') }}</button><button class="primary" type="submit">{{ editingRemark ? t('保存备注') : t('保存名称') }}</button></footer></form></div>
+    <div v-if="voiceRenaming" class="modal-backdrop" @click.self="finishGoogleVoiceRename(false)" @keydown.esc.stop="finishGoogleVoiceRename(false)"><form class="panel rename-panel" role="dialog" aria-modal="true" :aria-label="uiLanguage === 'en' ? 'Rename Google Voice window' : '重命名 Google Voice 窗口'" @submit.prevent="finishGoogleVoiceRename(true)"><header><h2>{{ uiLanguage === 'en' ? 'Rename window' : '重命名窗口' }}</h2><button type="button" :disabled="googleVoiceBusy" @click="finishGoogleVoiceRename(false)" :aria-label="t('关闭')">×</button></header><label>{{ uiLanguage === 'en' ? 'Window name' : '窗口名称' }}<input ref="voiceRenameInput" v-model="voiceNewLabel" maxlength="60" required :disabled="googleVoiceBusy" /></label><footer><button type="button" class="secondary" :disabled="googleVoiceBusy" @click="finishGoogleVoiceRename(false)">{{ t('取消') }}</button><button class="primary" type="submit" :disabled="googleVoiceBusy || !voiceNewLabel.trim()">{{ t('保存名称') }}</button></footer></form></div>
     <div v-if="error" class="toast" role="alert">{{ error }}<button @click="error = ''" :aria-label="t('关闭提示')">×</button></div>
   </div>
 </template>
+
+<style scoped>
+.voice-protection-status { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 7px 12px; border-bottom: 1px solid var(--border); background: #2b241b; color: #e7c593; font-size: 11px; line-height: 1.5; }
+.voice-protection-copy { flex: 1 1 520px; min-width: 0; overflow-wrap: anywhere; }
+.voice-protection-status .quota-text { flex: 0 1 auto; max-width: 100%; margin-left: auto; white-space: normal; overflow-wrap: anywhere; }
+</style>

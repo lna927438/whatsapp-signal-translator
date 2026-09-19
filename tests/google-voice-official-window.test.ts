@@ -61,6 +61,26 @@ test('launches only the official site in an installed Chrome with a separate per
   assert.equal(h.probes.length, 1)
 })
 
+test('read-only browser resolution allows reusing a verified surviving window without spawning',async()=>{
+  const h=harness(),details=await h.launcher.resolveDetails()
+  assert.equal(details.executable,CHROME);assert.equal(h.calls.length,0);assert.equal(h.directories.length,0)
+  assert.equal(details.profile,'D:\\HelloDog\\users\\owner-hash\\official-browser\\chrome')
+})
+
+test('extension setup opens only the selected browser profile and fixed management page',async()=>{
+  const h=harness();await h.launcher.openExtensions(()=>true)
+  assert.equal(h.calls[0].file,CHROME)
+  assert.deepEqual(h.calls[0].args,['--user-data-dir=D:\\HelloDog\\users\\owner-hash\\official-browser\\chrome','--no-first-run','--no-default-browser-check','--new-window','chrome://extensions/'])
+  assert.equal(h.calls[0].options.shell,false)
+})
+
+test('persisted Edge choice cannot silently change to Chrome',async()=>{
+  const h=harness(),launcher=new GoogleVoiceOfficialWindow(PROFILE,h.dependencies,'edge')
+  h.installed.delete(EDGE)
+  assert.equal(await launcher.resolveDetails(),undefined)
+  await assert.rejects(launcher.open());assert.equal(h.calls.length,0)
+})
+
 test('prefers a per-user Chrome installation before falling back to installed Edge', async () => {
   const h = harness()
   h.installed.delete(CHROME)
