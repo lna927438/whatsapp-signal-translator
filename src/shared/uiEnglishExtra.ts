@@ -1,6 +1,7 @@
 export const uiEnglishExtra: Readonly<Record<string,string>> = {
   '拖动排序；双击编辑备注':'Drag to reorder; double-click to edit the note',
   '账号顺序未保存，请重试。':'The account order was not saved. Try again.',
+  '窗口设置未保存，请重试。':'Window settings were not saved. Try again.',
   '账号顺序无效，请重试。':'The account order is invalid. Try again.',
   '账号列表已变化，请重试。':'The account list has changed. Try again.',
   '深色主题':'Dark theme',
