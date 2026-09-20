@@ -255,6 +255,12 @@ const hashUuid = value => `${value.slice(0,8)}-${value.slice(8,12)}-5${value.sli
 const imageTypes = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/bmp'])
 const imageFiles = files => files.length > 0 && files.length <= 10 && files.every(file => imageTypes.has(file.type) && file.size > 0 && (file.type !== 'image/gif' || file.size <= 2 * 1024 * 1024)) && files.reduce((total, file) => total + file.size, 0) <= 20 * 1024 * 1024
 const sameAdapterMedia = (a, b) => JSON.stringify(a?.media) === JSON.stringify(b?.media) && a?.mediaRevision === b?.mediaRevision
+const encodedBytes = bytes => { const parts = []; for (let index = 0; index < bytes.length; index += 0x8000) parts.push(String.fromCharCode(...bytes.subarray(index, index + 0x8000))); return btoa(parts.join('')) }
+const cssImageToken = value => {
+  const match = value.match(/^url\(["']?data:(image\/(?:jpeg|png|gif|bmp));base64,([A-Za-z0-9+/=]+)["']?\)$/i)
+  return match ? match[1].toLowerCase() + ';' + match[2] : null
+}
+const identicalPreviewTokens = (a, b) => a.length === b.length && a.every((value, index) => value === b[index])
 const recipientNumber = text => {
   const value = (text || '').replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim()
   if (!/^[+()\d\s.\-]+$/.test(value)) return null
@@ -277,43 +283,138 @@ class GoogleVoiceDomAdapter {
   constructor(document, location) {
     this.document = document; this.location = location; this.current = null
     this.revisions = new WeakMap(); this.attachments = new WeakMap(); this.allowedButton = null
-    this.settleCancels = new Set(); this.disposed = false
+    this.settleCancels = new Set(); this.mediaTimers = new Set(); this.disposed = false
     this.onInput = event => {
       if (event.target?.matches?.('gv-message-entry textarea.message-input')) this.revisions.set(event.target, (this.revisions.get(event.target) || 0) + 1)
       if (event.type === 'change' && event.target?.matches?.('gv-message-entry input[type="file"]')) {
         const files = [...event.target.files || []]
-        if (files.length && !imageFiles(files)) { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation() }
+        if (files.length && !imageFiles(files)) {
+          event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
+          // The site never receives this rejected selection. Preserve its
+          // existing draft, and do not leave rejected input.files to be seeded
+          // as a future attachment after the user continues typing.
+          event.target.value = ''
+          event.target.dispatchEvent(new this.document.defaultView.Event('hellodog-voice-attachment-rejected', { bubbles: true }))
+          return
+        }
+        if (!files.length) return
         this.captureFiles(event.target.closest('gv-message-entry'), files)
       }
     }
     document.defaultView.addEventListener('input', this.onInput, true)
     document.defaultView.addEventListener('change', this.onInput, true)
+    this.onAttachmentRemove = event => {
+      const remove = event.target?.closest?.('gv-message-entry gv-send-attachment-list span.close-icon-overlay[role="button"]')
+      const record = remove && this.attachments.get(remove.closest('gv-message-entry'))
+      if (record) record.removeRequested = true
+    }
+    document.defaultView.addEventListener('click', this.onAttachmentRemove, true)
+  }
+  cssPreviews(entry) {
+    const roots = [...entry.querySelectorAll('gv-send-attachment-list')]
+    if (!roots.length) return null
+    if (roots.length !== 1 || !roots[0].getClientRects().length) return { error: '图片编辑器尚未就绪，请保留草稿。' }
+    const root = roots[0], grid = one(root, 'div.container[role="grid"]')
+    if (!grid) return { error: '当前图片预览结构尚未识别，请保留草稿。' }
+    const cells = [...grid.querySelectorAll('[role="gridcell"]')]
+    if (cells.some(cell => !cell.matches('div.item') || cell.parentElement?.getAttribute('role') !== 'row')) return { error: '当前图片预览结构尚未识别，请保留草稿。' }
+    const previews = []
+    for (const cell of cells) {
+      const content = one(cell, 'div.content'), remove = one(cell, 'span.close-icon-overlay[role="button"]')
+      if (!content || !remove) return { error: '图片预览尚未就绪，请保留草稿。' }
+      const background = this.document.defaultView.getComputedStyle(content).backgroundImage
+      previews.push({ content, remove, token: cssImageToken(background), pending: !background || background === 'none' })
+    }
+    return { root, previews }
+  }
+  mediaReady(entry) { if (!this.disposed && entry.isConnected) entry.dispatchEvent(new this.document.defaultView.Event('hellodog-voice-draft-ready', { bubbles: true })) }
+  clearAttachments(entry, record) {
+    // Retire the record, including all original bytes. Pending File/decode work
+    // compares record identity and cannot resurrect a removed attachment.
+    record.files = []; record.knownFiles = []; record.selectedTokens = []; record.initialTokens = []; record.initialPreviews = []
+    record.media = undefined; record.cssMedia = undefined; record.cssSignature = undefined; record.previewSignature = ''
+    const cleared = { revision: record.revision + 1, files: [], knownFiles: [], selectedTokens: [], initialTokens: [], initialPreviews: [], previewSignature: '', cleared: true, seenPreview: false, selectionPending: false, work: false, error: '' }
+    this.attachments.set(entry, cleared)
+    return cleared
   }
   captureFiles(entry, files) {
-    const previous = this.attachments.get(entry), record = { revision: (previous?.revision || 0) + 1, files, work: true, media: undefined, seenPreview: false, cleared: false, previewSignature: '', initialPreviews: [...entry.querySelectorAll('img')].map(image => ({ image, src: image.currentSrc || image.getAttribute('src') || '' })), previousFingerprint: previous?.media?.fingerprint, error: '' }
+    if (!imageFiles(files)) return
+    const previous = this.attachments.get(entry), css = this.cssPreviews(entry)
+    const initialTokens = css?.previews?.map(preview => preview.token) || []
+    const known = (previous?.knownFiles || []).filter(file => initialTokens.includes(file.token))
+    const record = { revision: (previous?.revision || 0) + 1, files, knownFiles: known, selectedTokens: [], initialTokens: previous ? initialTokens : [], selectionPending: true, deadline: Date.now() + 8000, work: true, media: undefined, seenPreview: false, cleared: false, previewSignature: '', initialPreviews: [...entry.querySelectorAll('img')].map(image => ({ image, src: image.currentSrc || image.getAttribute('src') || '' })), previousFingerprint: previous?.media?.fingerprint, error: '' }
     this.attachments.set(entry, record)
-    if (!imageFiles(files)) { record.work = false; record.error = files.length ? '仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。视频和音频附件不在此发送范围内。' : ''; record.cleared = !files.length; entry.dispatchEvent(new this.document.defaultView.Event('hellodog-voice-draft-ready', { bubbles: true })); return }
+    const timer = this.document.defaultView.setTimeout(() => { this.mediaTimers.delete(timer); if (this.attachments.get(entry) === record) this.mediaReady(entry) }, 8050)
+    this.mediaTimers.add(timer)
     void (async () => {
       const fingerprints = []
-      for (const file of files) fingerprints.push([...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))].map(n => n.toString(16).padStart(2, '0')).join(''))
+      for (const file of files) {
+        if (this.disposed || this.attachments.get(entry) !== record) return
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        if (this.disposed || this.attachments.get(entry) !== record) return
+        const encoded = encodedBytes(bytes)
+        const fingerprint = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(n => n.toString(16).padStart(2, '0')).join('')
+        const token = file.type + ';' + encoded, image = new this.document.defaultView.Image()
+        image.src = 'data:' + file.type + ';base64,' + encoded
+        await image.decode()
+        if (this.disposed || this.attachments.get(entry) !== record) return
+        if (!image.naturalWidth || !image.naturalHeight) throw new Error('invalid image')
+        fingerprints.push(fingerprint); record.selectedTokens.push(token)
+        if (!record.knownFiles.some(known => known.token === token)) record.knownFiles.push({ token, type: file.type, size: file.size, fingerprint })
+      }
       const media = { fingerprint: await digest(JSON.stringify(files.map((file, index) => [file.type, file.size, fingerprints[index]]))), count: files.length, types: files.map(file => file.type), totalBytes: files.reduce((total, file) => total + file.size, 0) }
       if (this.disposed || this.attachments.get(entry) !== record) return
       record.media = media
     })().catch(() => { if (!this.disposed && this.attachments.get(entry) === record) record.error = '图片无法核实，请移除后重新选择。' }).finally(() => {
       record.work = false
-      if (!this.disposed && this.attachments.get(entry) === record) entry.dispatchEvent(new this.document.defaultView.Event('hellodog-voice-draft-ready', { bubbles: true }))
+      if (!this.disposed && this.attachments.get(entry) === record) this.mediaReady(entry)
     })
+  }
+  cssAttachmentSnapshot(entry, css, record) {
+    if (css.error) return { error: css.error }
+    const previews = css.previews
+    if (!previews.length) return null
+    if (!record || record.cleared || !record.knownFiles?.length) return { error: '图片未能与所选文件核对，请移除草稿图片后重新选择。' }
+    if (previews.some(preview => preview.pending) || entry.querySelector('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')) return { error: Date.now() <= record.deadline ? '图片仍在准备，请等官方预览完成。' : '图片预览未能完成，请移除后重新选择较小图片。' }
+    const tokens = previews.map(preview => preview.token)
+    const mapped = tokens.map(token => record.knownFiles.find(file => file.token === token))
+    if (mapped.some(file => !file)) return { error: '图片预览与所选文件无法核对，请移除后重新选择较小图片。' }
+    if (record.selectionPending) {
+      // A file change may precede the site's new CSS preview. Never authorize
+      // the still-visible old image while a replacement/addition is pending.
+      const remaining = [...tokens]
+      const includesSelection = record.selectedTokens.every(token => { const index = remaining.indexOf(token); if (index < 0) return false; remaining.splice(index, 1); return true })
+      if (identicalPreviewTokens(tokens, record.initialTokens) || !includesSelection) return { error: Date.now() <= record.deadline ? '正在等待所选图片的官方预览，请稍候。' : '所选图片未加入预览，请移除后重新选择较小图片。' }
+      record.selectionPending = false
+    }
+    if (!imageFiles(mapped)) return { error: '图片数量或大小超出范围：最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。' }
+    const signature = JSON.stringify(mapped.map(file => [file.type, file.size, file.fingerprint]))
+    if (record.cssSignature !== signature) {
+      record.cssSignature = signature; record.cssMedia = undefined; record.revision++
+      void digest(signature).then(fingerprint => {
+        if (this.disposed || this.attachments.get(entry) !== record || record.cssSignature !== signature) return
+        record.cssMedia = { fingerprint, count: mapped.length, types: mapped.map(file => file.type), totalBytes: mapped.reduce((total, file) => total + file.size, 0) }
+        this.mediaReady(entry)
+      }).catch(() => { record.error = '图片无法核实，请移除后重新选择。'; this.mediaReady(entry) })
+    }
+    if (!record.cssMedia) return { error: '正在核实图片，请稍候。' }
+    record.seenPreview = true; record.media = record.cssMedia
+    return { media: { ...record.cssMedia, types: [...record.cssMedia.types] }, mediaRevision: record.revision }
   }
   attachmentSnapshot(entry) {
     const previews = [...entry.querySelectorAll('img')]
     let record = this.attachments.get(entry)
     const files = [...entry.querySelectorAll('input[type="file"]')].flatMap(input => [...input.files || []])
-    if (!record && files.length) { this.captureFiles(entry, files); record = this.attachments.get(entry) }
+    if (!record && imageFiles(files)) { this.captureFiles(entry, files); record = this.attachments.get(entry) }
+    const css = this.cssPreviews(entry)
+    const hasProgress = [...entry.querySelectorAll('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')].some(node => node.getClientRects().length)
+    const previewsRemoved = !previews.length && !css?.error && !css?.previews?.length && !hasProgress
+    if (record && !record.cleared && previewsRemoved && (record.removeRequested || record.seenPreview && !record.selectionPending)) record = this.clearAttachments(entry, record)
     if (record?.error) return { error: record.error }
-    if (record?.work) return { error: '正在核实图片，请稍候。' }
+    if (record?.work) return { error: Date.now() <= record.deadline ? '正在核实图片，请稍候。' : '图片读取未能完成，请移除后重新选择较小图片。' }
+    if (css) { const snapshot = this.cssAttachmentSnapshot(entry, css, record); if (snapshot) return snapshot }
     if (!previews.length) {
-      if (record?.seenPreview) { record.cleared = true; record.media = undefined; record.files = []; record.revision++; record.seenPreview = false }
-      if (record?.media && !record.cleared) return { error: '图片尚未完成官方预览，请稍候。' }
+      if (record?.media && !record.cleared) return { error: Date.now() <= record.deadline ? '图片尚未完成官方预览，请稍候。' : '图片预览未能完成，请移除后重新选择较小图片。' }
       return { mediaRevision: record?.revision || 0 }
     }
     if (!record?.media || record.cleared || previews.length !== record.media.count) return { error: '无法核实全部图片，请移除草稿图片后重新选择。' }
@@ -322,7 +423,7 @@ class GoogleVoiceDomAdapter {
     const signature = JSON.stringify(previews.map(image => image.currentSrc || image.getAttribute('src') || ''))
     if (!record.seenPreview && record.initialPreviews.length && record.previousFingerprint !== record.media.fingerprint && previews.every(image => record.initialPreviews.some(before => before.image === image && before.src === (image.currentSrc || image.getAttribute('src') || '')))) return { error: '正在等待所选图片的官方预览，请稍候。' }
     if (record.seenPreview && record.previewSignature !== signature) { record.error = '图片预览已变化，请移除图片后重新选择。'; return { error: record.error } }
-    record.seenPreview = true; record.previewSignature = signature
+    record.seenPreview = true; record.selectionPending = false; record.previewSignature = signature
     return { media: { ...record.media, types: [...record.media.types] }, mediaRevision: record.revision }
   }
   route() {
@@ -403,16 +504,20 @@ class GoogleVoiceDomAdapter {
   replace(original, text) {
     const now = this.snapshot()
     if (!now || now.conversationId !== original.conversationId || now.composer !== original.composer || now.sendButton !== original.sendButton || now.text !== original.text || now.revision !== original.revision || !sameAdapterMedia(original, now)) return false
+    // Pure images and an unchanged authorized caption need no input write.
+    // Avoid making the native editor rebuild attachments for an empty setter.
+    if (now.text === text) { this.lastWrite = now; this.lastWriteChanged = false; return true }
     const setter = Object.getOwnPropertyDescriptor(this.document.defaultView.HTMLTextAreaElement.prototype, 'value')?.set
     if (!setter) return false
     setter.call(now.composer, text)
     now.composer.dispatchEvent(new this.document.defaultView.InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: text }))
     this.lastWrite = this.snapshot()
+    this.lastWriteChanged = true
     return now.composer.value === text
   }
   async settle() {
     const expected = this.lastWrite, view = this.document.defaultView
-    await new Promise((resolve, reject) => {
+    if (this.lastWriteChanged !== false) await new Promise((resolve, reject) => {
       let frame, done = false
       const finish = error => { if (done) return; done = true; view.clearTimeout(timer); view.cancelAnimationFrame(frame); this.settleCancels.delete(cancel); error ? reject(error) : resolve() }
       const cancel = () => finish(new Error('页面已离开，请核对发送状态。'))
@@ -462,7 +567,7 @@ class GoogleVoiceDomAdapter {
     const rect = item.element.getBoundingClientRect(), view = this.document.defaultView
     return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < view.innerHeight && rect.right > 0 && rect.left < view.innerWidth
   }
-  dispose() { this.disposed = true; this.current = null; for (const cancel of this.settleCancels) cancel(); this.document.defaultView.removeEventListener('input', this.onInput, true); this.document.defaultView.removeEventListener('change', this.onInput, true) }
+  dispose() { this.disposed = true; this.current = null; for (const cancel of this.settleCancels) cancel(); for (const timer of this.mediaTimers) this.document.defaultView.clearTimeout(timer); this.mediaTimers.clear(); this.document.defaultView.removeEventListener('input', this.onInput, true); this.document.defaultView.removeEventListener('change', this.onInput, true); this.document.defaultView.removeEventListener('click', this.onAttachmentRemove, true) }
 }
 
 
@@ -667,10 +772,11 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   }
   function scheduleScan() { if (!disposed && !scanTimer) scanTimer = setTimeout(() => { void scan().catch(() => {}) }, 250) }
   const observer = new MutationObserver(changes => { checkNavigation(); if (changes.some(change => !change.target.closest?.('[data-hellodog-voice]'))) scheduleScan() })
-  observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly'] })
+  observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly', 'src', 'style'] })
   listen(window, 'popstate', () => { checkNavigation(); scheduleScan() }); listen(window, 'hashchange', checkNavigation)
   listen(window, 'scroll', scheduleScan, true); listen(document, 'visibilitychange', () => { if (document.visibilityState === 'visible') for (const state of messages.values()) state.deferred = false; scheduleScan() })
   listen(document, 'hellodog-voice-draft-ready', scheduleScan)
+  listen(document, 'hellodog-voice-attachment-rejected', () => showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。此次选择已取消，原草稿保留。')))
   listen(document, 'load', event => { if (event.target?.matches?.('gv-message-entry img')) scheduleScan() }, true)
   // Check only the URL each second; rendered message scans remain event driven.
   let lastMaintenance = Date.now()

@@ -46,7 +46,7 @@ try {
       const file = new File([bytes, new Uint8Array([seed])], 'synthetic.png', { type: 'image/png' }), transfer = new DataTransfer(); transfer.items.add(file)
       const input = document.querySelector('input[type=file]'); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true }))
     }, seed)
-    await page.waitForFunction(async () => await window.fixtureAdapter.refresh() && !!window.fixtureAdapter.snapshot()?.media)
+    await page.waitForFunction(() => { void window.fixtureAdapter.refresh(); return !!window.fixtureAdapter.snapshot()?.media })
   }
   async function panelHas(text) { await page.waitForFunction(value => window.fixtureRoots.some(root => root.host.isConnected && (root.textContent + [...root.querySelectorAll('textarea')].map(node => node.value).join('\n')).includes(value)), text) }
   async function clickPanel(text) { await page.evaluate(text => { const root = [...window.fixtureRoots].reverse().find(root => root.host.isConnected); const button = [...root.querySelectorAll('button')].find(node => node.textContent === text); if (!button || button.disabled) throw new Error('missing panel action'); button.click() }, text) }
@@ -128,11 +128,11 @@ try {
   await prepare('完整选定后才发送'); await panelHas('完整选定 1–7 位收件人')
   const beforeRecipients = captionCalls
   await page.evaluate(() => window.setRecipients(['\u200e(202) 555-0101\u200e', '(202) 555-0102']))
-  await page.waitForFunction(async () => await window.fixtureAdapter.refresh() && window.fixtureAdapter.snapshot()?.context?.recipientCount === 2)
+  await page.waitForFunction(() => { void window.fixtureAdapter.refresh(); return window.fixtureAdapter.snapshot()?.context?.recipientCount === 2 })
   const groupSnapshot = await page.evaluate(() => window.fixtureAdapter.snapshot().context)
   assert.equal(JSON.stringify(groupSnapshot).includes('202'), false); assert.match(groupSnapshot.recipientKey, /^[a-f0-9]{64}$/)
   await page.evaluate(() => window.setRecipients(['+1 (202) 555-0102', '+1 (202) 555-0101']))
-  await page.waitForFunction(async () => await window.fixtureAdapter.refresh())
+  await page.waitForFunction(() => { void window.fixtureAdapter.refresh(); return window.fixtureAdapter.supported })
   assert.deepEqual(await page.evaluate(() => window.fixtureAdapter.snapshot().context), groupSnapshot)
   checks.push('observed selected chips produce a stable privacy-safe recipient hash across display formatting and group order')
   for (const mode of ['partial', 'duplicate', 'too-many', 'name-only']) {
@@ -180,6 +180,6 @@ try {
   checks.push('GIF larger than two MiB is blocked before the native file-change upload handler')
   assert.deepEqual(errors, [])
   await page.screenshot({ path: fileURLToPath(new URL('media-dom-fixture.png', output)) })
-  const report = { at: new Date().toISOString(), passed: true, checks, captionTranslationCalls: captionCalls, historyTranslationCalls: historyCalls, scope: 'Owned localized DOM fixture through production main embedded translator and dispatch ledger, synthetic File bytes and mock translation/wallet. No real Google SMS, uploads, account or cloud charges; live image-draft DOM remains to be verified.' }
+  const report = { at: new Date().toISOString(), passed: true, checks, captionTranslationCalls: captionCalls, historyTranslationCalls: historyCalls, scope: 'Owned localized legacy img-preview compatibility fixture through production main embedded translator and dispatch ledger, synthetic File bytes and mock translation/wallet. The observed official CSS attachment editor has a separate css-media-dom fixture. No real Google SMS, uploads, account or cloud charges.' }
   await writeFile(new URL('media-dom-results.json', output), JSON.stringify(report, null, 2) + '\n'); console.log(JSON.stringify(report))
 } finally { await browser.close() }

@@ -203,10 +203,11 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   }
   function scheduleScan() { if (!disposed && !scanTimer) scanTimer = setTimeout(() => { void scan().catch(() => {}) }, 250) }
   const observer = new MutationObserver(changes => { checkNavigation(); if (changes.some(change => !change.target.closest?.('[data-hellodog-voice]'))) scheduleScan() })
-  observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly'] })
+  observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly', 'src', 'style'] })
   listen(window, 'popstate', () => { checkNavigation(); scheduleScan() }); listen(window, 'hashchange', checkNavigation)
   listen(window, 'scroll', scheduleScan, true); listen(document, 'visibilitychange', () => { if (document.visibilityState === 'visible') for (const state of messages.values()) state.deferred = false; scheduleScan() })
   listen(document, 'hellodog-voice-draft-ready', scheduleScan)
+  listen(document, 'hellodog-voice-attachment-rejected', () => showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。此次选择已取消，原草稿保留。')))
   listen(document, 'load', event => { if (event.target?.matches?.('gv-message-entry img')) scheduleScan() }, true)
   // Check only the URL each second; rendered message scans remain event driven.
   let lastMaintenance = Date.now()
