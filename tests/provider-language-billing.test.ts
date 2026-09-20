@@ -57,10 +57,10 @@ for(const [name,bad] of [['Chinese',text],['Spanish','Hola, gracias, estoy bien 
 test('wrong-language answers including one bounded correction are terminal and never debit, including replay',async()=>{
  output=()=>text
  const result=await translate('send-audit-both-wrong')
- assert.equal(result.body.error,'translation_failed');assert.notEqual(result.status,200)
+ assert.equal(result.body.error,'provider_wrong_language');assert.notEqual(result.status,200)
  assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0});assert.equal(await debitCount(),0)
  const replay=await translate('send-audit-both-wrong')
- assert.equal(replay.body.error,'translation_failed');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
+ assert.equal(replay.body.error,'provider_wrong_language');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
 })
 test('general translation also rejects clear Chinese output for English before paying the primary',async()=>{
  output=provider=>provider==='https://api.openai.com'?text:good
@@ -87,12 +87,12 @@ test('protected foreign glossary and URL do not pollute the general translation 
 test('an outgoing Chinese URL retained by both providers cannot be charged then rejected by desktop',async()=>{
  output=(_provider,body)=>'Please open '+body.input.match(/__HDPROTECTED_\d+__/g).join(' ')+'.'
  const result=await translate('send-audit-url',{text:'请打开 https://example.test/消息'})
- assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
+ assert.equal(result.body.error,'provider_wrong_language');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
 })
 test('an outgoing protected Chinese glossary term is rejected before charge without rewriting it',async()=>{
  output=(_provider,body)=>'Please contact '+body.input.match(/__HDPROTECTED_\d+__/g).join(' ')+'.'
  const result=await translate('send-audit-term',{text:'请联系 HelloDog',quality:{glossary:[{source:'HelloDog',target:'你好狗'}]}})
- assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
+ assert.equal(result.body.error,'provider_wrong_language');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
 })
 test('one mixed Han character is blocked before outgoing charge including legacy header-only ID',async()=>{
  output=provider=>provider==='https://api.openai.com'?'Tomorrow 我 can reply.':good
@@ -102,12 +102,12 @@ test('one mixed Han character is blocked before outgoing charge including legacy
 test('foreign glossary text that triggers desktop language rejection cannot be charged for an outgoing send',async()=>{
  output=(_provider,body)=>'Received: '+body.input.match(/__HDPROTECTED_\d+__/g).join(' ')
  const result=await translate('send-audit-foreign-glossary',{text:'请说 Greeting',quality:{glossary:[{source:'Greeting',target:'hola gracias usted estoy'}]}})
- assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
+ assert.equal(result.body.error,'provider_wrong_language');assert.equal(calls.length,2);assert.equal(await debitCount(),0)
  assert.throws(()=>validateTranslation({text:'请说 Greeting',targetLanguage:'en-US'},'Received: hola gracias usted estoy'),/译文语言与目标不符/)
 })
 test('a Han-only Japanese target that the current desktop rejects is not charged for an outgoing send',async()=>{
  output=()=>'我在東京工作'
  const result=await translate('send-audit-kanji-client',{text:'I work in Tokyo.',sourceLanguage:'en-US',targetLanguage:'ja'})
- assert.equal(result.body.error,'translation_failed');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
+ assert.equal(result.body.error,'provider_wrong_language');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
  assert.throws(()=>validateTranslation({text:'I work in Tokyo.',targetLanguage:'ja'},'我在東京工作'),/译文语言与目标不符/)
 })

@@ -19,6 +19,7 @@ export interface TranslationReceipt {
   lastAccess: 'request' | 'cache' | 'correction'
   translated?: string
   correction?: string
+  correctionSource?: 'manual' | 'cloud-repair'
   queueWaitMs?: number
   providerMs?: number
   error?: string
@@ -48,6 +49,20 @@ export class TranslationReceipts {
     return (await this.store.read()).filter(item => item.owner === owner).sort((a, b) => b.updatedAt - a.updatedAt)
   }
   async get(owner: string, requestId: string) { return (await this.list(owner)).find(item => item.requestId === requestId) }
+  applySemanticRepair(owner: string, requestId: string, previousTranslation: string, translation: string, authorized: () => boolean) {
+    return this.mutate(data => {
+      if (!authorized()) throw new Error('登录状态已变化。')
+      const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
+      if (!receipt || receipt.contentExpired || receipt.contextCleared) throw new Error('原消息已删除或过期，不能修复译文。')
+      // A user edit made while the repair is in flight always wins. Settlement,
+      // request identity, original output and retention remain untouched.
+      if (receipt.correction === undefined && receipt.translated === previousTranslation && receipt.state === 'charged'
+        && receipt.chargedCharacters === receipt.sourceCharacters) {
+        receipt.correction = translation; receipt.correctionSource = 'cloud-repair'; receipt.lastAccess = 'correction'; receipt.error = undefined; receipt.updatedAt = Date.now()
+      }
+      return receipt
+    })
+  }
   retryMissing(owner: string, requestId: string, limit: number) {
     return this.mutate(data => {
       const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
@@ -91,7 +106,7 @@ export class TranslationReceipts {
       return receipt
     })
   }
-  update(owner: string, requestId: string, patch: Partial<Pick<TranslationReceipt, 'state' | 'translated' | 'correction' | 'lastAccess' | 'error' | 'chargedCharacters' | 'balanceAfter' | 'queueWaitMs' | 'providerMs'>>): Promise<TranslationReceipt> {
+  update(owner: string, requestId: string, patch: Partial<Pick<TranslationReceipt, 'state' | 'translated' | 'correction' | 'correctionSource' | 'lastAccess' | 'error' | 'chargedCharacters' | 'balanceAfter' | 'queueWaitMs' | 'providerMs'>>): Promise<TranslationReceipt> {
     return this.mutate(data => {
       const receipt = data.find(item => item.owner === owner && item.requestId === requestId)
       if (!receipt) throw new Error('此翻译记录不存在。')

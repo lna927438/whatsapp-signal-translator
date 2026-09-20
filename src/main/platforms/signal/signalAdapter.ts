@@ -13,6 +13,8 @@ import { AccountManager } from '../../accounts/accountManager'
 import { JsonStore } from '../../storage/jsonStore'
 import { setAccountState } from '../../runtimeHealth'
 import { mergeQuality } from '../../../shared/translationPolicy'
+import { isSemanticTranslationMismatch } from '../../../shared/translationSemantics'
+import { quarantinedTranslationMessage, TranslationOutcomeError } from '../../translation/providers/cloudflare'
 import { readSignalTyping, SignalTypingState } from '../../../shared/signalTyping'
 import { signalContacts, signalEnvelopePeer, signalSendParameters, signalSendTimestamp } from '../../../shared/signalProtocol'
 import { SignalPreferencesStore } from '../../storage/signalPreferences'
@@ -174,7 +176,20 @@ export class SignalAdapter {
     if (owner !== this.onlineUser) return []
     return history.map(({ owner: _owner, ...message }) => {
       const receipt = receipts.find(item => item.request.accountId === record.id && (message.taskId ? item.requestId === message.taskId : item.request.messageId === `${message.peer}:${message.timestamp}`) && item.translated !== undefined)
-      return receipt ? { ...message, translated: receipt.correction ?? receipt.translated } : message
+      // Sanitize derived annotations only. The durable message and sent body
+      // remain intact; a free receipt correction wins over an old display copy.
+      const shown = { ...message }
+      if (receipt) {
+        const value = receipt.correction ?? receipt.translated
+        const valid = receipt.correction !== undefined || !isSemanticTranslationMismatch(message.original, value!)
+        if (message.fromMe && (!message.taskId || message.translated === message.original)) shown.displayTranslated = valid ? value : undefined
+        else shown.translated = valid ? value : undefined
+      }
+      if (shown.translated && !(receipt?.correction !== undefined && shown.translated === receipt.correction)
+        && isSemanticTranslationMismatch(message.original, shown.translated)) shown.translated = undefined
+      if (shown.displayTranslated && !(receipt?.correction !== undefined && shown.displayTranslated === receipt.correction)
+        && isSemanticTranslationMismatch(message.original, shown.displayTranslated)) shown.displayTranslated = undefined
+      return shown
     })
   }
   private rememberMessage(owner: string, message: SignalMessage) {
@@ -432,7 +447,16 @@ export class SignalAdapter {
     await this.historyWrites.catch(() => undefined)
     const message=(await this.historyStore.read()).find(item=>item.owner===owner&&item.account===identity.account&&item.peer===identity.peer&&item.timestamp===identity.timestamp&&item.fromMe===Boolean(identity.fromMe))
     if(!message||message.expired||message.system||(message.expiresAt||Infinity)<=Date.now())return
-    if(message.fromMe&&message.taskId&&message.translated&&message.translated!==message.original)return message.translated
+    if(message.fromMe&&message.taskId&&message.translated&&message.translated!==message.original){
+      const receipt=(await this.translator.history()).find(item=>item.request.accountId===recordId&&item.requestId===message.taskId&&item.request.text===message.original)
+      if(owner!==this.onlineUser)throw new Error('登录状态已变化。')
+      const translated=receipt?.correction??receipt?.translated??message.translated
+      if(receipt?.correction===undefined&&isSemanticTranslationMismatch(message.original,translated)){
+        if(receipt)return this.translator.translate(receipt.request)
+        throw new TranslationOutcomeError(quarantinedTranslationMessage)
+      }
+      return translated
+    }
     const runtime=await this.runtimeForRecord(recordId,'signal:'+message.peer)
     if(!manual&&runtime.translationsVisible===false)return
     if(!message.original||!/\p{L}/u.test(message.original))return

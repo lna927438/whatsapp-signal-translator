@@ -26,8 +26,8 @@ const rows=async(id:string)=>(await db.query<any>('select * from translator_priv
 const parent=async(id:string)=>(await db.query<any>('select * from translator_private.provider_usage where request_id=$1',[id])).rows[0]
 const unknown={httpStatus:null,inputTokens:null,cachedTokens:null,cacheWriteTokens:null,outputTokens:null,totalTokens:null,reasoningTokens:null,createdAt:null}
 
-test('DS-only correction reserves two full calls, records both costs, and concurrent replay debits the customer once',async()=>{
- const args=await start(),r=envelope([attempt('provider_wrong_language'),attempt(null,true)],'deepseek')
+for (const rejected of ['provider_wrong_language','protected_literal_mismatch','provider_not_translation']) test(`DS-only ${rejected} correction records both costs and concurrent replay debits once`,async()=>{
+ const args=await start(),r=envelope([attempt(rejected),attempt(null,true)],'deepseek')
  const [a,b]=await Promise.all([complete(args,r),complete(args,r)])
  assert.equal(a.state,'completed');assert.deepEqual(a.response,b.response)
  assert.deepEqual(await wallet(db),{balance:96,reserved_characters:0,lifetime_debited:4})
@@ -56,8 +56,8 @@ test('legacy dual provider request may use three retained attempts but one debit
 })
 
 test('a failed correction and a correction with an unknown response never charge characters',async()=>{
- for(const last of [attempt('provider_wrong_language',true),attempt('provider_timeout',true,'deepseek',unknown)]){
-  const args=await start(),r=envelope([attempt('provider_wrong_language'),last],null)
+ for(const last of [attempt('provider_not_translation',true),attempt('provider_timeout',true,'deepseek',unknown)]){
+  const args=await start(),r=envelope([attempt('provider_not_translation'),last],null)
   // Real attempts are ordered even when test fixtures were allocated earlier.
   last.startedAt=r.attempts[0].finishedAt;last.finishedAt=last.startedAt
   await fail(args,r);await fail(args,r)
@@ -68,7 +68,7 @@ test('a failed correction and a correction with an unknown response never charge
 })
 
 test('only explicitly invalid complete DS responses authorize correction; no auth, timeout, empty, unknown or repeated correction',async()=>{
- for(const [error,status] of [['provider_timeout',null],['provider_auth',401],['provider_unavailable',503],['provider_empty',200],['provider_wrong_language',201],['provider_wrong_language',null],['translation_outcome_unknown',200]] as const){
+ for(const [error,status] of [['provider_timeout',null],['provider_auth',401],['provider_unavailable',503],['provider_empty',200],['provider_wrong_language',201],['provider_wrong_language',null],['provider_not_translation',201],['provider_not_translation',null],['translation_outcome_unknown',200]] as const){
   const args=await start(),r=envelope([attempt(error,false,'deepseek',{httpStatus:status}),attempt(null,true)],'deepseek')
   await assert.rejects(complete(args,r),/invalid_request/)
   assert.equal((await rows(args.p_request_id)).length,0);await fail(args,envelope([],null))

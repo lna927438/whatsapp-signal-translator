@@ -317,7 +317,7 @@ test('a response body timeout keeps its HTTP evidence and does not become an emp
 
 test('quality terms and URL protection settle the original character count and replay without a second debit',async()=>{
  const text='Acme https://x.test/7'
- provider=async()=>reply({output_text:providerBody.input,model:'test-model'})
+ provider=async()=>reply({output_text:JSON.parse(providerBody.input).current_message,model:'test-model'})
  const patch={text,quality:{tone:'business',glossary:[{source:'Acme',target:'艾克米'}]}}
  const first=await request('protected-quality',patch)
  assert.equal(first.status,200)

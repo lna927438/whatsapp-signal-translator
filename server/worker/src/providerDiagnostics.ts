@@ -1,5 +1,5 @@
 import { providerConfig, type ProviderEnv } from './providerConfig'
-export type ProviderCode = 'provider_auth' | 'provider_quota' | 'provider_model' | 'provider_permission' | 'provider_request' | 'provider_rate_limit' | 'provider_timeout' | 'provider_unavailable' | 'provider_empty' | 'protected_literal_mismatch' | 'provider_wrong_language'
+export type ProviderCode = 'provider_auth' | 'provider_quota' | 'provider_model' | 'provider_permission' | 'provider_request' | 'provider_rate_limit' | 'provider_timeout' | 'provider_unavailable' | 'provider_empty' | 'protected_literal_mismatch' | 'provider_wrong_language' | 'provider_not_translation'
 
 export class ProviderFailure extends Error {
   constructor(readonly code: ProviderCode, readonly upstreamStatus?: number) { super(code) }
@@ -19,6 +19,7 @@ export function classifyProviderFailure(status: number, payload: any): ProviderF
 }
 
 export const providerMessages: Record<ProviderCode, string> = {
+  provider_not_translation: '翻译服务返回了回答而非译文，本次未扣减字符，可稍后重试。',
   provider_wrong_language: '翻译服务未返回目标语言，本次未扣减字符，可稍后重试。',
   provider_auth: '翻译服务端凭据无效或已失效，请管理员更新服务端配置。本次未扣减字符。',
   provider_quota: '翻译服务的 API 额度不足或已达到用量上限，请管理员检查 API 账单。本次未扣减字符。',

@@ -4,13 +4,17 @@ import type { TranslationProvider } from './provider'
 import { cloudBases } from '../../network/cloudConnection'
 import { qualityKey } from '../../../shared/translationPolicy'
 import { authenticatedFetch, SessionUnavailableError, type TokenSource } from '../../network/sessionRefresh'
+import { isSemanticTranslationMismatch } from '../../../shared/translationSemantics'
 
 export interface CloudReceipt { requestId: string; translation: string; sourceCharacters: number; balanceAfter: number }
+export interface TranslationRepairReceipt extends CloudReceipt { chargedCharacters: 0; repairRequestId: string; repairOf: string }
 export class TranslationOutcomeError extends Error {
   constructor(message: string, readonly confirmedFailure = false) { super(message) }
 }
-const terminalFailures = new Set(['translation_failed', 'translation_outcome_unknown', 'provider_auth', 'provider_quota', 'provider_rate_limit', 'provider_model', 'provider_permission', 'provider_request', 'provider_timeout', 'provider_unavailable', 'provider_empty', 'protected_literal_mismatch', 'provider_wrong_language'])
+export const quarantinedTranslationMessage = '译文偏离原文，已停止显示和发送。请在“记录与恢复”中为此条记录免费修正；原结算记录保留。'
+const terminalFailures = new Set(['translation_failed', 'translation_outcome_unknown', 'provider_auth', 'provider_quota', 'provider_rate_limit', 'provider_model', 'provider_permission', 'provider_request', 'provider_timeout', 'provider_unavailable', 'provider_empty', 'protected_literal_mismatch', 'provider_wrong_language', 'provider_not_translation'])
 export function translationFailureMessage(code?: string) {
+  if (code === 'provider_not_translation') return '翻译服务未正确翻译原文，本次未扣费。可以重试此消息。'
   if (['provider_timeout','provider_unavailable','provider_rate_limit'].includes(code || '')) return '翻译服务暂时繁忙，本次未扣费。请稍后重试，其他消息可继续发送。'
   if (code === 'translation_outcome_unknown') return '上次翻译已结束且未扣费，可以重试此消息。'
   return '本次翻译未成功，云端已确认未扣费，可以重试此消息。'
@@ -41,6 +45,46 @@ export function validateCloudReceipt(payload: any, id: string, characters?: numb
 export class CloudflareProvider implements TranslationProvider {
   constructor(private readonly accessToken: TokenSource, private readonly apiBase?: string,
     private readonly onReceipt?: (value: CloudReceipt) => Promise<void>) {}
+  async repair(request: TranslationRequest): Promise<TranslationRepairReceipt> {
+    const requestId = request.requestId
+    if (!requestId) throw new TranslationOutcomeError(quarantinedTranslationMessage)
+    const deadline = Date.now() + 42000, base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
+    const body = { text: request.text.trim(), sourceLanguage: request.sourceLanguage || 'auto', targetLanguage: request.targetLanguage,
+      accountId: request.accountId || '', conversationId: request.conversationId || '', context: request.context || [],
+      ...(request.quality ? { quality: request.quality } : {}), requestId }
+    const finish = (payload: any): TranslationRepairReceipt => {
+      const receipt = validateCloudReceipt(payload, requestId, Array.from(body.text).length)
+      const expectedRepairId = 'repair-' + createHash('sha256').update('semantic-repair-v1:' + requestId).digest('hex')
+      if (payload.chargedCharacters !== 0 || payload.repairOf !== requestId || payload.repairRequestId !== expectedRepairId
+        || isSemanticTranslationMismatch(body.text, receipt.translation)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
+      // This is a free replacement annotation. Never emit the normal settlement
+      // callback: it would overwrite the customer's original charged receipt.
+      return payload
+    }
+    try {
+      const response = await authenticatedFetch(this.accessToken, `${base}/api/translation-repair`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-request-id': requestId }, body: JSON.stringify(body) }, 30000)
+      const payload: any = await response.json().catch(() => null)
+      if (response.ok && response.status !== 202) return finish(payload)
+      if (response.status !== 202) throw new TranslationOutcomeError(quarantinedTranslationMessage)
+    } catch (error) {
+      if (error instanceof TranslationOutcomeError || error instanceof SessionUnavailableError) throw error
+      // A lost repair response is resolved only through the same original ID.
+    }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (Date.now() + 300 * 2 ** attempt >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, 300 * 2 ** attempt))
+      try {
+        const response = await authenticatedFetch(this.accessToken, `${base}/api/translation-repair-status?requestId=${encodeURIComponent(requestId)}`,
+          { headers: { Accept: 'application/json' }, cache: 'no-store' }, Math.min(10000, deadline - Date.now()))
+        const payload: any = await response.json().catch(() => null)
+        if (!response.ok || payload?.state === 'none' || payload?.state === 'failed') throw new TranslationOutcomeError(quarantinedTranslationMessage)
+        if (payload?.state === 'completed') return finish(payload.response)
+        if (payload?.state !== 'processing') throw new TranslationOutcomeError(quarantinedTranslationMessage)
+      } catch (error) { if (error instanceof TranslationOutcomeError || error instanceof SessionUnavailableError) throw error }
+    }
+    throw new TranslationOutcomeError(quarantinedTranslationMessage)
+  }
   async status(requestId: string, deadline = Date.now() + 20000): Promise<{ state: 'completed' | 'failed' | 'processing' | 'not_found'; response?: CloudReceipt; error?: string }> {
     const bases = this.apiBase ? [this.apiBase.replace(/\/$/, '')] : cloudBases()
     for (const base of bases) {
@@ -84,6 +128,9 @@ export class CloudflareProvider implements TranslationProvider {
     const finish = async (value: any) => {
       const receipt = validateCloudReceipt(value, requestId, Array.from(body.text).length)
       await this.onReceipt?.(receipt)
+      // A valid settlement may predate semantic validation. Keep its real debit,
+      // but never expose an assistant answer as a translation or retry a new ID.
+      if (isSemanticTranslationMismatch(body.text, receipt.translation)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
       return receipt.translation
     }
     if (response?.ok && response.status !== 202 && payload?.translation) return finish(payload)

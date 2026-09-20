@@ -71,9 +71,19 @@ test('request reconciliation detects equal totals with mismatched individual req
 })
 test('pending/failed requests with a debit and mismatched original character counts are flagged',async()=>{
   await charge('changed-source')
-  await db.exec("update translator_private.translation_requests set source_characters=8 where request_id='changed-source'")
+  // Manufacture legacy corruption in this isolated database. Normal service-role
+  // writes now reject changes to the immutable source/billable contract.
+  await db.transaction(async tx=>{
+    await tx.exec('alter table translator_private.translation_requests disable trigger a_repair_character_contract')
+    await tx.exec("update translator_private.translation_requests set source_characters=8,billable_characters=8 where request_id='changed-source'")
+    await tx.exec('alter table translator_private.translation_requests enable trigger a_repair_character_contract')
+  })
   assert.equal((await read('translations')).rows[0].reconciliation,'mismatch')
-  await db.exec("update translator_private.translation_requests set source_characters=7,state='processing' where request_id='changed-source'")
+  await db.transaction(async tx=>{
+    await tx.exec('alter table translator_private.translation_requests disable trigger a_repair_character_contract')
+    await tx.exec("update translator_private.translation_requests set source_characters=7,billable_characters=7,state='processing' where request_id='changed-source'")
+    await tx.exec('alter table translator_private.translation_requests enable trigger a_repair_character_contract')
+  })
   assert.equal((await read('translations')).rows[0].reconciliation,'mismatch')
 })
 test('manual orders snapshot the plan; confirm payment once and keep failed changes atomic',async()=>{
