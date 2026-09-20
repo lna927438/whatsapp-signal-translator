@@ -1,10 +1,24 @@
-/** The visible Messages navigation, hidden zero badge, responsive hidden clone
- * and positive active badge were observed read-only on 2026-09-20.
- * Positive counts require one exact rendered badge;
- * abbreviated/unknown markup is unavailable, never an inferred inbox count. */
+/** Official navigation badges and exact Messages document titles were observed
+ * read-only on 2026-09-20. The embedded narrow layout can hide the whole drawer;
+ * its title remains the official count. Never infer counts from message rows. */
 export function readGoogleVoiceUnread(document: Document): number | null {
-  const links = [...document.querySelectorAll('mat-nav-list a[role="tab"][gv-test-id="sidenav-messages"]')].filter(link => link.getClientRects().length > 0)
-  if (links.length !== 1 || links[0].closest('[aria-busy="true"]')) return null
+  const view = document.defaultView
+  if (!view) return null
+  const navigation = [...document.querySelectorAll('mat-nav-list a[role="tab"][gv-test-id="sidenav-messages"]')]
+  if (navigation.some(link => link.closest('[aria-busy="true"]'))) return null
+  const links = navigation.filter(link => {
+    if (link.closest('[hidden],[inert],[aria-hidden="true"]')) return false
+    const box = link.getBoundingClientRect(), style = view.getComputedStyle(link)
+    return box.width > 0 && box.height > 0 && box.right > 0 && box.bottom > 0 &&
+      box.left < view.innerWidth && box.top < view.innerHeight && style.display !== 'none' && style.visibility === 'visible'
+  })
+  if (!links.length) {
+    const title = document.title.trim()
+    if (title === 'Voice - Messages') return 0
+    const match = /^Voice - \(([1-9]\d{0,4})\) Messages$/.exec(title)
+    return match ? Number(match[1]) : null
+  }
+  if (links.length !== 1) return null
   const badges = links[0].querySelectorAll('mat-icon.mat-badge')
   if (badges.length !== 1) return null
   const badge = badges[0]
@@ -39,7 +53,7 @@ export function installGoogleVoiceUnread(document: Document, report: (value: { s
     finally { working = false; if (!disposed && readGoogleVoiceUnread(document) !== count) schedule() }
   }
   const observer = new view.MutationObserver(schedule)
-  observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'aria-hidden', 'aria-busy', 'style'] })
+  observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'aria-hidden', 'aria-busy', 'style', 'hidden', 'inert'] })
   const periodic = setInterval(schedule, 5000)
   const dispose = () => { disposed = true; observer.disconnect(); clearInterval(periodic); clearTimeout(timer); view.removeEventListener('pagehide', pagehide) }
   const pagehide = (event: PageTransitionEvent) => { dispose(); if (event.persisted) view.addEventListener('pageshow', () => installGoogleVoiceUnread(document, report), { once: true }) }

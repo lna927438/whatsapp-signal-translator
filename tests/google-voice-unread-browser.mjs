@@ -86,6 +86,28 @@ try {
     await replace(reader, html); assert.equal(await read(reader), expected, name)
     checks.push({ name, passed: true, evidence })
   }
+  const titleCases = [
+    ['collapsed official navigation retains exact observed Messages title count', nav(messages(badge('1'), 'display:none')), 'Voice - (1) Messages', 1],
+    ['unmounted official navigation retains exact Messages title count', unrelated, 'Voice - (12) Messages', 12],
+    ['collapsed official navigation reads zero from observed empty Messages title', nav(messages(badge('8'), 'display:none')), 'Voice - Messages', 0],
+    ['visibility-hidden navigation does not override official title', nav(messages(badge('8'), 'visibility:hidden')), 'Voice - (1) Messages', 1],
+    ['offscreen drawer does not override official title', nav(messages(badge('8'), 'position:fixed;left:-2000px')), 'Voice - (1) Messages', 1],
+    ['aria-hidden drawer does not override official title', '<div aria-hidden="true">' + nav(messages(badge('8'))) + '</div>', 'Voice - (1) Messages', 1],
+    ['inert drawer does not override official title', '<div inert>' + nav(messages(badge('8'))) + '</div>', 'Voice - (1) Messages', 1],
+    ['title fallback does not conceal two visible navigation copies', nav(messages(badge('2')) + messages(badge('4'))), 'Voice - (1) Messages', null],
+    ['title fallback does not conceal a busy hidden navigation', '<div aria-busy="true">' + nav(messages(badge('1'), 'display:none')) + '</div>', 'Voice - (1) Messages', null],
+    ['title fallback rejects Calls count', unrelated, 'Voice - (4) Calls', null],
+    ['title fallback rejects abbreviated count', unrelated, 'Voice - (99+) Messages', null],
+    ['title fallback rejects out-of-range count', unrelated, 'Voice - (100000) Messages', null],
+    ['title fallback rejects leading-zero count', unrelated, 'Voice - (01) Messages', null],
+    ['title fallback rejects unknown suffix rather than exposing contact names', unrelated, 'Voice - (1) Messages - Synthetic contact', null],
+  ]
+  for (const [name, html, title, expected] of titleCases) {
+    await replace(reader, html); await reader.evaluate(value => { document.title = value }, title)
+    assert.equal(await read(reader), expected, name)
+    checks.push({ name, passed: true, evidence: 'observed-embedded-title-and-collapsed-navigation' })
+  }
+  await reader.evaluate(() => { document.title = 'Synthetic unread fixture' })
   await replace(reader, observedPositive + unrelated)
   await reader.screenshot({ path: resolve(folder, 'synthetic-observed-badge.png') })
   await reader.close()
@@ -128,6 +150,21 @@ try {
   assert.deepEqual(await counts(observed), [0, 3, null, 9])
   checks.push({ name: 'pagehide disconnects the observer and prevents further reports', passed: true })
   await observed.close()
+
+  const collapsed = await prepare(observedPositive)
+  await collapsed.evaluate(() => { document.title = 'Voice - (1) Messages' })
+  await install(collapsed); await waitForReports(collapsed, 1)
+  await replace(collapsed, nav(messages(badge('1'), 'display:none')))
+  await collapsed.waitForTimeout(1100)
+  assert.deepEqual(await counts(collapsed), [1])
+  await collapsed.evaluate(() => { document.title = 'Voice - (2) Messages' })
+  await waitForReports(collapsed, 2)
+  assert.deepEqual(await counts(collapsed), [1, 2])
+  await collapsed.evaluate(() => { document.title = 'Voice - Messages' })
+  await waitForReports(collapsed, 3)
+  assert.deepEqual(await counts(collapsed), [1, 2, 0])
+  checks.push({ name: 'collapsing the drawer retains the count and subsequent exact title mutations update once and clear at zero', passed: true })
+  await collapsed.close()
 
   const disposed = await prepare(nav(messages(badge('2'))))
   await install(disposed); await waitForReports(disposed, 1); await disposed.evaluate(() => window.__dispose())
