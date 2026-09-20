@@ -9,7 +9,8 @@ Runtime: Electron 43.5.0; libsignal 0.100.0; RingRTC 2.71.0.
 
 The patched corresponding source is supplied with the distribution artifacts:
 HelloDog-{version}-corresponding-source.zip
-Its checksum and this installer's checksum are in release-manifest.json.
+Checksums are in delivery-manifest.json for local candidates, or
+release-manifest.json for published installers.
 Build and patch instructions: hellodog/integrations/README.md in that archive.
 Patches: hellodog/integrations/hellodog-source and scripts/patch-signal-desktop.mjs.
 No user account profiles, keys or chat logs are included in the source archive.

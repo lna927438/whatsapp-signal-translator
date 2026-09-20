@@ -79,10 +79,23 @@ test('an empty or changed media receipt never authorizes a blank text-only messa
 test('internal bridge derives owner/window from the actual sender and strips provider fields', async () => {
   const h = fixture()
   const reply = await h.raw({ v: 1, type: 'voice.status', owner: 'forged', accountId: windowB })
-  assert.deepEqual(normalized(reply), { ok: true, result: { connected: true, localLanguage: 'zh-CN', targetLanguage: 'en-US', sendAutoTranslate: true } })
+  assert.deepEqual(normalized(reply), { ok: true, result: { connected: true, localLanguage: 'zh-CN', targetLanguage: 'en-US', sendAutoTranslate: true, newMessageTracking: true } })
   assert.equal(h.calls[0].owner, 'owner-a'); assert.equal(h.calls[0].accountId, windowA)
   assert.equal((await h.raw({ v: 1, type: 'voice.status' }, { sender: 'forged' })).ok, false)
   assert.equal(h.calls.length, 1)
+})
+
+test('disabled Chinese sending points to translation preferences instead of a connection failure', async () => {
+  const h = fixture(), id = await h.id()
+  const payload = { id, conversationId, direction: 'outgoing', text: '你好' }
+  h.setHandler(async () => { throw new Error('请开启发送翻译，中文原文已阻止发送。') })
+  const response = await h.request('translate', payload)
+  assert.equal(response.ok, false); assert.equal(response.code, 'disabled')
+  assert.match(response.error, /翻译语言与偏好.*开启发送翻译/)
+  assert.doesNotMatch(response.error, /网络|重新登录/)
+  h.setHandler(async () => { throw new Error('private provider response 请开启发送翻译，中文原文已阻止发送。') })
+  const arbitrary = await h.request('translate', payload)
+  assert.equal(arbitrary.code, 'unavailable'); assert.doesNotMatch(arbitrary.error, /private provider/)
 })
 
 test('persistent draft UUID survives bridge restart and keeps exact translation identity', async () => {

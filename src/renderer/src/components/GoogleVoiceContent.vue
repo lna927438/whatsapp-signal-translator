@@ -15,7 +15,7 @@ const emit = defineEmits<{ add: []; retry: [] }>()
         <button type="button" class="primary" :disabled="busy" @click="emit('retry')">{{ uiLanguage === 'en' ? 'Try again' : '重试' }}</button>
       </template>
       <template v-else>
-        <p>{{ uiLanguage === 'en' ? 'Add an account window and sign in to Google Voice here. Text translation is built in.' : '添加账号窗口，在客户端内登录 Google Voice，即可使用内置短信翻译。' }}</p>
+        <p>{{ uiLanguage === 'en' ? 'Add an account window and sign in to Google Voice here. Translation is available in supported text conversations.' : '添加账号窗口，在客户端内登录 Google Voice。进入支持的短信会话后可使用翻译。' }}</p>
         <button type="button" class="primary" :disabled="busy" @click="hasWindows ? emit('retry') : emit('add')">{{ uiLanguage === 'en' ? (hasWindows ? 'Open window' : 'Add window') : (hasWindows ? '打开窗口' : '新增窗口') }}</button>
       </template>
       <small>{{ uiLanguage === 'en' ? 'Google Voice is a trademark of Google LLC.' : 'Google Voice 是 Google LLC 的商标。' }}</small>

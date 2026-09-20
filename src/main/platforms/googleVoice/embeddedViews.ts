@@ -5,6 +5,7 @@ import { isOfficialGoogleAccountsHost } from './googleAccountDomains'
 import { configureProxySession, type AccountProxy } from '../../network/accountProxy'
 import { attachGoogleVoiceProxyAuth, checkGoogleVoiceSession, prepareGoogleVoiceNetwork, type GoogleVoiceNetworkRoute } from './network'
 import { installGoogleVoiceContextMenu } from './contextMenu'
+import type { GoogleVoicePage } from '../../../shared/googleVoicePage'
 
 const START_URL = 'https://voice.google.com/u/0/'
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -38,6 +39,17 @@ export function isGoogleVoiceEmbeddedUrl(value: string): boolean {
   } catch { return false }
 }
 
+/** Classify only the official location; a help article is not proof of suspension. */
+export function googleVoicePage(value: string): GoogleVoicePage {
+  if (!isGoogleVoiceEmbeddedUrl(value)) return 'unknown'
+  const url = new URL(value)
+  if (url.hostname === 'voice.google.com') return /^\/u\/\d+\/messages\/?$/.test(url.pathname) ? 'messages' : 'voice'
+  if (isOfficialGoogleAccountsHost(url.hostname) || url.hostname === 'accounts.youtube.com') return 'sign-in'
+  if (url.hostname === 'support.google.com') return url.pathname === '/accounts/answer/40039' && url.searchParams.getAll('p').length === 1 && url.searchParams.get('p') === 'grandcentral' ? 'access-help' : 'help'
+  if (url.hostname === 'workspace.google.com') return 'product'
+  return 'unknown'
+}
+
 /** New isolated Electron storage; never imports a Chrome profile or Google cookies. */
 export function googleVoiceEmbeddedPartition(owner: string, windowId: string): string {
   if (typeof owner !== 'string' || !owner || owner.length > 512 || typeof windowId !== 'string' || !/^gv-[a-f0-9-]{36}$/.test(windowId)) {
@@ -53,6 +65,7 @@ export interface GoogleVoiceEmbeddedState {
   ownerHash: string
   windowId: string
   status: GoogleVoiceEmbeddedStatus
+  page: GoogleVoicePage
   origin: string
   popupDepth: number
   selected: boolean
@@ -78,7 +91,7 @@ export interface GoogleVoiceEmbeddedOptions {
   authorizeOwner?: (owner: string) => boolean
 }
 export interface GoogleVoiceTrustedPage { owner: string; accountId: string; url: string; authorized: () => boolean }
-interface Page { view: WebContentsView; status: GoogleVoiceEmbeddedStatus; origin: string; epoch: number; detachAuth?: () => void; detachMenu?: () => void }
+interface Page { view: WebContentsView; status: GoogleVoiceEmbeddedStatus; origin: string; epoch: number; leavingVoice: boolean; detachAuth?: () => void; detachMenu?: () => void }
 interface Record {
   key: string; owner: string; ownerHash: string; windowId: string; session: Session; pages: Page[]; audioConsent: boolean; notificationsConsent: boolean
   downloads: Map<DownloadItem, Page>
@@ -280,7 +293,7 @@ export class GoogleVoiceEmbeddedViews {
     const url = wc.getURL()
     const authorized = () => {
       try {
-        return this.alive(record, page) && page.status !== 'failed' && page.epoch === epoch && frame === wc.mainFrame && !frame.detached &&
+        return this.alive(record, page) && this.top(record) === page && !page.leavingVoice && page.status !== 'failed' && page.epoch === epoch && frame === wc.mainFrame && !frame.detached &&
           wc.getURL() === url && isGoogleVoiceEmbeddedUrl(url) && originOf(url) === 'https://voice.google.com' &&
           isGoogleVoiceEmbeddedUrl(frame.url) && originOf(frame.url) === 'https://voice.google.com'
       } catch { return false }
@@ -322,6 +335,7 @@ export class GoogleVoiceEmbeddedViews {
     const page = this.top(record), live = page && !page.view.webContents.isDestroyed()
     return {
       ownerHash: record.ownerHash, windowId: record.windowId, status: live ? page.status : 'closed',
+      page: live && page.status === 'ready' ? googleVoicePage(page.view.webContents.getURL()) : 'unknown',
       origin: live ? page.origin : '', popupDepth: Math.max(0, record.pages.length - 1), selected: this.selected === record.key,
       canGoBack: Boolean(live && (record.pages.length > 1 || page.view.webContents.navigationHistory.canGoBack())), network: { ...record.network }
     }
@@ -338,7 +352,9 @@ export class GoogleVoiceEmbeddedViews {
   }
 
   private attachPage(record: Record, view: WebContentsView): Page {
-    const page: Page = { view, status: 'loading', origin: '', epoch: 0 }
+    const previous = this.top(record)
+    if (previous) this.revoke(previous)
+    const page: Page = { view, status: 'loading', origin: '', epoch: 0, leavingVoice: false }
     // Match a normal browser's canvas; transparent official pages may use dark
     // text. Google can still apply its own light/dark theme on top of this.
     record.pages.push(page); view.setVisible(false); view.setBackgroundColor('#ffffff')
@@ -356,16 +372,19 @@ export class GoogleVoiceEmbeddedViews {
     wc.on('will-redirect', (event, url, _inPlace, isMain) => { if (event.isMainFrame ?? isMain) navigate(event, event.url || url) })
     wc.on('will-attach-webview', event => event.preventDefault())
     wc.on('content-bounds-updated', event => event.preventDefault())
-    wc.on('did-start-navigation', (event, _url, inPlace, isMain) => {
+    wc.on('did-start-navigation', (event, url, inPlace, isMain) => {
       if ((event.isMainFrame ?? isMain) && this.alive(record, page)) {
         this.revoke(page)
+        // Reject fresh calls from the outgoing document before Chromium has
+        // replaced its URL/frame with an official login or help destination.
+        page.leavingVoice = originOf(event.url || url) !== 'https://voice.google.com'
         if (!(event.isSameDocument ?? inPlace)) { page.status = 'loading'; this.emit(record) }
       }
     })
     wc.on('did-navigate', (_event, url) => { if (this.alive(record, page)) { page.origin = originOf(url); this.emit(record) } })
     wc.on('did-navigate-in-page', (_event, url, isMain) => { if (isMain && this.alive(record, page)) { page.origin = originOf(url); this.emit(record) } })
     const documentReady = () => {
-      if (record.networkReady && this.alive(record, page)) { page.status = 'ready'; page.origin = originOf(wc.getURL()); this.layout(); this.emit(record) }
+      if (record.networkReady && this.alive(record, page)) { page.status = 'ready'; page.origin = originOf(wc.getURL()); page.leavingVoice = page.origin !== 'https://voice.google.com'; this.layout(); this.emit(record) }
     }
     // A hung analytics/image request must not leave an interactive official page
     // behind a permanent loading indicator. Subresource loads never reset this.
@@ -488,6 +507,8 @@ export class GoogleVoiceEmbeddedViews {
     page.detachMenu?.()
     for (const [item, source] of record.downloads) if (source === page) { item.cancel(); record.downloads.delete(item) }
     record.pages = record.pages.filter(item => item !== page)
+    const current = this.top(record)
+    if (current) this.revoke(current)
     if (!this.parent.isDestroyed()) this.parent.contentView.removeChildView(page.view)
     if (!page.view.webContents.isDestroyed()) page.view.webContents.close({ waitForBeforeUnload: false })
     this.layout(); this.emit(record)

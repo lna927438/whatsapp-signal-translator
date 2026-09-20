@@ -94,7 +94,7 @@ onUnmounted(() => { disposed = true; draft.proxy.password = ''; pasted.value = '
           <p v-else-if="importNotice" ref="importFeedback" class="result" role="status">{{ importNotice }}</p>
           <button type="button" class="secondary" @click="test">{{ text(testing ? '正在检测…' : '检测此配置', testing ? 'Checking…' : 'Test this configuration') }}</button>
           <p v-if="tested" class="result" role="status">{{ text('检测出口 IP：','Test exit IP: ') }}{{ tested.ip }} · {{ tested.latencyMs }} ms</p>
-          <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测成功后再保存使用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test the configuration before saving.') }}</p>
+          <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测成功后再保存使用。出口 IP 检测不代表 Google 账号或图片服务可用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test before saving. An exit IP check does not verify access to your Google account or image services.') }}</p>
         </div>
       </fieldset>
       <section v-if="record" class="current-network">

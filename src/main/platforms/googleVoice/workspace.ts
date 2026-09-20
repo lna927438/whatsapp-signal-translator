@@ -99,7 +99,7 @@ export class GoogleVoiceWorkspace {
     if (this.window.isDestroyed() || !this.currentOwner(item.owner)) return
     const status = state.status === 'failed' ? 'error' : state.status
     const detail = message || (status === 'error' ? (state.network?.message || (state.network?.mode === 'proxy' ? '此窗口代理或页面连接失败，请检查 IP 设置后重试；不会自动切换为直连。' : `Google Voice 页面未能加载${state.origin ? '（' + state.origin + '）' : ''}，请重试。`)) : '')
-    this.window.webContents.send('google-voice:state', { id: state.windowId, state: status, message: detail, canGoBack: state.canGoBack, network: state.network })
+    this.window.webContents.send('google-voice:state', { id: state.windowId, state: status, page: state.page, message: detail, canGoBack: state.canGoBack, network: state.network })
   }
 
   async list() {
@@ -199,7 +199,7 @@ export class GoogleVoiceWorkspace {
     try {
       this.active = id
       const state = previous ? views.focus(identity.owner, id) : views.create(identity.owner, id, { proxy: record.proxy, password })
-      return { state: state.status === 'failed' ? 'error' : state.status === 'closed' ? 'idle' : state.status, canGoBack: state.canGoBack, network: state.network }
+      return { state: state.status === 'failed' ? 'error' : state.status === 'closed' ? 'idle' : state.status, page: state.page, canGoBack: state.canGoBack, network: state.network }
     } catch {
       this.active = ''
       if (!previous) this.instances.delete(id)

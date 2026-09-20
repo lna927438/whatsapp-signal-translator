@@ -8,6 +8,7 @@ import { qualityKey } from '../../../shared/translationPolicy'
 import type { GoogleVoiceDispatchLedger } from './dispatchLedger'
 import { GoogleVoiceDraftRecoveryError, recoverGoogleVoiceDraft } from './draftRecovery'
 import { googleVoiceMessageMedia, googleVoiceMediaKey, googleVoiceRecipientContext } from './messageMedia'
+import { isVerifiedGoogleVoiceIncoming } from './incomingHistory'
 
 type Translator=Pick<TranslationEngine,'history'|'existingOutgoing'|'preserveOutgoingRequest'|'prepareOutgoingRequest'|'preserveIncomingRequest'|'translate'|'cached'|'translateIncoming'>
 export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:()=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger) {
@@ -99,9 +100,9 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     }
     if(preferences.translationsVisible===false && raw.manual!==true)return {enabled:false}
     let text=await translator.cached(request);requireIdentity()
-    // Until a live DOM adapter supplies verified message timestamps, historical
-    // auto translation is allowed only under the explicit visible-history mode.
-    if(text===undefined && (raw.manual===true || preferences.receiveAutoTranslate && preferences.historyMode==='visible')) text=await translator.translateIncoming(request,raw.manual===true)
+    // New-only translation requires a main-memory capability bound to the live
+    // page's baseline and official timestamp. JSON flags cannot enable it.
+    if(text===undefined && (raw.manual===true || preferences.receiveAutoTranslate && (preferences.historyMode==='visible' || preferences.historyMode==='new' && isVerifiedGoogleVoiceIncoming(raw)))) text=await translator.translateIncoming(request,raw.manual===true)
     requireIdentity();return {enabled:text!==undefined,text,manual:text===undefined,requestId:request.requestId}
   }
 }

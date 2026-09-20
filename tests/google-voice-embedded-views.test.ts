@@ -7,6 +7,24 @@ const A = 'gv-10000000-0000-4000-8000-000000000001'
 const B = 'gv-20000000-0000-4000-8000-000000000002'
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 5))
 
+test('page location distinguishes messages, login and precise access-help without inferring suspension', () => {
+  const { googleVoicePage } = mainHarness().load('src/main/platforms/googleVoice/embeddedViews.ts')
+  for (const [url, expected] of [
+    ['https://voice.google.com/u/0/messages?itemId=private-thread', 'messages'],
+    ['https://voice.google.com/u/12/messages/', 'messages'],
+    ['https://voice.google.com/u/0/calls', 'voice'],
+    ['https://accounts.google.co.th/ServiceLogin', 'sign-in'],
+    ['https://support.google.com/accounts/answer/40039?p=grandcentral', 'access-help'],
+    ['https://support.google.com/accounts/answer/40039?p=other', 'help'],
+    ['https://support.google.com/accounts/answer/40039?p=grandcentral&p=other', 'help'],
+    ['https://support.google.com/voice/answer/115116', 'help'],
+    ['https://support.google.com/accounts/answer/40039', 'help'],
+    ['https://workspace.google.com/products/voice/', 'product'],
+    ['https://voice.google.com.attacker.invalid/u/0/messages', 'unknown'],
+    ['https://user:password@voice.google.com/u/0/messages', 'unknown']
+  ]) assert.equal(googleVoicePage(url), expected, url)
+})
+
 function fixture(options: any = {}) {
   const sessions = new Map<string, any>(), views: FakeView[] = [], states: any[] = [], blocked: any[] = []
   const networkCalls: any[] = [], routes: any[] = [], authCalls: any[] = [], preparations: any[] = []
@@ -583,6 +601,32 @@ test('trusted translation IPC requires a registered current main frame at the ex
   assert.throws(() => h.manager.trustedPage(event), /页面已变化/)
   wc.url = 'https://voice.google.com/u/0/'; wc.mainFrame.detached = true
   assert.throws(() => h.manager.trustedPage(event), /页面已变化/)
+})
+
+test('official access-help navigation revokes prior translation and exposes only bounded page state', () => {
+  const h = fixture(); h.manager.create('owner', A); const wc = h.views[0].webContents
+  wc.url = 'https://voice.google.com/u/0/messages?itemId=private-thread'; wc.emit('dom-ready')
+  const event = { sender: wc, senderFrame: wc.mainFrame }, old = h.manager.trustedPage(event)
+  assert.equal(h.manager.getState('owner', A).page, 'messages')
+  wc.emit('did-start-navigation', {}, 'https://support.google.com/accounts/answer/40039?p=grandcentral', false, true)
+  assert.equal(h.manager.getState('owner', A).page, 'unknown'); assert.equal(old.authorized(), false)
+  assert.throws(() => h.manager.trustedPage(event), /页面已变化/, 'old document cannot start fresh work while its help navigation is pending')
+  wc.url = 'https://support.google.com/accounts/answer/40039?p=grandcentral'; wc.emit('dom-ready')
+  assert.equal(h.manager.getState('owner', A).status, 'ready'); assert.equal(h.manager.getState('owner', A).page, 'access-help')
+  assert.throws(() => h.manager.trustedPage(event), /页面已变化/)
+  assert.ok(!JSON.stringify(h.states).includes('private-thread'))
+})
+
+test('an official popup revokes covered Voice-page IPC and closing it never resurrects old authorization', () => {
+  const h = fixture(); h.manager.create('owner', A); const wc = h.views[0].webContents
+  const event = { sender: wc, senderFrame: wc.mainFrame }, old = h.manager.trustedPage(event)
+  const child = h.popup(wc, 'https://support.google.com/accounts/answer/40039?p=grandcentral').createWindow({})
+  child.emit('dom-ready')
+  assert.equal(h.manager.getState('owner', A).page, 'access-help')
+  assert.equal(old.authorized(), false); assert.throws(() => h.manager.trustedPage(event), /页面已变化/)
+  h.manager.back('owner', A)
+  assert.equal(old.authorized(), false)
+  assert.equal(h.manager.trustedPage(event).authorized(), true)
 })
 
 test('navigation, settings invalidation, reload and close revoke all earlier IPC authorizations', () => {

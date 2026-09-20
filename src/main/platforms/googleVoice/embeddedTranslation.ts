@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import { GoogleVoiceDraftRecoveryError } from './draftRecovery'
 import { GoogleVoiceDispatchScopeError } from './dispatchLedger'
 import { googleVoiceMessageMedia, googleVoiceMediaKey, googleVoiceRecipientContext, type GoogleVoiceMessageMedia } from './messageMedia'
+import { GoogleVoiceIncomingHistory } from './incomingHistory'
 
 export interface GoogleVoiceEmbeddedTrustedPage {
   owner: string
@@ -27,7 +28,7 @@ const uuid = (value: unknown): value is string => typeof value === 'string' && /
 const requestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9:_-]{1,200}$/.test(value)
 const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
-const supported = new Set(['voice.status', 'voice.outgoing-id', 'voice.translate', 'voice.authorize', 'voice.dispatch-status', 'voice.dispatch-resolve'])
+const supported = new Set(['voice.status', 'voice.history-baseline', 'voice.outgoing-id', 'voice.translate', 'voice.authorize', 'voice.dispatch-status', 'voice.dispatch-resolve'])
 // These exact application messages are safe to classify. Never echo arbitrary
 // provider/server text: it can contain source material, credentials or paths.
 const loginFailures = new Set([
@@ -82,6 +83,7 @@ function translatedValue(value: unknown, media?: GoogleVoiceMessageMedia): Recor
 export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
   private writes: Promise<unknown> = Promise.resolve()
   private readonly inFlight = new Map<string, Promise<unknown>>()
+  private readonly incomingHistory = new GoogleVoiceIncomingHistory()
   private readonly timeoutMs: number
   constructor(private readonly options: GoogleVoiceEmbeddedTranslationOptions<Event>) {
     this.timeoutMs = options.timeoutMs ?? 70000
@@ -132,6 +134,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
     if (loginFailures.has(message)) return { ok: false, code: 'login', error: 'HelloDog 登录需要恢复，请在个人中心重新登录。草稿和原翻译记录已保留。' }
     if (balanceFailures.has(message)) return { ok: false, code: 'balance', error: '可用字符不足，请补充字符后重试。草稿已保留；原请求的扣费结果仍以记录核对为准。' }
     if (accountFailures.has(message)) return { ok: false, code: 'account', error: '当前 HelloDog 账号不可用，请联系管理员核对账号状态。草稿和原翻译记录已保留。' }
+    if (message === '请开启发送翻译，中文原文已阻止发送。') return { ok: false, code: 'disabled', error: '请在翻译语言与偏好中开启发送翻译，中文原文已阻止发送。' }
     // Do not echo provider failures, source text, paths or account credentials.
     return { ok: false, code: 'unavailable', error: '翻译或连接暂未完成，请检查 HelloDog 的登录、网络和字符余额后重试。原文未自动发送。' }
   }
@@ -164,7 +167,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
     if (message.type === 'voice.status') {
       beforeUpstream()
       const result = await this.options.translate(page.owner, page.accountId, 'status', undefined, page.authorized)
-      requireCurrent(page); return statusValue(result)
+      requireCurrent(page); return { ...statusValue(result), newMessageTracking: true }
     }
     const value = message.payload
     if (!object(value)) throw invalid()
@@ -176,6 +179,10 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
     const path = url.pathname.replace(/\/$/, '')
     const conversationId = 'gv_' + hash(context ? [path, 'draft', context.recipientKey, context.recipientCount] : [path, item])
     if (value.conversationId !== conversationId) throw new BridgeFailure('changed', '会话已变化，已阻止操作。')
+    if (message.type === 'voice.history-baseline') {
+      if (context) throw invalid()
+      try { return this.incomingHistory.begin(scopeHash, conversationId, value.ids, page) } catch { throw invalid() }
+    }
     let media: GoogleVoiceMessageMedia | undefined
     try { media = googleVoiceMessageMedia(value.media) } catch { throw invalid() }
     if ((media || context) && value.direction === 'incoming') throw invalid()
@@ -204,6 +211,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
       if (!uuid(value.id) || !['incoming', 'outgoing'].includes(String(value.direction)) || value.manual !== undefined && typeof value.manual !== 'boolean') throw invalid()
       operation = 'translate'
       payload = { id: value.id, direction: value.direction, conversationId, text: text(value.text, media), ...mediaPayload, ...(value.manual === undefined ? {} : { manual: value.manual }) }
+      if (payload.direction === 'incoming' && payload.manual !== true) this.incomingHistory.attest(scopeHash, payload, value.newMessage, page)
     } else if (message.type === 'voice.authorize') {
       if (!uuid(value.id) || !requestId(value.requestId)) throw invalid()
       operation = 'authorize'; payload = { id: value.id, conversationId, text: text(value.text, media), translated: text(value.translated, media), requestId: value.requestId, ...mediaPayload }

@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { orderedAccounts } from '../../../shared/accountOrder'
 import { uiError, uiLanguage } from './uiLocale'
+import { googleVoicePages, type GoogleVoicePage } from '../../../shared/googleVoicePage'
 
 export type GoogleVoiceProxy = { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: number; username?: string; hasPassword?: boolean }
 export type GoogleVoiceNetwork = { mode: 'proxy' | 'system'; status: 'unchecked' | 'checking' | 'checked' | 'error'; ip?: string; latencyMs?: number; checkedAt?: number; message?: string }
@@ -29,6 +30,19 @@ export function useGoogleVoiceWorkspace(options: {
   const selectedId = ref('')
   const state = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const message = ref('')
+  const page = ref<GoogleVoicePage>('unknown')
+  const translationNotice = computed(() => {
+    const en = uiLanguage.value === 'en'
+    if (state.value === 'loading') return en ? 'Opening the official page. Translation is not ready.' : '正在打开官方页面，翻译尚未就绪。'
+    if (state.value === 'error') return en ? 'The page is unavailable. Translation is paused.' : '页面暂不可用，翻译已暂停。'
+    if (state.value !== 'ready') return en ? 'Open a Google Voice text conversation to use translation.' : '请打开 Google Voice 短信会话后使用翻译。'
+    if (page.value === 'access-help') return en ? 'Google is showing access restriction guidance. Check the account status; translation is unavailable on this page.' : 'Google 显示访问限制说明，请核对账号状态；此页面无法使用短信翻译。'
+    if (page.value === 'sign-in') return en ? 'Complete Google sign-in or verification. Translation is unavailable on this page.' : '请完成 Google 登录或验证；此页面无法使用短信翻译。'
+    if (page.value === 'help') return en ? 'This is a Google help page. Return to a Voice text conversation to translate.' : '当前为 Google 帮助页面，请返回短信会话后使用翻译。'
+    if (page.value === 'product') return en ? 'This is the Google Voice introduction page. Open your text messages to translate.' : '当前为 Google Voice 产品介绍页面，请进入短信页面后使用翻译。'
+    if (page.value === 'messages') return en ? 'Text page open. Translation follows your preferences; review the preview before sending.' : '短信页面已打开 · 翻译遵循当前偏好，发送前请核对预览。'
+    return en ? 'The text page has not been confirmed. Open a Google Voice text conversation to translate.' : '请打开 Google Voice 短信会话；当前尚未确认短信页面。'
+  })
   const canGoBack = ref(false)
   const networks = ref<Record<string, GoogleVoiceNetwork>>({})
   const network = computed(() => networks.value[selectedId.value])
@@ -45,7 +59,7 @@ export function useGoogleVoiceWorkspace(options: {
   function showFailure(error: unknown) {
     if (disposed) return
     const text = failure(error)
-    if (active.value) { state.value = 'error'; message.value = text }
+    if (active.value) { state.value = 'error'; page.value = 'unknown'; message.value = text }
     else options.reportError(text)
   }
   function acceptState(value: any) {
@@ -53,20 +67,20 @@ export function useGoogleVoiceWorkspace(options: {
     if(value.network && ['proxy','system'].includes(value.network.mode) && ['unchecked','checking','checked','error'].includes(value.network.status)) networks.value[value.id] = { ...value.network }
     if(!active.value || value.id!==selectedId.value)return
     if(!['loading','ready','error'].includes(value.state))return
-    eventRevision++;state.value=value.state;message.value=typeof value.message==='string'?value.message:'';canGoBack.value=value.canGoBack===true
+    eventRevision++;state.value=value.state;page.value=value.state==='ready'&&googleVoicePages.includes(value.page)?value.page:'unknown';message.value=typeof value.message==='string'?value.message:'';canGoBack.value=value.canGoBack===true
   }
   function acceptResult(result:unknown) {
     const value=result as {state?:string;message?:string;canGoBack?:boolean}|undefined
-    if(value?.state==='cancelled'){state.value='idle';return}
+    if(value?.state==='cancelled'){state.value='idle';page.value='unknown';return}
     if(value && ['loading','ready','error'].includes(value.state||'')){acceptState({...value,id:selectedId.value});return}
-    state.value='ready'
+    state.value='ready';page.value='unknown'
   }
   async function focus(id: string) {
     if (disposed || !windows.value.some(window => window.id === id)) return
     active.value = true
     const revision = ++focusRevision
     selectedId.value = id
-    state.value = 'loading'; message.value = ''
+    state.value = 'loading'; page.value = 'unknown'; message.value = ''
     try {
       await options.beforeFocus()
       if (!current(revision)) return
@@ -78,7 +92,7 @@ export function useGoogleVoiceWorkspace(options: {
     if (disposed || active.value && state.value === 'loading') return
     active.value = true
     const revision = ++focusRevision
-    state.value = 'loading'; message.value = ''
+    state.value = 'loading'; page.value = 'unknown'; message.value = ''
     try {
       await options.beforeFocus()
       if (!current(revision)) return
@@ -201,7 +215,7 @@ export function useGoogleVoiceWorkspace(options: {
   async function refresh() {
     if (busy.value || !selected.value || !active.value) return
     const revision = ++focusRevision, id = selected.value.id
-    state.value = 'loading'; message.value = ''
+    state.value = 'loading'; page.value = 'unknown'; message.value = ''
     try {
       const observed=eventRevision,result = await options.api().refreshGoogleVoiceWindow(id)
       if (current(revision) && observed===eventRevision) acceptResult(result)
@@ -220,5 +234,5 @@ export function useGoogleVoiceWorkspace(options: {
   }
   async function flush() { await pendingWrite }
   function dispose() { disposed = true; leave() }
-  return { active, windows, selectedId, selected, state, message, canGoBack, network, busy, enter, leave, focus, focusNotification, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
+  return { active, windows, selectedId, selected, state, page, translationNotice, message, canGoBack, network, busy, enter, leave, focus, focusNotification, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
 }

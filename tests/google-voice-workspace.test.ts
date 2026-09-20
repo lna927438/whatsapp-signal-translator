@@ -30,6 +30,25 @@ function fixture() {
 }
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 
+test('page notices separate official access guidance and login from text-page availability', async () => {
+  const { voice } = fixture(); await voice.enter()
+  assert.equal(voice.page.value, 'unknown'); assert.doesNotMatch(voice.translationNotice.value, /已内置|翻译已就绪/)
+  voice.acceptState({ id: 'one', state: 'ready', page: 'messages' })
+  assert.match(voice.translationNotice.value, /短信页面已打开/)
+  voice.acceptState({ id: 'one', state: 'ready', page: 'access-help' })
+  assert.match(voice.translationNotice.value, /Google 显示访问限制说明.*核对账号状态/)
+  assert.doesNotMatch(voice.translationNotice.value, /封禁|已内置|翻译已就绪/)
+  voice.acceptState({ id: 'two', state: 'ready', page: 'messages' })
+  assert.equal(voice.page.value, 'access-help', 'background window cannot overwrite current page status')
+  voice.acceptState({ id: 'one', state: 'ready', page: 'help' })
+  assert.doesNotMatch(voice.translationNotice.value, /限制|封禁/)
+  voice.acceptState({ id: 'one', state: 'ready', page: 'sign-in' })
+  assert.match(voice.translationNotice.value, /请完成 Google 登录或验证/)
+  voice.acceptState({ id: 'one', state: 'loading', page: 'messages' })
+  assert.equal(voice.page.value, 'unknown'); assert.match(voice.translationNotice.value, /尚未就绪/)
+  voice.dispose()
+})
+
 test('Voice windows persist independent add/rename/order/close operations without translation accounts', async () => {
   const { voice, calls } = fixture()
   await voice.enter()

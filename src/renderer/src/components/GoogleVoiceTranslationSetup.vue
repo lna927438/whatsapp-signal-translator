@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { uiError, uiLanguage } from '../lib/uiLocale'
-const props=defineProps<{windowId:string;windowLabel:string}>()
+const props=defineProps<{windowId:string;windowLabel:string;translationNotice:string}>()
 const emit=defineEmits<{close:[];settings:[]}>()
 const panel=ref<HTMLElement>(),busy=ref(true),error=ref('')
 const permissions=ref({microphone:false,notifications:false})
@@ -23,8 +23,10 @@ onUnmounted(()=>{disposed=true})
   <section ref="panel" class="panel voice-translation-setup" role="dialog" aria-modal="true" :aria-label="uiLanguage==='en'?'Google Voice settings':'Google Voice 设置'" @keydown="trap">
    <header><h2>{{uiLanguage==='en'?'Google Voice settings':'Google Voice 设置'}}</h2><button type="button" :aria-label="uiLanguage==='en'?'Close':'关闭'" @click="emit('close')">×</button></header>
    <p class="voice-window-label">{{windowLabel}}</p>
-   <p>{{uiLanguage==='en'?'Text and image captions are translated before a send preview. Image-only messages use no translation characters.':'已内置文字和图片说明翻译，发送前先预览。纯图片不扣文字字符。'}}</p>
+   <p role="status">{{translationNotice}}</p>
+   <p>{{uiLanguage==='en'?'Text and image captions can be translated in supported conversations. Image-only messages use no translation characters.':'支持的短信会话可翻译文字和图片说明。纯图片不扣文字字符。'}}</p>
    <button type="button" class="secondary" @click="emit('settings')">{{uiLanguage==='en'?'Translation language and preferences':'翻译语言与偏好'}}</button>
+   <p class="voice-hint">{{uiLanguage==='en'?'If a new message’s time cannot be confirmed, use its Translate button. For visible history, select automatic visible-history translation in preferences; uncached translations may use characters.':'新消息时间无法确认时，请点击消息下方的翻译按钮。历史消息可在偏好中选择自动翻译当前可见历史，未缓存的翻译可能扣字符。'}}</p>
    <p class="voice-hint">{{uiLanguage==='en'?'Translation follows global settings. Select 1–7 recipients and review the official image preview before confirming. An uncertain send is never retried automatically.':'翻译沿用全局设置。发送前请核对已选的 1–7 位收件人与官方图片预览；结果不明时不会自动重发。'}}</p>
    <div class="voice-permissions">
     <label><span>{{uiLanguage==='en'?'Call microphone':'通话麦克风'}}</span><input type="checkbox" :checked="permissions.microphone" :disabled="busy" @change="change('microphone',$event)" /></label>

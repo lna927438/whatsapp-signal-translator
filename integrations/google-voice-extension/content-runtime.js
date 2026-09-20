@@ -8,10 +8,11 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
   let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
+  let historyBaseline, statusReady = false, statusError = false
   const removers = []
   function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
   function invalidate() {
-    epoch++; runtimeStatus = null; statusAt = 0; guard?.invalidate(); guard = null; guardConversation = null; pending = null
+    epoch++; runtimeStatus = null; statusAt = 0; statusReady = false; statusError = false; historyBaseline = null; guard?.invalidate(); guard = null; guardConversation = null; pending = null
     removeMessageViews(); panelLifecycle?.dismiss(); panelLifecycle = null; panel?.remove(); panel = null
     currentUrl = location.href
     if (!disposed) scheduleScan()
@@ -119,7 +120,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       button.style.cssText = 'background:#32473f;color:#fff;border:0;border-radius:5px;padding:5px 9px;cursor:pointer;'; button.onclick = () => { void prepareOutgoing().catch(showError) }
       bar.append(label, button); entry.before(bar)
     }
-    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '文字翻译成功扣字符 · 发送先预览' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
+    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '文字翻译成功扣字符 · 发送先预览' : statusError ? 'HelloDog 状态暂未确认，请稍后重试' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
     bar.lastChild.disabled = !supported
   }
   async function translateMessage(item, manual) {
@@ -129,7 +130,9 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     const state = cached || {}; messages.set(key, state); const startedEpoch = epoch
     state.work = true; state.error = false; state.deferred = false; renderMessageViews(state)
     try {
-      const result = await bridge.translate({ id: item.id, conversationId: item.conversationId, direction: 'incoming', text: item.text, manual })
+      const newMessage = !manual && runtimeStatus?.historyMode === 'new' && historyBaseline?.eligible.has(item.id)
+        ? { token: historyBaseline.token, anchorId: historyBaseline.anchorId, timestamp: item.timestamp, messageDirection: item.direction } : undefined
+      const result = await bridge.translate({ id: item.id, conversationId: item.conversationId, direction: 'incoming', text: item.text, manual, ...(newMessage ? { newMessage } : {}) })
       if (epoch !== startedEpoch) return
       // Mode/cache misses are a normal receipt, not a failed translation. Do
       // not repeatedly query/charge a disabled message on the polling loop.
@@ -181,6 +184,32 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     renderMessageViews(state)
     return state
   }
+  async function observeNewMessages(items) {
+    if (runtimeStatus?.historyMode !== 'new' || !runtimeStatus.newMessageTracking || !runtimeStatus.receiveAutoTranslate || runtimeStatus.translationsVisible === false) { historyBaseline = null; return }
+    if (!statusReady || !items.length) return
+    const first = items[0], before = historyBaseline
+    // Retiring an anchor, replacing the entire thread or reaching a bounded
+    // tracking limit establishes a fresh baseline, never a catch-up charge.
+    if (!before || before.expiresAt <= Date.now() || before.thread !== first.thread || before.conversationId !== first.conversationId || before.seen.size + items.length > 1000 || !items.some(item => item.id === before.anchorId) || !items.some(item => item.id === before.tailId)) {
+      historyBaseline = null
+      if (items.length > 500) return
+      const reply = await request('history-baseline', { conversationId: first.conversationId, ids: items.map(item => item.id) })
+      if (!validId(reply?.token) || !Number.isSafeInteger(reply.startedAt) || !Number.isSafeInteger(reply.expiresAt) || reply.expiresAt <= Date.now() || reply.anchorId !== items[items.length - 1].id || !items.every(item => adapter.validMessage(item))) return
+      const settled = await adapter.messages()
+      if (settled.length !== items.length || settled.some((item, index) => item.id !== items[index].id || item.thread !== first.thread)) { scheduleScan(); return }
+      historyBaseline = { ...reply, thread: first.thread, conversationId: first.conversationId, tailId: reply.anchorId, seen: new Set(items.map(item => item.id)), eligible: new Set() }
+      return
+    }
+    const tail = items.findIndex(item => item.id === before.tailId)
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index], previousKey = elementKeys.get(item.element)
+      // A prepend, rerender or recycled DOM node is not a newly received SMS.
+      // Main additionally proves timestamp freshness against its own baseline.
+      if (!before.seen.has(item.id) && index > tail && item.direction === 'incoming' && (!previousKey || previousKey === item.conversationId + ':' + item.id)) before.eligible.add(item.id)
+      before.seen.add(item.id)
+    }
+    before.tailId = items[items.length - 1].id
+  }
   async function scan() {
     scanTimer = null
     checkNavigation()
@@ -199,20 +228,30 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
           const next = await bridge.status()
           if (disposed || startedEpoch !== epoch) return
           if (runtimeStatus && runtimeStatus.localLanguage !== next.localLanguage) invalidate()
-          else if (['receiveAutoTranslate', 'historyMode', 'translationsVisible'].some(key => runtimeStatus?.[key] !== next[key])) for (const state of messages.values()) state.deferred = false
-          runtimeStatus = next
-        } catch { if (disposed || startedEpoch !== epoch) return; runtimeStatus = null }
+          else if (['receiveAutoTranslate', 'historyMode', 'translationsVisible'].some(key => runtimeStatus?.[key] !== next[key])) { historyBaseline = null; for (const state of messages.values()) state.deferred = false }
+          runtimeStatus = next; statusReady = true; statusError = false
+        } catch (error) {
+          if (disposed || startedEpoch !== epoch) return
+          statusReady = false; statusError = true
+          // A busy receipt says nothing about the last verified connection.
+          // Keep its display but pause automatic work until status is fresh.
+          if (error?.code === 'busy') statusAt = Date.now() - 9000
+          else { runtimeStatus = null; historyBaseline = null }
+        }
         toolbar(supported)
       }
       const items = await adapter.messages()
+      if (disposed || startedEpoch !== epoch) return
+      try { await observeNewMessages(items) } catch (error) { if (error?.code === 'busy') scheduleScan(); else historyBaseline = null }
       if (disposed || startedEpoch !== epoch) return
       let nextAuto
       for (const item of items) {
         if (!adapter.validMessage(item)) continue
         const state = addMessage(item)
-        if (!nextAuto && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && adapter.visibleMessage(item)) nextAuto = item
+        const automatic = runtimeStatus?.historyMode === 'visible' || runtimeStatus?.historyMode === 'new' && historyBaseline?.eligible.has(item.id)
+        if (!nextAuto && automatic && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && (runtimeStatus?.historyMode === 'new' || adapter.visibleMessage(item))) nextAuto = item
       }
-      if (nextAuto && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && runtimeStatus.historyMode === 'visible' && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
+      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
         autoBusy = true
         try { await translateMessage(nextAuto, false) } finally { autoBusy = false; scheduleScan() }
       }

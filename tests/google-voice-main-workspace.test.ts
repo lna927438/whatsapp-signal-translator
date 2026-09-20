@@ -190,7 +190,7 @@ test('page state and navigation failures are pushed without private URLs or stal
   const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents
   wc.url = 'https://voice.google.com/u/0/messages?itemId=private-conversation'; wc.emit('dom-ready')
   let event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
-  assert.equal(event.state, 'ready'); assert.equal(event.id, A); assert.ok(!JSON.stringify(event).includes('private-conversation'))
+  assert.equal(event.state, 'ready'); assert.equal(event.page, 'messages'); assert.equal(event.id, A); assert.ok(!JSON.stringify(event).includes('private-conversation'))
   wc.emit('will-navigate', { preventDefault() {} }, 'https://unknown.invalid/path?secret=private')
   event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
   assert.equal(event.state, 'ready'); assert.match(event.message, /https:\/\/unknown.invalid/); assert.ok(!event.message.includes('secret'))
@@ -198,6 +198,21 @@ test('page state and navigation failures are pushed without private URLs or stal
   event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
   assert.equal(event.state, 'error'); assert.equal(h.views[0].visible, false)
   const count = h.calls.length; h.setOwner('owner-b'); wc.emit('dom-ready'); assert.equal(h.calls.length, count)
+})
+
+test('reselecting a restricted or login page returns its page kind instead of generic translation readiness', async () => {
+  const h = fixture(); await h.workspace.focus(A); const wc = h.views[0].webContents
+  for (const [url, expected] of [
+    ['https://support.google.com/accounts/answer/40039?p=grandcentral', 'access-help'],
+    ['https://accounts.google.com/ServiceLogin?private=value', 'sign-in']
+  ]) {
+    wc.url = url; wc.emit('dom-ready')
+    const event = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+    assert.equal(event.page, expected); assert.equal(event.state, 'ready')
+    assert.equal((await h.workspace.focus(A)).page, expected)
+    assert.ok(!JSON.stringify(event).includes('private=value'))
+  }
+  await h.workspace.detachAll()
 })
 
 test('closing the parent cleans up all child contents without a native detach acknowledgment loop', async () => {
