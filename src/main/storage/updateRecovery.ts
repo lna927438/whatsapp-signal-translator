@@ -1,12 +1,27 @@
 import { cp, mkdir, lstat, readdir, realpath, writeFile } from 'fs/promises'
-import { join, resolve, relative, basename } from 'path'
+import { join, resolve, relative, basename, dirname } from 'path'
 import { randomUUID, createHash } from 'crypto'
 import { createReadStream } from 'fs'
 async function hash(path: string) { const value = createHash('sha256'); for await (const bytes of createReadStream(path)) value.update(bytes); return value.digest('hex') }
 function inside(parent: string, child: string) { const path = relative(parent.toLowerCase(), child.toLowerCase()); return !path || (!path.startsWith('..') && !path.includes(':')) }
+async function canonicalDestination(path: string): Promise<string> {
+  let ancestor = resolve(path)
+  const missing: string[] = []
+  while (true) {
+    try { return join(await realpath(ancestor), ...missing.reverse()) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(ancestor)
+      if (parent === ancestor) throw error
+      missing.push(basename(ancestor)); ancestor = parent
+    }
+  }
+}
 /** Snapshot executable files only. Chat sessions, credentials and drafts live outside this directory. */
 export async function createUpdateRecovery(installation: string, recoveryRoot: string, executable: string, version: string) {
-  const source = await realpath(installation), root = resolve(recoveryRoot)
+  // Resolve existing parents before creating anything: short Windows names and
+  // directory junctions can otherwise hide a destination inside the source.
+  const source = await realpath(installation), root = await canonicalDestination(recoveryRoot)
   if (inside(source, root) || inside(root, source)) throw new Error('恢复目录不能与程序目录重叠。')
   if (basename(executable) !== executable || !/^[\w .-]+\.exe$/i.test(executable)) throw new Error('程序名称无效。')
   const verifyTree = async (path: string): Promise<void> => {

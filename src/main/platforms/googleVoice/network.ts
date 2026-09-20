@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import { net, session, type Session, type WebContents } from 'electron'
 import { configureProxySession, normalizeProxy, proxyAuthMatches, type AccountProxy } from '../../network/accountProxy'
+import { createGoogleVoiceSocksBridge, type GoogleVoiceNetworkRoute } from './socksBridge'
+export type { GoogleVoiceNetworkRoute } from './socksBridge'
 
 export type GoogleVoiceNetworkCheck = { ip: string; latencyMs: number; checkedAt: number }
 const CHECK_URL = 'https://api.ipify.org?format=json'
@@ -34,9 +36,26 @@ export function normalizeGoogleVoiceProxy(input: any): AccountProxy {
   // Validate a populated endpoint even when disabled, but don't require a host
   // for an unused default port.
   const hasEndpoint = Boolean(host)
-  const proxy = normalizeProxy({ ...input, host, enabled: enabled || hasEndpoint })
+  // Electron's native SOCKS implementation has no username/password support.
+  // Voice uses its private CONNECT bridge for SOCKS, while sharing endpoint
+  // validation with the existing account network layer.
+  const socks = input.protocol === 'socks5'
+  const proxy = normalizeProxy({ ...input, host, enabled: enabled || hasEndpoint, ...(socks ? { protocol: 'http', username: '', password: '', hasPassword: false } : {}) })
   if (host && !isIP(host) && !host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) throw new Error('请输入有效的代理主机地址，不包含协议或路径。')
+  if (socks) {
+    const username = input.username || '', hasPassword = Boolean(!input.clearPassword && (input.password || input.hasPassword))
+    if (Buffer.byteLength(username, 'utf8') > 255 || input.password && Buffer.byteLength(input.password, 'utf8') > 255 || Boolean(username) !== hasPassword) throw new Error('SOCKS5 账号和密码需要同时填写，且各不超过 255 个 UTF-8 字节。')
+    return { ...proxy, enabled, protocol: 'socks5', username, hasPassword }
+  }
   return { ...proxy, enabled }
+}
+
+/** Main-process-only route; never expose the loopback capability to renderers. */
+export async function prepareGoogleVoiceNetwork(proxy?: AccountProxy, password = ''): Promise<GoogleVoiceNetworkRoute> {
+  const normalized = proxy ? normalizeGoogleVoiceProxy({ ...proxy, password }) : undefined
+  if (normalized?.enabled && normalized.protocol === 'socks5') return createGoogleVoiceSocksBridge(normalized, password)
+  const route: GoogleVoiceNetworkRoute = { proxy: normalized, password, async close() { route.password = '' } }
+  return route
 }
 
 /** Auth belongs to this exact window and proxy; never a Google origin challenge. */
@@ -54,14 +73,19 @@ export function attachGoogleVoiceProxyAuth(contents: WebContents, proxy: Account
     }
     callback(configured.username || '', secret)
   }
+  const navigation = (details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>) => {
+    if (!disposed && details.isMainFrame === true && details.isSameDocument === false) rejected = false
+  }
   const dispose = () => {
     if (disposed) return
     disposed = true; secret = ''
     contents.removeListener('login', login)
+    contents.removeListener('did-start-navigation', navigation)
     contents.removeListener('destroyed', dispose)
   }
   if (contents.isDestroyed()) { disposed = true; secret = ''; return dispose }
   contents.on('login', login)
+  contents.on('did-start-navigation', navigation)
   contents.once('destroyed', dispose)
   return dispose
 }
@@ -129,16 +153,19 @@ export async function testGoogleVoiceProxy(input: any, password: string): Promis
   const proxy = normalizeGoogleVoiceProxy({ ...input, password })
   if (!proxy.enabled) throw new Error('请先启用并填写代理。')
   const ses = session.fromPartition(`google-voice-proxy-test:${randomUUID()}`, { cache: false })
+  let route: GoogleVoiceNetworkRoute | undefined
   try {
-    try { await withTimeout(configureProxySession(ses, proxy), CHECK_TIMEOUT_MS, '代理设置超时。') }
+    route = await prepareGoogleVoiceNetwork(proxy, password)
+    try { await withTimeout(configureProxySession(ses, route.proxy), CHECK_TIMEOUT_MS, '代理设置超时。') }
     catch { throw new Error('代理设置未成功，已停止检测；请检查地址和端口。') }
-    return await checkGoogleVoiceSession(ses, proxy, password)
+    return await checkGoogleVoiceSession(ses, route.proxy, route.password)
   } finally {
     // Only the temporary test session is cleaned. Never touch a logged-in window.
     await withTimeout(Promise.allSettled([
       Promise.resolve().then(() => ses.closeAllConnections()),
       Promise.resolve().then(() => ses.clearAuthCache()),
-      Promise.resolve().then(() => ses.clearStorageData())
+      Promise.resolve().then(() => ses.clearStorageData()),
+      Promise.resolve().then(() => route?.close())
     ]), 1500, '临时会话清理超时。').catch(() => undefined)
   }
 }

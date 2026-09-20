@@ -22,6 +22,76 @@ function harness(){
   return {run,payload,preferences,checks,requests,get incomingCalls(){return incomingCalls},get providerCalls(){return providerCalls},setBalance:(value:boolean)=>balance=value,setResult:(value:string)=>translated=value,setIdentity:(value:boolean)=>valid=value,authorized:()=>valid}
 }
 
+const mediaFixture={fingerprint:'a'.repeat(64),count:1,types:['image/png'],totalBytes:1024}
+test('image-only sends use no translation API or characters and reserve a durable image-specific dispatch',async()=>{
+  const h=harness(),payload={...h.payload,text:'',media:mediaFixture}
+  const answer:any=await h.run('owner','window','translate',payload,h.authorized)
+  assert.equal(answer.text,'');assert.equal(answer.untranslated,true);assert.equal(h.providerCalls,0);assert.equal(h.checks.length,0)
+  assert.deepEqual(JSON.parse(JSON.stringify(answer.media)),mediaFixture)
+  const authorization:any=await h.run('owner','window','authorize',{...payload,translated:'',requestId:answer.requestId},h.authorized)
+  assert.equal(authorization.authorized,true)
+  assert.equal((await h.run('owner','window','dispatch-status',payload,h.authorized) as any).state,'uncertain')
+  const changed={...payload,media:{...mediaFixture,fingerprint:'b'.repeat(64)}}
+  assert.equal((await h.run('owner','window','dispatch-status',changed,h.authorized) as any).state,'clear')
+  await assert.rejects(h.run('owner','window','authorize',{...changed,translated:'',requestId:answer.requestId},h.authorized))
+  await assert.rejects(h.run('owner','window','translate',payload,h.authorized),/待确认/)
+  await h.run('owner','window','dispatch-resolve',{conversationId:payload.conversationId,media:mediaFixture,requestId:answer.requestId,attempt:1,outcome:'not-sent',confirmed:true},h.authorized)
+  assert.equal((await h.run('owner','window','dispatch-status',payload,h.authorized) as any).state,'clear')
+})
+
+test('image captions preserve translation billing and cannot authorize a changed or removed attachment',async()=>{
+  const h=harness(),payload={...h.payload,media:mediaFixture}
+  const answer:any=await h.run('owner','window','translate',payload,h.authorized)
+  assert.equal(h.providerCalls,1);assert.deepEqual(h.checks,[false,true])
+  await h.run('owner','window','translate',payload,h.authorized);assert.equal(h.providerCalls,1)
+  await assert.rejects(h.run('owner','window','authorize',{...h.payload,translated:answer.text,requestId:answer.requestId},h.authorized))
+  await assert.rejects(h.run('owner','window','authorize',{...payload,media:{...mediaFixture,totalBytes:2048},translated:answer.text,requestId:answer.requestId},h.authorized))
+  assert.equal((await h.run('owner','window','authorize',{...payload,translated:answer.text,requestId:answer.requestId},h.authorized) as any).authorized,true)
+  const other={...payload,media:{...mediaFixture,fingerprint:'b'.repeat(64)}}
+  await h.run('owner','window','translate',other,h.authorized);assert.equal(h.providerCalls,2)
+})
+
+test('media metadata is bounded and cannot smuggle filenames, URLs, unsupported files or incoming draft data',async()=>{
+  const h=harness()
+  for(const media of [null,{}, {...mediaFixture,count:0},{...mediaFixture,count:2},{...mediaFixture,types:['audio/mp3']},{...mediaFixture,totalBytes:20*1024*1024+1},{...mediaFixture,filename:'private'},{...mediaFixture,fingerprint:'bad'}]) {
+    await assert.rejects(h.run('owner','window','translate',{...h.payload,media},h.authorized))
+  }
+  await assert.rejects(h.run('owner','window','translate',{...h.payload,direction:'incoming',media:mediaFixture},h.authorized))
+  await assert.rejects(h.run('owner','window','translate',{...h.payload,text:''},h.authorized))
+  assert.equal(h.providerCalls,0)
+})
+
+test('a first SMS remains protected when Google replaces its draft route with a real thread',async()=>{
+  const h=harness(),context={kind:'recipients',recipientKey:'a'.repeat(64),recipientCount:1}
+  const draft={...h.payload,text:'Hello',conversationId:'draft-destination',context}
+  const answer:any=await h.run('owner','window','translate',draft,h.authorized)
+  await h.run('owner','window','authorize',{...draft,translated:answer.text,requestId:answer.requestId},h.authorized)
+  const after={...h.payload,text:'Hello',conversationId:'new-server-thread'}
+  assert.equal((await h.run('owner','window','dispatch-status',after,h.authorized) as any).state,'uncertain')
+  await assert.rejects(h.run('owner','window','translate',after,h.authorized),/待确认/)
+  assert.equal((await h.run('owner','different-window','dispatch-status',after,h.authorized) as any).state,'clear')
+  const resolution={conversationId:after.conversationId,requestId:answer.requestId,attempt:1,outcome:'sent',confirmed:true}
+  await assert.rejects(h.run('different-owner','window','dispatch-resolve',resolution,h.authorized))
+  await assert.rejects(h.run('owner','window','dispatch-resolve',{...resolution,attempt:2},h.authorized))
+  await h.run('owner','window','dispatch-resolve',resolution,h.authorized)
+  assert.equal((await h.run('owner','window','dispatch-status',after,h.authorized) as any).state,'clear')
+  assert.equal(h.providerCalls,0)
+})
+
+test('new-recipient image uncertainty cannot be resolved with a different image after thread navigation',async()=>{
+  const h=harness(),context={kind:'recipients',recipientKey:'a'.repeat(64),recipientCount:1}
+  const draft={...h.payload,text:'',media:mediaFixture,context}
+  const answer:any=await h.run('owner','window','translate',draft,h.authorized)
+  await h.run('owner','window','authorize',{...draft,translated:'',requestId:answer.requestId},h.authorized)
+  const after={conversationId:'new-server-thread',text:'',media:mediaFixture}
+  assert.equal((await h.run('owner','window','dispatch-status',after,h.authorized) as any).state,'uncertain')
+  const resolution={...after,requestId:answer.requestId,attempt:1,outcome:'not-sent',confirmed:true}
+  await assert.rejects(h.run('owner','window','dispatch-resolve',{...resolution,media:{...mediaFixture,fingerprint:'b'.repeat(64)}},h.authorized))
+  await assert.rejects(h.run('owner','window','dispatch-resolve',resolution,h.authorized),/原来的收件人/)
+  assert.equal((await h.run('owner','window','dispatch-status',after,h.authorized) as any).state,'uncertain')
+  await h.run('owner','window','dispatch-resolve',{...resolution,conversationId:draft.conversationId,context},h.authorized)
+})
+
 test('editor whitespace uses the canonical engine receipt and keeps the original dispatch fingerprint',async()=>{
   const h=harness(),payload={...h.payload,text:' \n你好，你好吗？\n '}
   const answer:any=await h.run('owner','window','translate',payload,h.authorized)

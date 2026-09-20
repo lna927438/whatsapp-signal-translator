@@ -47,6 +47,35 @@ function fixture(timeoutMs = 1000) {
   return { request, id, calls, raw: (input: unknown, event: unknown = eventA) => bridge.request(event, input), data: () => structuredClone(data), restart: () => { bridge = build() }, setData: (value: GoogleVoiceEmbeddedDraftData) => { data = value }, setReadGate: (value: Promise<void> | undefined) => { readGate = value }, setWriteGate: (value: Promise<void> | undefined) => { writeGate = value }, setWriteError: (value: boolean) => { writeError = value }, setHandler: (value: typeof execute) => { execute = value }, navigate: (value: string) => { currentUrl = value; revision++ }, changeOwner: () => { owner = 'owner-b'; revision++ } }
 }
 
+test('image-only drafts persist without bodies and bind every operation to exact image metadata',async()=>{
+  const h=fixture(),media={fingerprint:'a'.repeat(64),count:1,types:['image/png'],totalBytes:1024}
+  h.setHandler(async call=>call.op==='translate'?{enabled:true,text:'',untranslated:true,requestId:'send-fixture',media:call.payload.media}:call.op==='authorize'?{authorized:true,requestId:call.payload.requestId,attempt:1}:{state:'clear'})
+  const first=await h.request('outgoing-id',{conversationId,text:'',media});assert.equal(first.ok,true)
+  h.restart();assert.equal((await h.request('outgoing-id',{conversationId,text:'',media})).result.id,first.result.id)
+  const other=await h.request('outgoing-id',{conversationId,text:'',media:{...media,fingerprint:'b'.repeat(64)}})
+  assert.notEqual(other.result.id,first.result.id)
+  const payload={conversationId,text:'',id:first.result.id,media,direction:'outgoing'}
+  assert.equal((await h.request('translate',payload)).ok,true)
+  assert.equal((await h.request('authorize',{...payload,translated:'',requestId:'send-fixture'})).ok,true)
+  assert.equal((await h.request('translate',{...payload,media:{...media,totalBytes:2048}})).ok,false)
+  assert.equal((await h.request('translate',{...payload,media:undefined})).ok,false)
+  assert.equal((await h.request('translate',{...payload,direction:'incoming'})).ok,false)
+  assert.ok(!JSON.stringify(h.data()).includes(media.fingerprint))
+  const before=h.calls.length
+  for(const bad of [{...media,filename:'private.png'},{...media,types:['video/mp4']},{...media,count:11},{...media,totalBytes:0}])assert.equal((await h.request('outgoing-id',{conversationId,text:'',media:bad})).ok,false)
+  assert.equal(h.calls.length,before)
+})
+
+test('an empty or changed media receipt never authorizes a blank text-only message',async()=>{
+  const h=fixture(),media={fingerprint:'a'.repeat(64),count:1,types:['image/png'],totalBytes:1024}
+  const id=(await h.request('outgoing-id',{conversationId,text:'',media})).result.id
+  const payload={conversationId,text:'',id,media,direction:'outgoing'}
+  h.setHandler(async()=>({enabled:true,text:'',untranslated:true,requestId:'send-fixture'}))
+  assert.equal((await h.request('translate',payload)).ok,false)
+  h.setHandler(async()=>({enabled:true,text:'',untranslated:true,requestId:'send-fixture',media:{...media,fingerprint:'b'.repeat(64)}}))
+  assert.equal((await h.request('translate',payload)).ok,false)
+})
+
 test('internal bridge derives owner/window from the actual sender and strips provider fields', async () => {
   const h = fixture()
   const reply = await h.raw({ v: 1, type: 'voice.status', owner: 'forged', accountId: windowB })
@@ -80,6 +109,22 @@ test('URL conversation must match the payload; fresh-recipient and login surface
   h.navigate('https://accounts.google.com/signin')
   assert.equal((await h.request('status')).ok, false)
   assert.equal(h.calls.length, 0); assert.equal(Object.keys(h.data().records).length, 0)
+})
+
+test('new SMS drafts bind confirmed recipient hashes to the observed draft route and reject member changes',async()=>{
+  const h=fixture(),context={kind:'recipients',recipientKey:'a'.repeat(64),recipientCount:2}
+  const conversationId='gv_'+hash(['/u/0/messages','draft',context.recipientKey,context.recipientCount])
+  h.navigate('https://voice.google.com/u/0/messages?itemId=draft')
+  const draft=await h.request('outgoing-id',{conversationId,text:'你好',context});assert.equal(draft.ok,true)
+  const payload={conversationId,text:'你好',context,id:draft.result.id,direction:'outgoing'}
+  assert.equal((await h.request('translate',payload)).ok,true)
+  assert.equal(h.calls[0].payload.context.recipientCount,2)
+  assert.equal((await h.request('authorize',{...payload,translated:'Hello',requestId:'send-fixture',context:{...context,recipientKey:'b'.repeat(64)}})).ok,false)
+  for(const context of [{kind:'recipients',recipientKey:'a'.repeat(64),recipientCount:8},{kind:'recipients',recipientKey:'raw phone',recipientCount:1},undefined])assert.equal((await h.request('outgoing-id',{conversationId,text:'Hello',context})).ok,false)
+  assert.equal((await h.request('translate',{...payload,direction:'incoming'})).ok,false)
+  h.navigate(url)
+  assert.equal((await h.request('authorize',{...payload,translated:'Hello',requestId:'send-fixture'})).ok,false)
+  assert.ok(!JSON.stringify(h.data()).includes(context.recipientKey))
 })
 
 test('outgoing translate and authorize refuse forged UUID without reaching the engine', async () => {

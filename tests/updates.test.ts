@@ -2,7 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
-import { writeFileSync,readFileSync,existsSync,readdirSync,rmSync } from 'node:fs'
+import { writeFileSync,readFileSync,existsSync,readdirSync,rmSync,mkdirSync,symlinkSync,realpathSync } from 'node:fs'
+import { join,resolve,dirname } from 'node:path'
 import { mainHarness } from './main-harness.ts'
 const content=Buffer.from('verified installer fixture '.repeat(600))
 const digest=createHash('sha256').update(content).digest('hex')
@@ -61,6 +62,39 @@ test('update recovery copies and verifies the prior executable independently of 
   const manifest=JSON.parse(readFileSync(backup+'/recovery.json','utf8'))
   assert.equal(manifest.version,'0.5.1');assert.equal(Object.keys(manifest.hashes).length,2)
   await assert.rejects(createUpdateRecovery(source,source+'/nested','HelloDog.exe','0.5.1'),/重叠/)
+  assert.equal(existsSync(source+'/nested'),false)
   assert.equal(readFileSync(source+'/HelloDog.exe','utf8'),'old executable')
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('update recovery rejects existing and uncreated aliased source descendants before creating directories',async()=>{
+ const h=mainHarness();try{
+  const source=join(h.directory,'installed'),alias=join(h.directory,'installation-alias')
+  mkdirSync(join(source,'resources'),{recursive:true})
+  writeFileSync(join(source,'HelloDog.exe'),'old executable');writeFileSync(join(source,'resources','app.asar'),'old app')
+  symlinkSync(resolve(source),alias,process.platform==='win32'?'junction':'dir')
+  const {createUpdateRecovery}=h.load('src/main/storage/updateRecovery.ts')
+  for(const root of [alias,join(alias,'resources'),join(alias,'not-created','nested','recovery')])await assert.rejects(createUpdateRecovery(source,root,'HelloDog.exe','0.5.1'),/重叠/)
+  assert.equal(existsSync(join(source,'not-created')),false)
+  assert.deepEqual(readdirSync(source).sort(),['HelloDog.exe','resources'])
+  assert.deepEqual(readdirSync(join(source,'resources')),['app.asar'])
+  assert.equal(readFileSync(join(source,'HelloDog.exe'),'utf8'),'old executable')
+  assert.equal(readFileSync(join(source,'resources','app.asar'),'utf8'),'old app')
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+test('update recovery resolves an outside aliased ancestor and creates only its missing destination segments',async()=>{
+ const h=mainHarness();try{
+  const source=join(h.directory,'installed'),outside=join(h.directory,'outside'),alias=join(h.directory,'outside-alias')
+  mkdirSync(join(source,'resources'),{recursive:true});mkdirSync(outside)
+  writeFileSync(join(source,'HelloDog.exe'),'old executable');writeFileSync(join(source,'resources','app.asar'),'old app')
+  symlinkSync(resolve(outside),alias,process.platform==='win32'?'junction':'dir')
+  const {createUpdateRecovery}=h.load('src/main/storage/updateRecovery.ts')
+  const backup=await createUpdateRecovery(source,join(alias,'new','nested'),'HelloDog.exe','0.5.1')
+  assert.equal(backup,realpathSync.native(backup))
+  assert.equal(dirname(backup),join(realpathSync.native(outside),'new','nested'))
+  assert.equal(readFileSync(join(backup,'files','HelloDog.exe'),'utf8'),'old executable')
+  assert.equal(readFileSync(join(backup,'files','resources','app.asar'),'utf8'),'old app')
+  assert.deepEqual(readdirSync(source).sort(),['HelloDog.exe','resources'])
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })

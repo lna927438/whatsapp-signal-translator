@@ -9,7 +9,7 @@ const tick = () => new Promise<void>(resolve => setTimeout(resolve, 5))
 
 function fixture(options: any = {}) {
   const sessions = new Map<string, any>(), views: FakeView[] = [], states: any[] = [], blocked: any[] = []
-  const networkCalls: any[] = []
+  const networkCalls: any[] = [], routes: any[] = [], authCalls: any[] = [], preparations: any[] = []
   let proxyGate: Promise<void> | undefined, rejectProxy = false
   let loadingFailure: Promise<void> | undefined
   let failNextView = false
@@ -65,17 +65,27 @@ function fixture(options: any = {}) {
   }
   const parent = new FakeParent()
   const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition: getSession } }, undefined, { './network': {
-    attachGoogleVoiceProxyAuth: () => () => {},
+    prepareGoogleVoiceNetwork: async (proxy: any, password: string) => {
+      preparations.push({ proxy, password })
+      const route = options.prepareNetwork ? await options.prepareNetwork(proxy, password, preparations.length) : networkRoute(proxy, password)
+      routes.push(route); return route
+    },
+    attachGoogleVoiceProxyAuth: (contents: any, proxy: any, password: string) => {
+      const call = { contents, proxy, password, active: true }; authCalls.push(call)
+      return () => { call.active = false; call.password = '' }
+    },
     checkGoogleVoiceSession: async (...args: any[]) => { networkCalls.push(['check', ...args]); return options.networkCheck ? options.networkCheck(...args) : { ip: '203.0.113.10', latencyMs: 8, checkedAt: 1000 } }
   } })
   const module = h.load('src/main/platforms/googleVoice/embeddedViews.ts')
   const manager = new module.GoogleVoiceEmbeddedViews(parent, { ...options, onState: (state: any) => states.push(state), onBlockedNavigation: (event: any) => blocked.push(event) })
   manager.setBounds({ x: 60, y: 120, width: 1100, height: 650 })
   const popup = (contents: FakeContents, url = 'https://accounts.google.com/ServiceLogin', extra: any = {}) => contents.open({ url, disposition: 'new-window', referrer: { url: 'https://voice.google.com/u/0/', policy: 'strict-origin-when-cross-origin' }, ...extra })
-  return { manager, parent, module, sessions, views, states, blocked, popup, FakeContents, networkCalls, setProxyGate: (gate?: Promise<void>) => { proxyGate = gate }, rejectProxy: (value: boolean) => { rejectProxy = value }, failNextView: () => { failNextView = true }, setLoadingFailure: (promise: Promise<void>) => { loadingFailure = promise } }
+  return { manager, parent, module, sessions, views, states, blocked, popup, FakeContents, networkCalls, routes, authCalls, preparations, setProxyGate: (gate?: Promise<void>) => { proxyGate = gate }, rejectProxy: (value: boolean) => { rejectProxy = value }, failNextView: () => { failNextView = true }, setLoadingFailure: (promise: Promise<void>) => { loadingFailure = promise } }
 }
 
 const proxyConfig = { enabled: true, protocol: 'http', host: 'proxy.example.invalid', port: 3128, username: 'synthetic' }
+function networkRoute(proxy: any, password: string) { return { proxy, password, closed: 0, async close() { this.closed++; this.password = '' } } }
+const bridgeRoute = (port: number) => networkRoute({ enabled: true, protocol: 'http', host: '127.0.0.1', port, username: 'capability-' + port }, 'capability-secret-' + port)
 function requestCancelled(session: any): boolean { let result: any; session.webRequest.before({}, (value: any) => { result = value }); return result.cancel }
 
 test('proxy setup gates every request before navigation and applies WebRTC protection to root and popup', async () => {
@@ -110,15 +120,109 @@ test('a hung native proxy setup becomes a visible error and cannot load late aft
   context.mock.timers.enable({ apis: ['setTimeout'] })
   const h = fixture(); let release!: () => void; h.setProxyGate(new Promise<void>(resolve => { release = resolve }))
   h.manager.create('owner', A, { proxy: proxyConfig, password: '' })
+  for (let index = 0; index < 20; index++) await Promise.resolve()
+  assert.equal(h.networkCalls.filter(row => row[0] === 'proxy').length, 1)
   context.mock.timers.tick(15_000)
   assert.equal(h.manager.getState('owner', A).status, 'failed')
   assert.match(h.manager.getState('owner', A).network.message, /初始化超时/)
   assert.throws(() => h.manager.reload('owner', A), /初始化超时/)
   assert.equal(h.manager.getState('owner', A).status, 'failed')
   const wc = h.views[0].webContents; assert.equal(requestCancelled(wc.session), true)
+  for (let index = 0; index < 5; index++) await Promise.resolve()
+  assert.equal(h.routes[0].closed, 1, 'Route resources close even while the native queue remains pending')
   release(); for (let index = 0; index < 15; index++) await Promise.resolve()
   assert.equal(wc.calls.length, 0); assert.equal(requestCancelled(wc.session), true)
   h.manager.close('owner', A)
+})
+
+test('prepared SOCKS routes remain separate and root, popups and IP checks use only their own bridge credentials', async () => {
+  const first = bridgeRoute(18001), second = bridgeRoute(18002)
+  const h = fixture({ prepareNetwork: (_proxy: any, _password: string, index: number) => index === 1 ? first : second })
+  const original = { ...proxyConfig, protocol: 'socks5', username: 'upstream-user' }
+  h.manager.create('owner', A, { proxy: original, password: 'upstream-a' })
+  h.manager.create('owner', B, { proxy: original, password: 'upstream-b' }); await tick()
+  const a = h.views[0].webContents, b = h.views[1].webContents
+  const configurations = h.networkCalls.filter(row => row[0] === 'proxy')
+  assert.deepEqual(configurations.map(row => row[2].proxyRules), ['http://127.0.0.1:18001', 'http://127.0.0.1:18002'])
+  const popup = h.popup(a).createWindow({})
+  for (const [contents, route] of [[a, first], [b, second], [popup, first]] as const) {
+    const auth = h.authCalls.find(row => row.contents === contents && row.active)
+    assert.equal(auth.proxy, route.proxy); assert.equal(auth.password, route.password)
+    assert.equal(contents.rtcPolicy, 'disable_non_proxied_udp')
+  }
+  for (const [contents, route] of [[a, first], [b, second]] as const) {
+    const check = h.networkCalls.find(row => row[0] === 'check' && row[1] === contents.session)
+    assert.equal(check[2], route.proxy); assert.equal(check[3], route.password)
+  }
+  assert.ok(!JSON.stringify(h.states).includes('capability')); assert.ok(!JSON.stringify(h.states).includes('upstream'))
+  h.manager.close('owner', A); await tick()
+  assert.equal(first.closed, 1); assert.equal(second.closed, 0)
+  assert.equal(requestCancelled(a.session), true); assert.equal(requestCancelled(b.session), false)
+  assert.ok(h.authCalls.filter(row => row.contents === a || row.contents === popup).every(row => !row.active && !row.password))
+  h.manager.destroy(); h.manager.destroy(); await tick()
+  assert.equal(second.closed, 1); assert.equal(first.closed, 1); assert.equal(requestCancelled(b.session), true)
+})
+
+test('a bridge prepared after closing its window is released without configuring the replacement session', async () => {
+  let finish!: (route: any) => void
+  const old = bridgeRoute(18101), replacement = bridgeRoute(18102)
+  const h = fixture({ prepareNetwork: (_proxy: any, _password: string, index: number) => index === 1 ? new Promise(resolve => { finish = resolve }) : replacement })
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'old-upstream' })
+  const oldPage = h.views[0].webContents
+  assert.equal(requestCancelled(oldPage.session), true); assert.equal(h.networkCalls.length, 0)
+  h.manager.close('owner', A)
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'new-upstream' }); await tick()
+  const newPage = h.views[1].webContents
+  assert.equal(newPage.session, oldPage.session); assert.equal(requestCancelled(newPage.session), false)
+  finish(old); await tick()
+  assert.equal(old.closed, 1); assert.equal(replacement.closed, 0)
+  assert.deepEqual(h.networkCalls.filter(row => row[0] === 'proxy').map(row => row[2].proxyRules), ['http://127.0.0.1:18102'])
+  assert.ok(!oldPage.calls.some(row => row.url)); assert.equal(newPage.calls.filter(row => row.url).length, 1)
+  assert.equal(requestCancelled(newPage.session), false)
+  h.manager.destroy(); await tick(); assert.equal(replacement.closed, 1)
+})
+
+test('failed native configuration releases its route and retry uses a new bridge without a direct fallback', async () => {
+  const first = bridgeRoute(18201), retry = bridgeRoute(18202)
+  const h = fixture({ prepareNetwork: (_proxy: any, _password: string, index: number) => index === 1 ? first : retry })
+  h.rejectProxy(true); h.manager.create('owner', A, { proxy: proxyConfig, password: 'upstream' }); await tick()
+  const wc = h.views[0].webContents
+  assert.equal(first.closed, 1); assert.equal(first.password, ''); assert.equal(requestCancelled(wc.session), true)
+  assert.equal(h.authCalls.length, 0); assert.equal(wc.calls.length, 0)
+  h.rejectProxy(false); h.manager.reload('owner', A); await tick()
+  assert.equal(retry.closed, 0); assert.equal(requestCancelled(wc.session), false)
+  assert.deepEqual(h.networkCalls.filter(row => row[0] === 'proxy').map(row => row[2].proxyRules), ['http://127.0.0.1:18201', 'http://127.0.0.1:18202'])
+  assert.ok(h.networkCalls.filter(row => row[0] === 'proxy').every(row => row[2].mode === 'fixed_servers'))
+  assert.equal(h.authCalls[0].password, retry.password)
+  h.manager.destroy(); await tick(); assert.equal(first.closed, 1); assert.equal(retry.closed, 1)
+})
+
+test('preparation timeout closes a late bridge without applying it or unblocking requests', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let finish!: (route: any) => void
+  const route = bridgeRoute(18301), h = fixture({ prepareNetwork: () => new Promise(resolve => { finish = resolve }) })
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'upstream' })
+  context.mock.timers.tick(15_000)
+  const wc = h.views[0].webContents
+  assert.equal(h.manager.getState('owner', A).status, 'failed'); assert.equal(requestCancelled(wc.session), true)
+  finish(route); for (let index = 0; index < 25; index++) await Promise.resolve()
+  assert.equal(route.closed, 1); assert.equal(h.networkCalls.length, 0); assert.equal(h.authCalls.length, 0)
+  assert.equal(wc.calls.length, 0); assert.equal(requestCancelled(wc.session), true)
+  h.manager.destroy()
+})
+
+test('preparation rejection and route cleanup failure remain contained during application destruction', async () => {
+  const h = fixture({ prepareNetwork: async (_proxy: any, _password: string, index: number) => {
+    if (index === 1) throw new Error('synthetic listener failure')
+    const route = bridgeRoute(18401); route.close = async () => { route.closed++; throw new Error('synthetic cleanup failure') }; return route
+  } })
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'upstream' }); await tick()
+  assert.equal(h.manager.getState('owner', A).status, 'failed'); assert.equal(requestCancelled(h.views[0].webContents.session), true)
+  assert.equal(h.networkCalls.length, 0)
+  h.manager.create('owner', B, { proxy: proxyConfig, password: 'other-upstream' }); await tick()
+  h.parent.destroyed = true; assert.doesNotThrow(() => h.parent.emit('closed')); await tick()
+  assert.ok(h.views.every(view => view.webContents.destroyed)); assert.equal(h.routes[0].closed, 1)
+  assert.ok(h.views.every(view => requestCancelled(view.webContents.session)))
 })
 
 test('closing during pending proxy setup cannot navigate later or override a replacement route', async () => {

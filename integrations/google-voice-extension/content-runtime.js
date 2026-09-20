@@ -62,7 +62,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   async function prepareOutgoing() {
     checkNavigation()
     const startedEpoch = epoch
-    if (!await adapter.refresh()) throw new Error('当前短信会话或附件编辑器尚未支持，已阻止此发送操作。')
+    if (!await adapter.refresh()) throw new Error(adapter.reason || '当前短信编辑器尚未识别，已阻止此发送操作。')
     if (disposed || epoch !== startedEpoch) return
     const snapshot = adapter.snapshot()
     if (!guard || guardConversation !== snapshot.conversationId) { guard = new SendGuard(adapter, bridge); guardConversation = snapshot.conversationId }
@@ -71,20 +71,23 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     let preview
     try { preview = await active.prepare() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
     if (guard !== active || adapter.snapshot()?.conversationId !== snapshot.conversationId) throw new Error('会话已变化，译文未发送。')
-    showPanel(preview.untranslated ? 'HelloDog · 原文无需翻译' : 'HelloDog · 发送前预览', preview.text, [{ label: '确认发送', run: async () => {
+    toolbar(adapter.supported)
+    const targetNote = preview.context ? `已选 ${preview.context.recipientCount} 位收件人，请核对官方收件人列表。\n\n` : ''
+    const previewText = targetNote + (preview.media ? `已核对 ${preview.media.count} 张图片，请同时核对原站图片预览。${preview.text ? '\n\n' + preview.text : '\n没有文字说明；此操作不调用文字翻译。'}` : preview.text)
+    showPanel(preview.media ? 'HelloDog · 图片发送前预览' : preview.untranslated ? 'HelloDog · 原文无需翻译' : 'HelloDog · 发送前预览', previewText, [{ label: '确认发送', run: async () => {
       try { await active.confirm() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
       if (disposed || epoch !== startedEpoch) return
       showPanel('HelloDog · 已提交', '已执行一次原站发送操作。送达情况以 Google Voice 官方聊天为准。', [], '可以继续编辑其他短信。同文再次发送前需要先核对此次结果；不会自动重发。')
     } }])
   }
-  // Installed before the app's document handlers. Unknown new-recipient and
+  // Installed before the app's document handlers. Unverified recipients and
   // attachment surfaces using these known controls are blocked, not guessed.
   for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'click', 'submit', 'paste', 'drop']) listen(window, type, event => {
     checkNavigation()
     const intent = adapter.eventIntent(event)
     if (!intent) return
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
-    if (intent === 'attachment') { showError(new Error('当前仅支持已核实的纯文本短信，图片草稿发送尚未验证。')); return }
+    if (intent === 'attachment') { showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。视频和音频附件不在此发送范围内。')); return }
     if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.altKey || event.metaKey || type === 'keyup' || type === 'keypress' || type === 'beforeinput') return
     void prepareOutgoing().catch(showError)
   }, true)
@@ -99,7 +102,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       button.style.cssText = 'background:#32473f;color:#fff;border:0;border-radius:5px;padding:5px 9px;cursor:pointer;'; button.onclick = () => { void prepareOutgoing().catch(showError) }
       bar.append(label, button); entry.before(bar)
     }
-    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '文本发送先预览 · 不自动重发' : '发送前需连接 HelloDog' : '当前编辑器未识别 · 已阻止已知发送入口'
+    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '发送先预览 · 不自动重发' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
     bar.lastChild.disabled = !supported
   }
   async function translateMessage(item, manual) {
@@ -171,7 +174,8 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       const supported = await adapter.refresh()
       if (disposed || startedEpoch !== epoch) return
       toolbar(supported)
-      if (!supported) return
+      // Incoming history remains readable while a draft is uploading, a
+      // composer is disabled, or an unknown send surface is safely blocked.
       if (Date.now() - statusAt > 10000 && !autoBusy && !['preparing', 'authorizing'].includes(guard?.state)) {
         statusAt = Date.now()
         try {
@@ -181,7 +185,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
           else if (['receiveAutoTranslate', 'historyMode', 'translationsVisible'].some(key => runtimeStatus?.[key] !== next[key])) for (const state of messages.values()) state.deferred = false
           runtimeStatus = next
         } catch { if (disposed || startedEpoch !== epoch) return; runtimeStatus = null }
-        toolbar(true)
+        toolbar(supported)
       }
       const items = await adapter.messages()
       if (disposed || startedEpoch !== epoch) return
@@ -202,6 +206,8 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly'] })
   listen(window, 'popstate', () => { checkNavigation(); scheduleScan() }); listen(window, 'hashchange', checkNavigation)
   listen(window, 'scroll', scheduleScan, true); listen(document, 'visibilitychange', () => { if (document.visibilityState === 'visible') for (const state of messages.values()) state.deferred = false; scheduleScan() })
+  listen(document, 'hellodog-voice-draft-ready', scheduleScan)
+  listen(document, 'load', event => { if (event.target?.matches?.('gv-message-entry img')) scheduleScan() }, true)
   // Check only the URL each second; rendered message scans remain event driven.
   let lastMaintenance = Date.now()
   const pollTimer = setInterval(() => { checkNavigation(); if (Date.now() - lastMaintenance >= 10000) { lastMaintenance = Date.now(); scheduleScan() } }, 1000)

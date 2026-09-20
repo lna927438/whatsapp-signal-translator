@@ -1,8 +1,10 @@
-import { textValue, translatedValue, translationPayload } from './protocol.mjs'
+import { draftTextValue, mediaValue, recipientContextValue, translatedValue, translationPayload } from './protocol.mjs'
 
 const hasForbiddenHan = (text, language) => !/^(zh|ja)(?:-|$)/i.test(language) && /\p{Script=Han}/u.test(text)
-const sameTarget = (a, b) => a && b && a.conversationId === b.conversationId && a.composer === b.composer && a.sendButton === b.sendButton
-const sameDraft = (a, b) => sameTarget(a, b) && a.text === b.text && a.revision === b.revision
+const sameTarget = (a, b) => a && b && a.conversationId === b.conversationId && JSON.stringify(a.context) === JSON.stringify(b.context) && a.composer === b.composer && a.sendButton === b.sendButton
+const sameMedia = (a, b) => JSON.stringify(a?.media) === JSON.stringify(b?.media) && a?.mediaRevision === b?.mediaRevision
+const sameDraft = (a, b) => sameTarget(a, b) && sameMedia(a, b) && a.text === b.text && a.revision === b.revision
+const mediaFields = original => ({ ...(original.media ? { media: mediaValue(original.media) } : {}), ...(original.context ? { context: recipientContextValue(original.context) } : {}) })
 
 /**
  * Site-independent send guard; a concrete adapter must verify its DOM surface.
@@ -23,9 +25,9 @@ export class SendGuard {
     if (['preparing', 'authorizing'].includes(this.state)) throw new Error('当前请求处理中，不可重复发送。')
     const original = this.adapter.snapshot()
     if (!original) throw new Error('无法确认当前对话和输入框，已阻止翻译发送。')
-    textValue(original.text)
+    draftTextValue(original.text, mediaValue(original.media))
     if (this.state === 'uncertain') {
-      if (this.job && this.job.original.conversationId === original.conversationId && [this.job.original.text, this.job.translated?.text].includes(original.text)) throw new Error('当前请求待确认，不可重复发送。')
+      if (this.job && this.job.original.conversationId === original.conversationId && sameMedia(this.job.original, original) && [this.job.original.text, this.job.translated?.text].includes(original.text)) throw new Error('当前请求待确认，不可重复发送。')
       this.state = 'idle'; this.job = null
     }
     // Explicit retry of the same failed draft retains its logical request ID.
@@ -37,7 +39,7 @@ export class SendGuard {
       this.assertSupported()
       if (!status.connected || typeof status.targetLanguage !== 'string') throw new Error('客户端未连接或目标语言未就绪。')
       if (this.bridge.dispatchStatus) {
-        const pending = await this.bridge.dispatchStatus({ conversationId: original.conversationId, text: original.text })
+        const pending = await this.bridge.dispatchStatus({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
         this.assertSupported()
         if (pending.state === 'uncertain') {
           if (!Number.isSafeInteger(pending.attempt) || pending.attempt < 1) throw new Error('此前发送记录无效。')
@@ -46,20 +48,21 @@ export class SendGuard {
         if (pending.state !== 'clear') throw new Error('无法核对此前发送状态。')
       }
       if (this.bridge.logicalId) {
-        const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text })
+        const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
         this.assertSupported()
         if (!result || !/^[a-f0-9-]{36}$/i.test(result.id)) throw new Error('草稿编号尚未确认。')
         job.id = result.id
       }
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('草稿或会话已变化，未提交翻译。')
-      const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text })
+      const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
       const translated = translatedValue(await this.bridge.translate(payload))
       this.assertSupported()
+      if (JSON.stringify(translated.media) !== JSON.stringify(original.media)) throw new Error('图片草稿回执不一致，已阻止发送。')
       if (hasForbiddenHan(translated.text, status.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
       job.translated = translated; job.targetLanguage = status.targetLanguage
       this.state = 'preview'
-      return { text: translated.text, requestId: translated.requestId, untranslated: translated.untranslated === true }
+      return { text: translated.text, requestId: translated.requestId, untranslated: translated.untranslated === true, ...mediaFields(original) }
     } catch (error) { if (this.state !== 'uncertain') this.state = 'failed'; throw error }
   }
   async confirm() {
@@ -70,7 +73,7 @@ export class SendGuard {
     this.state = 'authorizing'
     try {
       // Host must validate current owner/record/language/wallet/settled translation.
-      const result = await this.bridge.authorize({ id: job.id, conversationId: original.conversationId, text: original.text, translated: job.translated.text, requestId: job.translated.requestId })
+      const result = await this.bridge.authorize({ id: job.id, conversationId: original.conversationId, text: original.text, translated: job.translated.text, requestId: job.translated.requestId, ...mediaFields(original) })
       this.assertSupported()
       if (result?.authorized !== true || result.requestId !== job.translated.requestId || !Number.isSafeInteger(result.attempt) || result.attempt < 1) throw new Error('发送授权未完成，已保留草稿。')
       // Authorization has durably reserved this dispatch. Even DOM write failure
@@ -82,7 +85,7 @@ export class SendGuard {
       if (this.adapter.settle) await this.adapter.settle()
       this.assertSupported()
       const current = this.adapter.snapshot()
-      if (!sameTarget(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.targetLanguage)) throw new Error('输入框或目标核对失败，已阻止发送。')
+      if (!sameTarget(original, current) || !sameMedia(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.targetLanguage)) throw new Error('输入框、图片或目标核对失败，已阻止发送。')
       // No await between final target/text checks and the only permitted click.
       // Mark uncertain BEFORE dispatch: a thrown/unknown click must never replay.
       this.state = 'uncertain'
@@ -94,7 +97,7 @@ export class SendGuard {
     this.assertSupported()
     const job = this.job
     if (this.state !== 'uncertain' || !job?.pendingRequestId || !job.pendingAttempt || !['sent', 'not-sent'].includes(outcome) || !this.bridge.dispatchResolve) throw new Error('没有可核对的发送记录。')
-    const result = await this.bridge.dispatchResolve({ conversationId: job.original.conversationId, requestId: job.pendingRequestId, attempt: job.pendingAttempt, outcome, confirmed: true })
+    const result = await this.bridge.dispatchResolve({ conversationId: job.original.conversationId, requestId: job.pendingRequestId, attempt: job.pendingAttempt, outcome, confirmed: true, ...mediaFields(job.original) })
     this.assertSupported()
     if (result?.resolved !== true) throw new Error('发送结果核对未完成。')
     this.state = 'idle'; this.job = null
@@ -103,7 +106,7 @@ export class SendGuard {
 }
 
 /** Install ONLY after an adapter identifies the send surfaces it controls.
- * The production DOM adapter rejects unknown editors and known media controls.
+ * The production DOM adapter rejects unknown editors and unverified attachments.
  * An extension disabled by the user cannot guard the official page.
  */
 export function installSendInterception(target, adapter, onIntent, reportError = () => {}) {

@@ -11,18 +11,22 @@ const draft = reactive({ label: props.record?.label || 'Google Voice', proxy: { 
 const locked = computed(() => busy.value || testing.value)
 let disposed = false
 watch(() => JSON.stringify(draft.proxy), () => { tested.value = undefined })
-watch(() => draft.proxy.protocol, value => { if (value === 'socks5') Object.assign(draft.proxy, { username: '', password: '', clearPassword: true }) })
 watch(() => draft.proxy.password, value => { if (value) draft.proxy.clearPassword = false })
 function close() { if (!locked.value) emit('close') }
+function proxyInput() {
+  const input = JSON.parse(JSON.stringify(draft.proxy))
+  if (input.enabled && input.protocol === 'socks5') {
+    const retained = input.hasPassword && !input.clearPassword
+    if (!!input.username !== !!(input.password || retained)) throw new Error(text('SOCKS5 认证需要同时填写账号和密码；免认证时请同时清除账号和密码。', 'SOCKS5 authentication requires both username and password. Clear both for no authentication.'))
+    if (new TextEncoder().encode(input.username).length > 255 || new TextEncoder().encode(input.password).length > 255) throw new Error(text('SOCKS5 账号和密码各不能超过 255 个 UTF-8 字节。', 'SOCKS5 username and password must each fit within 255 UTF-8 bytes.'))
+  }
+  return input
+}
 function parse() {
   error.value = ''
   try {
     const value = new URL(pasted.value.trim())
     if (!['http:', 'https:', 'socks5:'].includes(value.protocol) || (value.pathname && value.pathname !== '/') || value.search || value.hash) throw new Error()
-    if (value.protocol === 'socks5:' && (value.username || value.password)) {
-      error.value = text('SOCKS5 当前仅支持免认证。需要账号密码时，请使用 HTTP 或 HTTPS 代理。', 'SOCKS5 currently supports no authentication. Use an HTTP or HTTPS proxy for username and password authentication.')
-      return
-    }
     Object.assign(draft.proxy, { enabled: true, protocol: value.protocol.slice(0, -1), host: value.hostname, port: Number(value.port || (value.protocol === 'https:' ? 443 : value.protocol === 'socks5:' ? 1080 : 80)), username: decodeURIComponent(value.username), password: decodeURIComponent(value.password), clearPassword: !value.password, hasPassword: false })
     pasted.value = ''
   } catch { error.value = text('代理链接格式无效，请检查协议、地址和端口。', 'Check the proxy URL, protocol, host and port.') }
@@ -30,8 +34,8 @@ function parse() {
 async function test() {
   if (locked.value) return
   testing.value = true; error.value = ''; tested.value = undefined
-  const input = JSON.parse(JSON.stringify(draft.proxy))
   try {
+    const input = proxyInput()
     const result = await window.desktopAPI.testGoogleVoiceProxy(input, props.record?.id)
     if (!disposed && JSON.stringify(input) === JSON.stringify(draft.proxy)) tested.value = result
   } catch (e: any) { if (!disposed) error.value = uiError(e?.message) }
@@ -50,7 +54,7 @@ async function submit() {
   if (locked.value) return
   busy.value = true; error.value = ''
   try {
-    const saved = await props.save({ label: draft.label.trim(), proxy: JSON.parse(JSON.stringify(draft.proxy)) })
+    const saved = await props.save({ label: draft.label.trim(), proxy: proxyInput() })
     if (!disposed && saved) { draft.proxy.password = ''; pasted.value = ''; emit('close') }
     else if (!disposed) error.value = text('设置未保存，请核对代理地址、端口和认证信息。', 'Settings were not saved. Check the proxy host, port and credentials.')
   } catch (e: any) { if (!disposed) error.value = uiError(e?.message) }
@@ -74,14 +78,14 @@ onUnmounted(() => { disposed = true; draft.proxy.password = ''; pasted.value = '
         <label>{{ text('窗口名称','Window name') }}<input v-model="draft.label" maxlength="60" required /></label>
         <label class="switch"><span><b>{{ text('独立代理 IP','Dedicated proxy') }}</b><small>{{ text('仅作用于此 Google Voice 窗口；关闭时使用系统网络。','Applies only to this Google Voice window. Off uses the system network.') }}</small></span><input v-model="draft.proxy.enabled" type="checkbox" role="switch" /></label>
         <div v-if="draft.proxy.enabled" class="proxy-settings">
-          <div class="grid"><label>{{ text('协议','Protocol') }}<select v-model="draft.proxy.protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">{{ text('SOCKS5（免认证）','SOCKS5 (no authentication)') }}</option></select></label><label>{{ text('端口','Port') }}<input v-model.number="draft.proxy.port" type="number" min="1" max="65535" required /></label></div>
+          <div class="grid"><label>{{ text('协议','Protocol') }}<select v-model="draft.proxy.protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label><label>{{ text('端口','Port') }}<input v-model.number="draft.proxy.port" type="number" min="1" max="65535" required /></label></div>
           <label>{{ text('代理地址','Proxy host') }}<input v-model="draft.proxy.host" placeholder="proxy.example.com" autocomplete="off" required /></label>
-          <div v-if="draft.proxy.protocol !== 'socks5'" class="grid"><label>{{ text('代理账号','Proxy username') }}<input v-model="draft.proxy.username" autocomplete="off" maxlength="256" /></label><label>{{ text('代理密码','Proxy password') }}<input v-model="draft.proxy.password" type="password" autocomplete="new-password" maxlength="1024" :placeholder="text(draft.proxy.hasPassword ? '已保存，留空保留' : '可选', draft.proxy.hasPassword ? 'Saved; leave blank to keep' : 'Optional')" /></label></div>
+          <div class="grid"><label>{{ text('代理账号','Proxy username') }}<input v-model="draft.proxy.username" autocomplete="off" maxlength="256" /></label><label>{{ text('代理密码','Proxy password') }}<input v-model="draft.proxy.password" type="password" autocomplete="new-password" maxlength="1024" :placeholder="text(draft.proxy.hasPassword ? '已保存，留空保留' : '可选', draft.proxy.hasPassword ? 'Saved; leave blank to keep' : 'Optional')" /></label></div>
           <label v-if="draft.proxy.hasPassword" class="clear"><input v-model="draft.proxy.clearPassword" type="checkbox" />{{ text('清除已保存的代理密码','Clear saved proxy password') }}</label>
-          <div class="import"><input v-model="pasted" type="password" autocomplete="off" :aria-label="text('导入代理链接','Import proxy URL')" placeholder="http://user:password@host:port" /><button type="button" class="secondary" @click="parse">{{ text('解析','Parse') }}</button></div>
+          <div class="import"><input v-model="pasted" type="password" autocomplete="off" :aria-label="text('导入代理链接','Import proxy URL')" placeholder="socks5://user:password@host:port" /><button type="button" class="secondary" @click="parse">{{ text('解析','Parse') }}</button></div>
           <button type="button" class="secondary" @click="test">{{ text(testing ? '正在检测…' : '检测此配置', testing ? 'Checking…' : 'Test this configuration') }}</button>
           <p v-if="tested" class="result" role="status">{{ text('检测出口 IP：','Test exit IP: ') }}{{ tested.ip }} · {{ tested.latencyMs }} ms</p>
-          <p class="hint">{{ text('代理断开时不会自动直连。代理需要支持 Google Voice 的网络连接；网页检测成功不代表通话已通过验证。','No automatic direct fallback. The proxy must support Google Voice connectivity; a web check does not verify calls.') }}</p>
+          <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测成功后再保存使用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test the configuration before saving.') }}</p>
         </div>
       </fieldset>
       <section v-if="record" class="current-network">

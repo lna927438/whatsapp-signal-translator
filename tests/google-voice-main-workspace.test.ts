@@ -42,10 +42,11 @@ function fixture() {
     setVisible(value: boolean) { this.visible = value } setBounds(value: any) { this.bounds = value } setBackgroundColor() {}
   }
   class FakeWindow extends EventEmitter {
-    destroyed = false; visible = true; minimized = false; webContents = new FakeContents(); children: FakeView[] = []
+    destroyed = false; visible = true; minimized = false; private contents = new FakeContents(); children: FakeView[] = []
+    get webContents() { if (this.destroyed) throw new TypeError('Object has been destroyed'); return this.contents }
     contentView = { addChildView: (view: FakeView) => this.children.push(view), removeChildView: (view: FakeView) => { this.children = this.children.filter(item => item !== view) } }
     getContentSize() { return [1400, 1000] } isDestroyed() { return this.destroyed } isVisible() { return this.visible } isMinimized() { return this.minimized }
-    close() { this.destroyed = true; this.emit('closed') }
+    close() { this.destroyed = true; this.contents.close(); this.emit('closed') }
   }
   const window = new FakeWindow()
   const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition }, screen: { getDisplayMatching: () => { throw new Error('Native DPI conversion must not be used') } } })
@@ -198,9 +199,27 @@ test('page state and navigation failures are pushed without private URLs or stal
 })
 
 test('closing the parent cleans up all child contents without a native detach acknowledgment loop', async () => {
-  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B); h.window.close()
+  const h = fixture(), contents = h.window.webContents; await h.workspace.focus(A); await h.workspace.focus(B)
+  assert.doesNotThrow(() => h.window.close()); assert.throws(() => h.window.webContents, /Object has been destroyed/)
+  assert.equal(contents.listenerCount('zoom-changed'), 0); assert.equal(h.window.listenerCount('resize'), 0)
   assert.ok(h.views.every(view => view.webContents.destroyed)); assert.equal(h.data.some(row => row.closed), false)
   assert.equal((await h.workspace.focus(A)).state, 'cancelled')
+  await h.workspace.detachAll(); await h.workspace.detachAll()
+})
+
+test('closing the application before opening Voice still removes the destroyed contents listener', () => {
+  const h = fixture(), contents = h.window.webContents
+  assert.equal(contents.listenerCount('zoom-changed'), 1)
+  assert.doesNotThrow(() => h.window.close())
+  assert.equal(contents.listenerCount('zoom-changed'), 0); assert.equal(h.views.length, 0)
+})
+
+test('a pending Voice lookup cannot create a child after its parent is destroyed', async () => {
+  const h = fixture(), gate = deferred(); h.getGates.set(A, gate.promise)
+  const opening = h.workspace.focus(A)
+  assert.doesNotThrow(() => h.window.close()); gate.resolve()
+  assert.equal((await opening).state, 'cancelled'); assert.equal(h.views.length, 0)
+  assert.equal(h.data.some(row => row.closed), false)
 })
 
 test('unexpected destruction reports a retryable error and retry recreates the same persistent account', async () => {

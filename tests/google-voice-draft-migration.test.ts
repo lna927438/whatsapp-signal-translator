@@ -20,11 +20,13 @@ function fixture() {
   const { GoogleVoiceDispatchLedger } = h.load('src/main/platforms/googleVoice/dispatchLedger.ts')
   const preferences: RuntimeSettings = { provider: 'openai', localLanguage: 'zh-CN', targetLanguage: 'en-US', receiveAutoTranslate: true, sendAutoTranslate: true, blockChineseSend: true, groupTranslate: false, fontSize: 13, translationColor: '#fff', historyMode: 'visible' }
   let drafts: GoogleVoiceEmbeddedDraftData = { records: {} }, dispatchData: GoogleVoiceDispatchData = { records: [] }, revision = 0
+  let currentUrl = 'https://voice.google.com/u/0/messages?itemId=t.migration-fixture'
   const providerCalls: string[] = [], settlements: string[] = []
   const storage = { read: async () => structuredClone(drafts), write: async (value: GoogleVoiceEmbeddedDraftData) => { drafts = structuredClone(value) } }
-  const dispatch = new GoogleVoiceDispatchLedger({ read: async () => structuredClone(dispatchData), write: async (value: GoogleVoiceDispatchData) => { dispatchData = structuredClone(value) } })
-  let engine: any, run: any, bridge: any
+  const dispatchStore = { read: async () => structuredClone(dispatchData), write: async (value: GoogleVoiceDispatchData) => { dispatchData = structuredClone(value) } }
+  let engine: any, run: any, bridge: any, dispatch: any
   const restart = () => {
+    dispatch = new GoogleVoiceDispatchLedger(dispatchStore)
     engine = new TranslationEngine(); engine.setOnlineSession('owner', 'fixture-only')
     engine.settings.get = async () => preferences
     engine.createProvider = () => ({ translate: async (request: any) => {
@@ -36,7 +38,7 @@ function fixture() {
     run = createGoogleVoiceTranslator(engine, { check: async () => true }, async () => preferences, dispatch)
     bridge = new GoogleVoiceEmbeddedTranslation({ storage, translate: run, trustedPage: () => {
       const captured = revision
-      return { owner: 'owner', accountId, url: 'https://voice.google.com/u/0/messages?itemId=t.migration-fixture', authorized: () => revision === captured }
+      return { owner: 'owner', accountId, url: currentUrl, authorized: () => revision === captured }
     } })
   }
   restart()
@@ -47,10 +49,56 @@ function fixture() {
   }
   const request = (type: string, payload?: unknown) => bridge.request({}, { v: 1, type: 'voice.' + type, payload })
   const logicalId = (text = source) => request('outgoing-id', { conversationId, text })
-  return { seed, request, logicalId, restart, providerCalls, settlements, preferences, storage, dispatch,
+  return { seed, request, logicalId, restart, providerCalls, settlements, preferences, storage, get dispatch() { return dispatch },
     get engine() { return engine }, get run() { return run }, get drafts() { return structuredClone(drafts) },
-    get dispatchData() { return structuredClone(dispatchData) }, changePage: () => revision++ }
+    get dispatchData() { return structuredClone(dispatchData) }, changePage: () => revision++, navigate: (url: string) => { currentUrl = url; revision++ } }
 }
+
+test('first-recipient route changes retain the paid caption through restart and only retry in the original draft', async () => {
+  const h = fixture(), context = { kind: 'recipients', recipientKey: 'a'.repeat(64), recipientCount: 1 }
+  const draftConversation = 'gv_' + hash(['/u/0/messages', 'draft', context.recipientKey, context.recipientCount])
+  const media = { fingerprint: 'b'.repeat(64), count: 1, types: ['image/png'], totalBytes: 1024 }
+  h.navigate('https://voice.google.com/u/0/messages?itemId=draft')
+  const original = { conversationId: draftConversation, text: source, context, media }
+  const id = await h.request('outgoing-id', original)
+  assert.equal(id.ok, true)
+  const payload = { ...original, id: id.result.id, direction: 'outgoing' }
+  const result = await h.request('translate', payload)
+  assert.equal(result.ok, true); assert.equal(h.providerCalls.length, 1)
+  const authorized = await h.request('authorize', { ...payload, translated: result.result.text, requestId: result.result.requestId })
+  assert.equal(authorized.ok, true)
+
+  h.navigate('https://voice.google.com/u/0/messages?itemId=t.migration-fixture'); h.restart()
+  const current = { conversationId, text: source, media }
+  assert.equal((await h.request('dispatch-status', current)).result.state, 'uncertain')
+  assert.equal((await h.request('dispatch-status', { ...current, text: translated })).result.state, 'uncertain')
+  const resolve = { conversationId, media, requestId: result.result.requestId, attempt: 1, outcome: 'not-sent', confirmed: true }
+  const refused = await h.request('dispatch-resolve', resolve)
+  assert.equal(refused.ok, false); assert.match(refused.error, /原来的收件人/)
+  assert.equal(h.dispatchData.records[0].state, 'uncertain')
+  h.restart()
+  const changedId = await h.request('outgoing-id', current)
+  assert.equal(changedId.ok, true)
+  assert.equal((await h.request('translate', { ...current, id: changedId.result.id, direction: 'outgoing' })).ok, false)
+  assert.equal(h.providerCalls.length, 1)
+  assert.equal((await h.engine.history()).filter((row: any) => row.state === 'charged').length, 1)
+
+  h.navigate('https://voice.google.com/u/0/messages?itemId=draft'); h.restart()
+  assert.equal((await h.request('outgoing-id', original)).result.id, id.result.id)
+  assert.equal((await h.request('dispatch-resolve', { ...resolve, conversationId: draftConversation, context })).ok, true)
+  h.restart()
+  const retry = await h.request('translate', payload)
+  assert.equal(retry.ok, true); assert.equal(retry.result.requestId, result.result.requestId)
+  const next = await h.request('authorize', { ...payload, translated: retry.result.text, requestId: retry.result.requestId })
+  assert.equal(next.ok, true); assert.equal(next.result.attempt, 2)
+  assert.equal(h.providerCalls.length, 1)
+  assert.equal((await h.engine.history()).filter((row: any) => row.state === 'charged').length, 1)
+
+  h.navigate('https://voice.google.com/u/0/messages?itemId=t.migration-fixture'); h.restart()
+  assert.equal((await h.request('dispatch-resolve', { ...resolve, attempt: 2, outcome: 'sent' })).ok, true)
+  h.restart()
+  assert.equal((await h.request('dispatch-status', current)).result.state, 'clear')
+})
 
 test('migration restores a paid unreserved UUID and immutable request across whitespace and restart without a second debit', async () => {
   const h = fixture(), text = ' \n' + source + '\n ', old = await h.seed(text)

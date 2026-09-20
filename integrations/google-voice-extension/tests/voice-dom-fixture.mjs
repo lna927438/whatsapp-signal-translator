@@ -124,29 +124,29 @@ try {
   preferences.sendAutoTranslate = false; const beforePlain = outgoing.size; await prepare('Plain English fixture'); await panelHas('原文无需翻译')
   await clickPanel('确认发送'); await panelHas('已提交'); assert.equal(outgoing.size, beforePlain); assert.equal(await page.evaluate(() => window.sent.at(-1)), 'Plain English fixture')
   checks.push('plain host-authorized text with translation disabled uses no translation API')
-  const callsBeforeAttachment = nativeCalls.length; await page.locator('[aria-label="Add image"]').click(); await panelHas('图片草稿发送尚未验证')
-  assert.equal(await page.evaluate(() => window.addImageClicked), false); assert.equal(nativeCalls.length, callsBeforeAttachment); checks.push('unverified attachment path blocked before original handler or provider')
+  const outgoingCount = () => nativeCalls.filter(call => call.op === 'authorize' || call.op === 'translate' && call.payload.direction === 'outgoing').length; const callsBeforeAttachment = outgoingCount(); await page.locator('[aria-label="Add image"]').click()
+  assert.equal(await page.evaluate(() => window.addImageClicked), true); assert.equal(outgoingCount(), callsBeforeAttachment); checks.push('official image chooser remains available without translation or authorization')
   const fileEvents = await page.evaluate(() => {
     const draft = document.querySelector('textarea.message-input'), result = []
     for (const type of ['paste', 'drop']) {
-      const transfer = new DataTransfer(); transfer.items.add(new File(['fixture'], 'fixture.png', { type: 'image/png' }))
+      const transfer = new DataTransfer(); transfer.items.add(new File(['fixture'], 'fixture.mp4', { type: 'video/mp4' }))
       const event = type === 'paste' ? new ClipboardEvent(type, { clipboardData: transfer, bubbles: true, cancelable: true }) : new DragEvent(type, { dataTransfer: transfer, bubbles: true, cancelable: true })
       draft.dispatchEvent(event); result.push(event.defaultPrevented)
     }
     return result
   })
-  assert.deepEqual(fileEvents, [true, true]); assert.equal(nativeCalls.length, callsBeforeAttachment)
-  checks.push('pasted and dropped attachment files are blocked before official media handlers')
+  assert.deepEqual(fileEvents, [true, true]); assert.equal(outgoingCount(), callsBeforeAttachment)
+  checks.push('unsupported pasted and dropped video files are blocked before official media handlers')
   await page.evaluate(() => history.pushState({}, '', '/u/6/messages'))
-  await page.locator('textarea.message-input').fill('Unknown recipient'); const beforeUnknown = nativeCalls.length; await page.locator('.send-button').click(); await panelHas('尚未支持')
-  assert.equal(nativeCalls.length, beforeUnknown); checks.push('new recipient route lacking stable conversation blocked before provider')
+  await page.locator('textarea.message-input').fill('Unknown recipient'); const beforeUnknown = outgoingCount(); await page.locator('.send-button').click(); await panelHas('完整选定 1–7 位收件人')
+  assert.equal(outgoingCount(), beforeUnknown); checks.push('new recipient route lacking stable conversation blocked before provider')
   await page.evaluate(() => history.pushState({}, '', '/u/6/messages?itemId=t.fixture-two'))
-  const formCalls = nativeCalls.length
+  const formCalls = outgoingCount()
   const submitBlocked = await page.evaluate(() => {
     const entry = document.querySelector('gv-message-entry'), form = document.createElement('form'); entry.before(form); form.append(entry)
     const event = new Event('submit', { bubbles: true, cancelable: true }); form.dispatchEvent(event); return event.defaultPrevented
   })
-  assert.equal(submitBlocked, true); await panelHas('尚未支持'); assert.equal(nativeCalls.length, formCalls)
+  assert.equal(submitBlocked, true); await panelHas('当前短信编辑器尚未识别'); assert.equal(outgoingCount(), formCalls)
   await page.evaluate(() => { const entry = document.querySelector('gv-message-entry'), form = entry.closest('form'); form.before(entry); form.remove() })
   checks.push('unexpected enclosing form submission is intercepted and rejected before provider')
   preferences.sendAutoTranslate = true; quotaDenied = true; const beforeDenied = outgoing.size; await prepare('余额不足样例'); await panelHas('fixture host rejected'); assert.equal(outgoing.size, beforeDenied)

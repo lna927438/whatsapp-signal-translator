@@ -26,11 +26,14 @@ export class GoogleVoiceWorkspace {
 
   constructor(private window: BrowserWindow, readonly records: GoogleVoiceRecords, private identity: () => Identity, private options: Options = {}) {
     const layout = () => this.applyBounds()
+    // BrowserWindow.webContents itself throws after the native window is destroyed.
+    // Keep the live emitter so the closed handler can always complete child cleanup.
+    const contents = window.webContents
     window.on('resize', layout)
-    window.webContents.on('zoom-changed', layout)
+    contents.on('zoom-changed', layout)
     window.once('closed', () => {
       this.closed = true; window.removeListener('resize', layout)
-      window.webContents.removeListener('zoom-changed', layout)
+      contents.removeListener('zoom-changed', layout)
       void this.detachAll()
     })
   }

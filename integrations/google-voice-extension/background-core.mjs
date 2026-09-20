@@ -1,4 +1,4 @@
-import { ADAPTER, digest, isVoiceUrl, validToken, translationPayload, statusValue, translatedValue, validId, textValue } from './protocol.mjs'
+import { ADAPTER, digest, isVoiceUrl, validToken, translationPayload, statusValue, translatedValue, validId, textValue, draftTextValue, mediaValue } from './protocol.mjs'
 
 /** Pairing credentials never leave this trusted extension context. */
 export class ExtensionBridge {
@@ -46,8 +46,10 @@ export class ExtensionBridge {
     const conversationId = 'gv_' + await digest(JSON.stringify([url.pathname.replace(/\/$/, ''), item]))
     const value = message.payload
     if (!value || value.conversationId !== conversationId) throw new Error('会话已变化，已阻止操作。')
+    const media = mediaValue(value.media), mediaPayload = media ? { media } : {}
+    const draftKey = source => digest(JSON.stringify([token, conversationId, source, ...(media ? [media] : [])]))
     if (message.type === 'voice.outgoing-id') {
-      const key = await digest(JSON.stringify([token, conversationId, textValue(value.text)]))
+      const key = await draftKey(draftTextValue(value.text, media))
       return this.draftTransaction(async records => {
         if (await this.token() !== token) throw new Error('连接已变化。')
         if (!records[key]) {
@@ -62,15 +64,15 @@ export class ExtensionBridge {
     if (message.type === 'voice.translate') { op = 'translate'; payload = translationPayload(value) }
     else if (message.type === 'voice.authorize') {
       if (!validId(value.id) || typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId)) throw new Error('发送回执无效。')
-      op = 'authorize'; payload = { id: value.id, conversationId, text: textValue(value.text), translated: textValue(value.translated), requestId: value.requestId }
-    } else if (message.type === 'voice.dispatch-status') { op = 'dispatch-status'; payload = { conversationId, text: textValue(value.text) } }
+      op = 'authorize'; payload = { id: value.id, conversationId, text: draftTextValue(value.text, media), translated: draftTextValue(value.translated, media), requestId: value.requestId, ...mediaPayload }
+    } else if (message.type === 'voice.dispatch-status') { op = 'dispatch-status'; payload = { conversationId, text: draftTextValue(value.text, media), ...mediaPayload } }
     else if (message.type === 'voice.dispatch-resolve') {
       if (typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId) || !['sent', 'not-sent'].includes(value.outcome) || value.confirmed !== true || !Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new Error('请先明确核对发送结果。')
-      op = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true }
+      op = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true, ...mediaPayload }
     } else throw new Error('操作尚未支持。')
     if (await this.token() !== token) throw new Error('连接已变化，请重试。')
     if (op === 'authorize' || op === 'translate' && payload.direction === 'outgoing') {
-      const key = await digest(JSON.stringify([token, conversationId, payload.text]))
+      const key = await draftKey(payload.text)
       await this.draftTransaction(records => {
         if (!records[key] || records[key].id !== payload.id) throw new Error('草稿编号不匹配，已阻止发送。')
         if (op === 'authorize') records[key].requestId = payload.requestId
@@ -79,7 +81,11 @@ export class ExtensionBridge {
     if (await this.token() !== token) throw new Error('连接已变化，请重试。')
     const result = await this.native.request(op, payload, token)
     if (await this.token() !== token) throw new Error('连接已变化，未显示旧连接结果。')
-    if (op === 'translate') return translatedValue(result)
+    if (op === 'translate') {
+      const translated = translatedValue(result)
+      if (JSON.stringify(translated.media) !== JSON.stringify(media)) throw new Error('图片草稿回执不一致，已阻止发送。')
+      return translated
+    }
     if (op === 'authorize') {
       if (result?.authorized !== true || result.requestId !== payload.requestId || !Number.isSafeInteger(result.attempt) || result.attempt < 1) throw new Error('发送授权尚未确认。')
       return { authorized: true, requestId: result.requestId, attempt: result.attempt }

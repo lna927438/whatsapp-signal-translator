@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'crypto'
 import { GoogleVoiceDraftRecoveryError } from './draftRecovery'
+import { GoogleVoiceDispatchScopeError } from './dispatchLedger'
+import { googleVoiceMessageMedia, googleVoiceMediaKey, googleVoiceRecipientContext, type GoogleVoiceMessageMedia } from './messageMedia'
 
 export interface GoogleVoiceEmbeddedTrustedPage {
   owner: string
@@ -50,8 +52,8 @@ function requireCurrent(page: GoogleVoiceEmbeddedTrustedPage): void {
   try { current = page.authorized() } catch { /* Trusted ownership lookup can disappear during shutdown. */ }
   if (!current) throw new BridgeFailure('changed', '登录或页面已变化，请重新核对当前短信。原文未自动发送。')
 }
-function text(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || value.includes('\0') || Array.from(value).length > 8000) throw invalid()
+function text(value: unknown, media?: GoogleVoiceMessageMedia): string {
+  if (typeof value !== 'string' || !value.trim() && !media || value.includes('\0') || Array.from(value).length > 8000) throw invalid()
   return value
 }
 function statusValue(value: unknown): Record<string, unknown> {
@@ -61,11 +63,15 @@ function statusValue(value: unknown): Record<string, unknown> {
   for (const key of ['receiveAutoTranslate', 'sendAutoTranslate', 'blockChineseSend', 'translationsVisible']) if (typeof value[key] === 'boolean') result[key] = value[key]
   return result
 }
-function translatedValue(value: unknown): Record<string, unknown> {
+function translatedValue(value: unknown, media?: GoogleVoiceMessageMedia): Record<string, unknown> {
   if (!object(value) || typeof value.enabled !== 'boolean') throw invalid()
   if (!value.enabled) throw new BridgeFailure('disabled', '当前账号未启用该方向翻译。')
   if (!requestId(value.requestId)) throw invalid()
-  return { enabled: true, text: text(value.text), requestId: value.requestId, ...(value.untranslated === true ? { untranslated: true } : {}) }
+  if (media) {
+    const received = googleVoiceMessageMedia(value.media)
+    if (!received || googleVoiceMediaKey(received) !== googleVoiceMediaKey(media)) throw invalid()
+  } else if (value.media !== undefined) throw invalid()
+  return { enabled: true, text: text(value.text, media), requestId: value.requestId, ...(value.untranslated === true ? { untranslated: true } : {}), ...(media ? { media } : {}) }
 }
 
 /** Main-only replacement for the extension's transport and draft-ID storage.
@@ -121,6 +127,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
   private failure(error: unknown): Reply {
     if (error instanceof BridgeFailure) return { ok: false, code: error.code, error: error.message }
     if (error instanceof GoogleVoiceDraftRecoveryError) return { ok: false, code: 'draft-recovery', error: error.message }
+    if (error instanceof GoogleVoiceDispatchScopeError) return { ok: false, code: 'dispatch-scope', error: error.message }
     const message = object(error) && typeof error.message === 'string' ? error.message : ''
     if (loginFailures.has(message)) return { ok: false, code: 'login', error: 'HelloDog 登录需要恢复，请在个人中心重新登录。草稿和原翻译记录已保留。' }
     if (balanceFailures.has(message)) return { ok: false, code: 'balance', error: '可用字符不足，请补充字符后重试。草稿已保留；原请求的扣费结果仍以记录核对为准。' }
@@ -159,19 +166,28 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
       const result = await this.options.translate(page.owner, page.accountId, 'status', undefined, page.authorized)
       requireCurrent(page); return statusValue(result)
     }
-    const url = new URL(page.url), item = url.searchParams.get('itemId')
-    if (!/^\/u\/\d+\/messages\/?$/.test(url.pathname) || !item?.startsWith('t.') || item.length <= 2 || item.length > 1024) throw new BridgeFailure('unsupported', '尚未确认短信会话，已阻止操作。')
-    const conversationId = 'gv_' + hash([url.pathname.replace(/\/$/, ''), item])
     const value = message.payload
-    if (!object(value) || value.conversationId !== conversationId) throw new BridgeFailure('changed', '会话已变化，已阻止操作。')
-    const draftKey = (source: string) => hash([page.owner, page.accountId, conversationId, source])
+    if (!object(value)) throw invalid()
+    const url = new URL(page.url), item = url.searchParams.get('itemId')
+    let context
+    try { context = googleVoiceRecipientContext(value.context) } catch { throw invalid() }
+    if (!/^\/u\/\d+\/messages\/?$/.test(url.pathname) ||
+      (item === 'draft' ? !context : !!context || !item?.startsWith('t.') || item.length <= 2 || item.length > 1024)) throw new BridgeFailure('unsupported', '尚未确认短信收件人，已阻止操作。')
+    const path = url.pathname.replace(/\/$/, '')
+    const conversationId = 'gv_' + hash(context ? [path, 'draft', context.recipientKey, context.recipientCount] : [path, item])
+    if (value.conversationId !== conversationId) throw new BridgeFailure('changed', '会话已变化，已阻止操作。')
+    let media: GoogleVoiceMessageMedia | undefined
+    try { media = googleVoiceMessageMedia(value.media) } catch { throw invalid() }
+    if ((media || context) && value.direction === 'incoming') throw invalid()
+    const mediaPayload = { ...(media ? { media } : {}), ...(context ? { context } : {}) }
+    const draftKey = (source: string) => hash([page.owner, page.accountId, conversationId, source, ...(media ? [googleVoiceMediaKey(media)] : [])])
     if (message.type === 'voice.outgoing-id') {
-      const source = text(value.text), key = draftKey(source)
+      const source = text(value.text, media), key = draftKey(source)
       return this.drafts(page, async records => {
         if (!records[key]) {
           if (Object.keys(records).length >= 10000) throw new BridgeFailure('capacity', '待核对草稿较多，请先核对已有发送记录。')
           beforeUpstream()
-          const recovered = await this.options.translate(page.owner, page.accountId, 'recover-draft', { conversationId, text: source }, page.authorized)
+          const recovered = await this.options.translate(page.owner, page.accountId, 'recover-draft', { conversationId, text: source, ...mediaPayload }, page.authorized)
           beforeUpstream()
           if (!object(recovered) || !['new', 'recovered'].includes(String(recovered.state))) throw invalid()
           if (recovered.state === 'recovered') {
@@ -187,15 +203,15 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
     if (message.type === 'voice.translate') {
       if (!uuid(value.id) || !['incoming', 'outgoing'].includes(String(value.direction)) || value.manual !== undefined && typeof value.manual !== 'boolean') throw invalid()
       operation = 'translate'
-      payload = { id: value.id, direction: value.direction, conversationId, text: text(value.text), ...(value.manual === undefined ? {} : { manual: value.manual }) }
+      payload = { id: value.id, direction: value.direction, conversationId, text: text(value.text, media), ...mediaPayload, ...(value.manual === undefined ? {} : { manual: value.manual }) }
     } else if (message.type === 'voice.authorize') {
       if (!uuid(value.id) || !requestId(value.requestId)) throw invalid()
-      operation = 'authorize'; payload = { id: value.id, conversationId, text: text(value.text), translated: text(value.translated), requestId: value.requestId }
+      operation = 'authorize'; payload = { id: value.id, conversationId, text: text(value.text, media), translated: text(value.translated, media), requestId: value.requestId, ...mediaPayload }
     } else if (message.type === 'voice.dispatch-status') {
-      operation = 'dispatch-status'; payload = { conversationId, text: text(value.text) }
+      operation = 'dispatch-status'; payload = { conversationId, text: text(value.text, media), ...mediaPayload }
     } else if (message.type === 'voice.dispatch-resolve') {
       if (!requestId(value.requestId) || !['sent', 'not-sent'].includes(String(value.outcome)) || value.confirmed !== true || !Number.isSafeInteger(value.attempt) || Number(value.attempt) < 1) throw invalid()
-      operation = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true }
+      operation = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true, ...mediaPayload }
     } else throw invalid()
 
     if (operation === 'authorize' || operation === 'translate' && payload.direction === 'outgoing') {
@@ -216,7 +232,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
       // Incoming cache misses in manual/hidden mode are ordinary no-result
       // responses. Keep them distinct from failed translation or send previews.
       if (payload.direction === 'incoming' && object(result) && result.enabled === false) return { enabled: false, manual: result.manual === true }
-      return translatedValue(result)
+      return translatedValue(result, media)
     }
     if (operation === 'authorize') {
       if (!object(result) || result.authorized !== true || result.requestId !== payload.requestId || !Number.isSafeInteger(result.attempt) || Number(result.attempt) < 1) throw invalid()

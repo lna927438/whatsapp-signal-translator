@@ -41,3 +41,22 @@ test('a lost resolution reply can be replayed without reversing the saved decisi
     await assert.rejects(restored.resolve('a','b','c',outcome,1,outcome==='sent'?'not-sent':'sent',()=>true),/相反/)
   }
 })
+
+test('a first-send route change cannot unlock retry under a new paid identity after restart',async()=>{
+  let data:GoogleVoiceDispatchData={records:[]}
+  const store={read:async()=>structuredClone(data),write:async(value:GoogleVoiceDispatchData)=>{data=structuredClone(value)}}
+  const ledger=new GoogleVoiceDispatchLedger(store)
+  await ledger.reserve('owner','window','draft-recipients','request','原文','Hello',()=>true,undefined,true)
+  const restored=new GoogleVoiceDispatchLedger(store)
+  await assert.rejects(restored.resolve('owner','window','server-thread','request',1,'not-sent',()=>true),/原来的收件人/)
+  assert.equal(data.records[0].state,'uncertain')
+  const restarted=new GoogleVoiceDispatchLedger(store)
+  assert.equal((await restarted.status('owner','window','server-thread','Hello',()=>true)).state,'uncertain')
+  await assert.rejects(restarted.reserve('owner','window','server-thread','new-request','原文','Hello',()=>true),/待确认/)
+  await restarted.resolve('owner','window','draft-recipients','request',1,'not-sent',()=>true)
+  assert.equal((await restarted.reserve('owner','window','draft-recipients','request','原文','Hello',()=>true,undefined,true)).attempt,2)
+  await restarted.resolve('owner','window','server-thread','request',2,'sent',()=>true)
+  const final=new GoogleVoiceDispatchLedger(store)
+  assert.equal((await final.resolve('owner','window','server-thread','request',2,'sent',()=>true)).resolved,true)
+  assert.equal((await final.status('owner','window','server-thread','Hello',()=>true)).state,'clear')
+})

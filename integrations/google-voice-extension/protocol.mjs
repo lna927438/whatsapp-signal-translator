@@ -20,11 +20,30 @@ export function textValue(value) {
   if (typeof value !== 'string' || !value.trim() || Array.from(value).length > MAX_TEXT || /[\u0000]/u.test(value)) throw new Error('文字为空或过长。')
   return value
 }
+export function mediaValue(value) {
+  if (value === undefined) return undefined
+  if (!value || !/^[a-f0-9]{64}$/.test(value.fingerprint) || !Number.isSafeInteger(value.count) || value.count < 1 || value.count > 10
+    || !Array.isArray(value.types) || value.types.length !== value.count || value.types.some(type => !['image/jpeg', 'image/png', 'image/gif', 'image/bmp'].includes(type))
+    || !Number.isSafeInteger(value.totalBytes) || value.totalBytes < 1 || value.totalBytes > 20 * 1024 * 1024) throw new Error('图片草稿无效或大小超出支持范围。')
+  return { fingerprint: value.fingerprint, count: value.count, types: [...value.types], totalBytes: value.totalBytes }
+}
+export function recipientContextValue(value) {
+  if (value === undefined) return undefined
+  if (!value || value.kind !== 'recipients' || !/^[a-f0-9]{64}$/.test(value.recipientKey) || !Number.isSafeInteger(value.recipientCount) || value.recipientCount < 1 || value.recipientCount > 7) throw new Error('短信收件人尚未核实。')
+  return { kind: 'recipients', recipientKey: value.recipientKey, recipientCount: value.recipientCount }
+}
+export function draftTextValue(value, media) {
+  if (!media) return textValue(value)
+  if (typeof value !== 'string' || Array.from(value).length > MAX_TEXT || /[\u0000]/u.test(value)) throw new Error('文字过长或格式无效。')
+  return value
+}
 export function translationPayload(value) {
   if (!value || !['incoming', 'outgoing'].includes(value.direction) || !validId(value.id) ||
       typeof value.conversationId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(value.conversationId) ||
       value.manual !== undefined && typeof value.manual !== 'boolean') throw new Error('翻译请求无效。')
-  return { direction: value.direction, id: value.id, conversationId: value.conversationId, text: textValue(value.text), ...(value.manual === undefined ? {} : { manual: value.manual }) }
+  const media = mediaValue(value.media), context = recipientContextValue(value.context)
+  if ((media || context) && value.direction !== 'outgoing') throw new Error('接收翻译不能提交发送附件或收件人。')
+  return { direction: value.direction, id: value.id, conversationId: value.conversationId, text: draftTextValue(value.text, media), ...(media ? { media } : {}), ...(context ? { context } : {}), ...(value.manual === undefined ? {} : { manual: value.manual }) }
 }
 export function statusValue(value) {
   if (!value || typeof value.connected !== 'boolean') throw new Error('客户端状态无效。')
@@ -37,7 +56,8 @@ export function translatedValue(value) {
   if (!value || typeof value.enabled !== 'boolean') throw new Error('翻译回执无效。')
   if (!value.enabled) throw new Error('当前账号未启用该方向翻译。')
   if (typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId)) throw new Error('翻译回执编号无效。')
-  return { enabled: true, text: textValue(value.text), requestId: value.requestId, ...(value.untranslated === true ? { untranslated: true } : {}) }
+  const media = mediaValue(value.media)
+  return { enabled: true, text: draftTextValue(value.text, media), requestId: value.requestId, ...(media ? { media } : {}), ...(value.untranslated === true ? { untranslated: true } : {}) }
 }
 
 export class NativeBusyError extends Error {

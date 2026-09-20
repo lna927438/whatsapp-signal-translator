@@ -3,7 +3,9 @@ const assert = require('node:assert/strict')
 const http = require('node:http'), https = require('node:https'), tcp = require('node:net')
 const { readFileSync, writeFileSync, mkdtempSync } = require('node:fs')
 const { join } = require('node:path'), { randomUUID, X509Certificate } = require('node:crypto')
+const { makeSocksFixture } = require('./google-voice-socks-fixture.cjs')
 const output = process.argv[2], checks = [], servers = [], windows = [], sockets = new Set()
+const socksPeers = [], socksRoutes = []
 app.setPath('userData', mkdtempSync('D:/UserAppData/Temp/hellodog-voice-network-'))
 app.commandLine.appendSwitch('disable-background-networking')
 // A missing proxy cannot ever reach a public origin, even if the code regresses.
@@ -16,11 +18,17 @@ async function listen(server) { await new Promise(resolve => server.listen(0, '1
 function trustFixture(ses) {
   ses.setCertificateVerifyProc((details, callback) => {
     let matching = false
-    try { matching = ['api.ipify.org', '127.0.0.1'].includes(details.hostname) && new X509Certificate(details.certificate.data).fingerprint256 === fingerprint } catch {}
+    try { matching = ['api.ipify.org', 'voice.google.com', '127.0.0.1'].includes(details.hostname) && new X509Certificate(details.certificate.data).fingerprint256 === fingerprint } catch {}
     callback(matching ? 0 : -3)
   })
 }
-function isolated(label, trust = true) { const ses = session.fromPartition('voice-network-fixture-' + label + '-' + randomUUID(), { cache: false }); if (trust) trustFixture(ses); return ses }
+function isolated(label, trust = true) {
+  const ses = session.fromPartition('voice-network-fixture-' + label + '-' + randomUUID(), { cache: false })
+  if (trust) trustFixture(ses)
+  // Exclude Chromium component-update traffic from per-request auth counters.
+  ses.webRequest.onBeforeRequest((details, callback) => { let allowed = false; try { allowed = ['api.ipify.org', 'voice.google.com', '127.0.0.1'].includes(new URL(details.url).hostname) } catch {} callback({ cancel: !allowed }) })
+  return ses
+}
 async function makeProxy(ip, username, password) {
   const stats = { challenges: 0, supplied: 0, accepted: 0, requests: 0, cookieHeaders: 0, originAuthHeaders: 0, foreignTargets: 0 }
   const backend = track(https.createServer(identity, (request, response) => {
@@ -70,7 +78,7 @@ app.whenReady().then(async () => {
     })
     return request
   }
-  const { checkGoogleVoiceSession, attachGoogleVoiceProxyAuth } = require(join(output, 'network.cjs'))
+  const { checkGoogleVoiceSession, attachGoogleVoiceProxyAuth, prepareGoogleVoiceNetwork, testGoogleVoiceProxy } = require(join(output, 'network.cjs'))
   const { configureProxySession } = require(join(output, 'accountProxy.cjs'))
   const a = await makeProxy('203.0.113.21', 'synthetic-a', 'synthetic-password-a'), b = await makeProxy('203.0.113.22', 'synthetic-b', 'synthetic-password-b')
   const sesA = isolated('a'), sesB = isolated('b')
@@ -124,7 +132,72 @@ app.whenReady().then(async () => {
   await assert.rejects(requestJson(sesA, directUrl))
   assert.equal(directRequests, beforeDirect)
   checks.push('After the configured proxy stops, Chromium fails closed and does not hit a separately proven reachable direct origin')
+  const socksExit = async ip => {
+    const server = track(https.createServer(identity, (_request, response) => { response.writeHead(200, { 'content-type': 'application/json', connection: 'close' }); response.end(JSON.stringify({ ip })) }))
+    return listen(server)
+  }
+  const peerA = await makeSocksFixture(await socksExit('203.0.113.31'), 'socks-user-a', 'socks-pass-a', { fragmented: true })
+  const peerB = await makeSocksFixture(await socksExit('203.0.113.32'), 'socks-user-b', 'socks-pass-b')
+  socksPeers.push(peerA, peerB)
+  const socksA = { enabled: true, protocol: 'socks5', host: '127.0.0.1', port: peerA.port, username: 'socks-user-a', hasPassword: true }
+  const socksB = { enabled: true, protocol: 'socks5', host: '127.0.0.1', port: peerB.port, username: 'socks-user-b', hasPassword: true }
+  const routeA = await prepareGoogleVoiceNetwork(socksA, 'socks-pass-a'), routeB = await prepareGoogleVoiceNetwork(socksB, 'socks-pass-b'); socksRoutes.push(routeA, routeB)
+  const socksSessionA = isolated('socks-a'), socksSessionB = isolated('socks-b')
+  await Promise.all([configureProxySession(socksSessionA, routeA.proxy), configureProxySession(socksSessionB, routeB.proxy)])
+  const socksIPs = await Promise.all([checkGoogleVoiceSession(socksSessionA, routeA.proxy, routeA.password), checkGoogleVoiceSession(socksSessionB, routeB.proxy, routeB.password)])
+  assert.deepEqual(socksIPs.map(value => value.ip), ['203.0.113.31', '203.0.113.32'])
+  assert.ok(peerA.stats.targets.some(value => value.type === 3 && value.host === 'api.ipify.org'))
+  assert.notEqual(routeA.proxy.port, routeB.proxy.port); assert.notEqual(routeA.password, routeB.password)
+  checks.push('Two actual Electron Sessions tunnel HTTPS through independently authenticated SOCKS5 peers with remote target DNS')
+  const badSocksRoute = await prepareGoogleVoiceNetwork(socksA, 'socks-wrong-password'); socksRoutes.push(badSocksRoute)
+  const badSocksSession = isolated('socks-wrong'), beforeBad = peerA.stats.authAttempts
+  await configureProxySession(badSocksSession, badSocksRoute.proxy)
+  await assert.rejects(checkGoogleVoiceSession(badSocksSession, badSocksRoute.proxy, badSocksRoute.password), /连接检测失败/)
+  assert.equal(peerA.stats.authAttempts - beforeBad, 1)
+  await socksSessionA.closeAllConnections(); await socksSessionA.clearAuthCache()
+  const beforeCross = peerA.stats.authAttempts
+  await assert.rejects(checkGoogleVoiceSession(socksSessionA, routeB.proxy, routeB.password), /认证失败|连接检测失败/)
+  assert.equal(peerA.stats.authAttempts, beforeCross)
+  checks.push('Actual SOCKS wrong-password requests fail once and another window local capability cannot reach the peer')
+  // Trust only our generated certificate in the isolated fixture process. The
+  // production test function still creates/configures/closes its own session.
+  app.on('session-created', trustFixture)
+  try { assert.equal((await testGoogleVoiceProxy(socksB, 'socks-pass-b')).ip, '203.0.113.32') }
+  finally { app.off('session-created', trustFixture) }
+  checks.push('The actual settings-test function prepares, authenticates and closes a SOCKS5 route successfully')
+  const socksWindowSession = isolated('socks-window'); await configureProxySession(socksWindowSession, routeB.proxy)
+  const socksWindow = new BrowserWindow({ show: false, webPreferences: { session: socksWindowSession, sandbox: true, contextIsolation: true, nodeIntegration: false } }); windows.push(socksWindow)
+  attachGoogleVoiceProxyAuth(socksWindow.webContents, routeB.proxy, routeB.password)
+  await socksWindow.loadURL('https://api.ipify.org?format=json')
+  assert.ok((await socksWindow.webContents.executeJavaScript('document.body.innerText')).includes('203.0.113.32'))
+  socksWindow.destroy(); checks.push('An actual sandboxed WebContents opens HTTPS through the authenticated SOCKS5 bridge')
+  await peerA.close(); await socksSessionA.closeAllConnections()
+  const beforeSocksDirect = directRequests
+  await assert.rejects(requestJson(socksSessionA, directUrl)); assert.equal(directRequests, beforeSocksDirect)
+  const localA = routeA.proxy.port; await routeA.close(); await routeA.close()
+  assert.equal(routeA.password, '')
+  await assert.rejects(new Promise((resolve, reject) => { const connection = tcp.connect(localA, '127.0.0.1'); connection.once('connect', () => { connection.destroy(); resolve() }); connection.once('error', reject) }))
+  checks.push('Stopping the SOCKS5 peer never falls back to direct access and closing its local route removes the listener')
+  const { GoogleVoiceEmbeddedViews } = require(join(output, 'embeddedViews.cjs'))
+  const host = new BrowserWindow({ show: false, width: 900, height: 700, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } }); windows.push(host)
+  const states = [], pages = [], manager = new GoogleVoiceEmbeddedViews(host, { authorizeOwner: () => true, onState: state => states.push(state), onPage: page => pages.push(page.webContents) })
+  manager.setBounds({ x: 0, y: 0, width: 900, height: 700 })
+  app.on('session-created', trustFixture)
+  const managedId = 'gv-70000000-0000-4000-8000-000000000007'
+  try { manager.create('synthetic-network-owner', managedId, { proxy: socksB, password: 'socks-pass-b' }) }
+  finally { app.off('session-created', trustFixture) }
+  const deadline = Date.now() + 15000
+  while (!states.some(state => state.status === 'ready')) { if (Date.now() > deadline) throw new Error('Managed SOCKS view did not finish loading'); await new Promise(resolve => setTimeout(resolve, 30)) }
+  const actualState = await manager.checkNetwork('synthetic-network-owner', managedId)
+  assert.equal(actualState.status, 'checked'); assert.equal(actualState.ip, '203.0.113.32')
+  assert.equal(pages[0].getURL(), 'https://voice.google.com/u/0/')
+  const actualRoute = await pages[0].session.resolveProxy('https://voice.google.com/u/0/'), managedPort = Number(/127\.0\.0\.1:(\d+)/.exec(actualRoute)?.[1])
+  assert.ok(managedPort > 0)
+  manager.close('synthetic-network-owner', managedId); manager.destroy(); host.destroy()
+  await assert.rejects(new Promise((resolve, reject) => { const connection = tcp.connect(managedPort, '127.0.0.1'); connection.once('connect', () => { connection.destroy(); resolve() }); connection.once('error', reject) }))
+  checks.push('Actual embedded manager creation configures the authenticated SOCKS route before Voice load, reports its IP and removes the bridge on close')
   writeFileSync(join(output, 'results.json'), JSON.stringify({ runId: process.argv[3], passed: checks.length, checks, syntheticOnly: true, localOnly: true, realElectronNetwork: true, productionNetworkModuleUnmodified: true }, null, 2))
   console.log(JSON.stringify({ passed: checks.length, checks }))
+  await Promise.all(socksRoutes.map(route => route.close())); await Promise.all(socksPeers.map(peer => peer.close()))
   for (const socket of sockets) socket.destroy(); for (const server of servers) server.close(); app.exit(0)
-}).catch(error => { for (const win of windows) if (!win.isDestroyed()) win.destroy(); for (const socket of sockets) socket.destroy(); for (const server of servers) server.close(); console.error(error.stack); app.exit(1) })
+}).catch(async error => { for (const win of windows) if (!win.isDestroyed()) win.destroy(); await Promise.allSettled(socksRoutes.map(route => route.close())); await Promise.allSettled(socksPeers.map(peer => peer.close())); for (const socket of sockets) socket.destroy(); for (const server of servers) server.close(); console.error(error.stack); app.exit(1) })

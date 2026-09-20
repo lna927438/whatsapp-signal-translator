@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { app, WebContentsView, session, type BrowserWindow, type Rectangle, type Session, type WebContents, type WebPreferences, type IpcMainInvokeEvent, type DownloadItem } from 'electron'
 import { isOfficialGoogleAccountsHost } from './googleAccountDomains'
 import { configureProxySession, type AccountProxy } from '../../network/accountProxy'
-import { attachGoogleVoiceProxyAuth, checkGoogleVoiceSession } from './network'
+import { attachGoogleVoiceProxyAuth, checkGoogleVoiceSession, prepareGoogleVoiceNetwork, type GoogleVoiceNetworkRoute } from './network'
 import { installGoogleVoiceContextMenu } from './contextMenu'
 
 const START_URL = 'https://voice.google.com/u/0/'
@@ -83,7 +83,7 @@ interface Record {
   key: string; owner: string; ownerHash: string; windowId: string; session: Session; pages: Page[]; audioConsent: boolean; notificationsConsent: boolean
   downloads: Map<DownloadItem, Page>
   downloadHandler?: (event: Electron.Event, item: DownloadItem, webContents: WebContents) => void
-  connection?: GoogleVoiceConnection; networkReady: boolean; configuring?: Promise<void>
+  connection?: GoogleVoiceConnection; route?: GoogleVoiceNetworkRoute; networkReady: boolean; configuring?: Promise<void>
   networkTimer?: ReturnType<typeof setTimeout>
   checking?: Promise<GoogleVoiceNetworkState>; network: GoogleVoiceNetworkState
 }
@@ -193,20 +193,35 @@ export class GoogleVoiceEmbeddedViews {
   private startNetwork(record: Record): void {
     if (record.configuring || !record.connection) return
     const page = record.pages[0]
+    record.networkReady = false
+    record.network = { mode: record.network.mode, status: 'unchecked' }
     let timedOut = false
     record.networkTimer = setTimeout(() => {
       if (!this.alive(record, page)) return
       timedOut = true; page.status = 'failed'; record.networkReady = false
+      this.releaseNetworkRoute(record)
       record.network = { mode: record.network.mode, status: 'error', message: '窗口网络初始化超时，请退出 HelloDog 后重试。' }
       this.layout(); this.emit(record)
     }, 15_000)
-    record.configuring = changeSession(record.session, () => configureProxySession(record.session, record.connection?.proxy)).then(() => {
-      if (!this.alive(record, page) || timedOut) return
+    record.configuring = prepareGoogleVoiceNetwork(record.connection.proxy, record.connection.password).then(async route => {
+      // A local SOCKS bridge can finish opening after its window was closed or
+      // timed out. Never let that late result configure a replacement session.
+      if (!this.alive(record, page) || timedOut) { this.closeNetworkRoute(route); return }
+      record.route = route
+      await changeSession(record.session, async () => {
+        if (this.alive(record, page) && !timedOut && record.route === route) await configureProxySession(record.session, route.proxy)
+      })
+      if (!this.alive(record, page) || timedOut || record.route !== route) { this.releaseNetworkRoute(record); return }
+      for (const current of record.pages) {
+        current.detachAuth?.()
+        current.detachAuth = attachGoogleVoiceProxyAuth(current.view.webContents, route.proxy, route.password)
+      }
       record.networkReady = true
       void page.view.webContents.loadURL(START_URL).catch(() => undefined)
       if (record.connection?.proxy?.enabled) void this.checkNetwork(record.owner, record.windowId).catch(() => undefined)
     }).catch(() => {
-      if (!this.alive(record, page)) return
+      this.releaseNetworkRoute(record)
+      if (!this.alive(record, page) || timedOut) return
       record.networkReady = false; page.status = 'failed'
       record.network = { mode: record.network.mode, status: 'error', message: '窗口网络配置失败，请检查代理设置后重试。' }
       this.layout(); this.emit(record)
@@ -215,15 +230,16 @@ export class GoogleVoiceEmbeddedViews {
 
   async checkNetwork(owner: string, windowId: string): Promise<GoogleVoiceNetworkState> {
     const record = this.record(owner, windowId)
-    if (!record.networkReady) throw new Error(record.network.message || '窗口网络正在配置，请稍后检测。')
+    if (!record.networkReady || record.connection && !record.route) throw new Error(record.network.message || '窗口网络正在配置，请稍后检测。')
     if (record.checking) return record.checking
+    const route = record.route
     record.network = { mode: record.network.mode, status: 'checking' }; this.emit(record)
-    const operation = checkGoogleVoiceSession(record.session, record.connection?.proxy, record.connection?.password || '').then(result => {
-      if (this.records.get(record.key) !== record) throw new Error('窗口已关闭，请重新检测。')
+    const operation = checkGoogleVoiceSession(record.session, route?.proxy, route?.password || '').then(result => {
+      if (this.records.get(record.key) !== record || record.route !== route || !record.networkReady) throw new Error('窗口已关闭或网络配置已变化，请重新检测。')
       record.network = { mode: record.network.mode, status: 'checked', ...result }; this.emit(record)
       return { ...record.network }
     }).catch(() => {
-      if (this.records.get(record.key) !== record) throw new Error('窗口已关闭，请重新检测。')
+      if (this.records.get(record.key) !== record || record.route !== route || !record.networkReady) throw new Error('窗口已关闭或网络配置已变化，请重新检测。')
       record.network = { mode: record.network.mode, status: 'error', message: '出口 IP 暂时无法核实，请检查网络或代理后重试。' }; this.emit(record)
       return { ...record.network }
     }).finally(() => { if (record.checking === operation) record.checking = undefined })
@@ -331,7 +347,7 @@ export class GoogleVoiceEmbeddedViews {
     page.detachMenu = installGoogleVoiceContextMenu(wc, () => this.alive(record, page) && page.status !== 'failed' && this.selected === record.key && this.top(record) === page && !this.overlayOpen && (this.options.authorizeOwner?.(record.owner) ?? true))
     if (record.connection) {
       wc.setWebRTCIPHandlingPolicy(record.connection.proxy?.enabled ? 'disable_non_proxied_udp' : 'default')
-      page.detachAuth = attachGoogleVoiceProxyAuth(wc, record.connection.proxy, record.connection.password)
+      if (record.route) page.detachAuth = attachGoogleVoiceProxyAuth(wc, record.route.proxy, record.route.password)
     }
     const navigate = (event: Electron.Event, url: string) => {
       if (!isGoogleVoiceEmbeddedUrl(url)) { event.preventDefault(); this.blocked(record, url, 'navigation') }
@@ -481,6 +497,7 @@ export class GoogleVoiceEmbeddedViews {
   private removeRecord(record: Record): void {
     this.records.delete(record.key); record.audioConsent = false; record.notificationsConsent = false; record.networkReady = false
     clearTimeout(record.networkTimer); record.networkTimer = undefined
+    this.releaseNetworkRoute(record)
     if (record.downloadHandler) record.session.removeListener('will-download', record.downloadHandler)
     for (const item of record.downloads.keys()) item.cancel()
     record.downloads.clear()
@@ -503,5 +520,17 @@ export class GoogleVoiceEmbeddedViews {
     if (!page.view.webContents.isDestroyed()) {
       try { page.view.webContents.send('google-voice:context-changed') } catch { /* closing renderer */ }
     }
+  }
+
+  private closeNetworkRoute(route: GoogleVoiceNetworkRoute): void {
+    // Closing a bridge is independent of Chromium's serialized configuration;
+    // a hung native operation must never keep its proxy listener alive.
+    void Promise.resolve().then(() => route.close()).catch(() => undefined)
+  }
+
+  private releaseNetworkRoute(record: Record): void {
+    const route = record.route; record.route = undefined
+    for (const page of record.pages) { page.detachAuth?.(); page.detachAuth = undefined }
+    if (route) this.closeNetworkRoute(route)
   }
 }

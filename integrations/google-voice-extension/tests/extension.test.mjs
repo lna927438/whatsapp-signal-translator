@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { ExtensionBridge, SelectionTasks } from '../background-core.mjs'
-import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext } from '../protocol.mjs'
+import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext, mediaValue, recipientContextValue, translationPayload } from '../protocol.mjs'
 import { SendGuard, installSendInterception } from '../send-guard.mjs'
 
 const token = 'a'.repeat(64), code = 'b'.repeat(64), extensionId = 'kigfaejcipjibnmnpinplphfldjahknn'
@@ -229,6 +229,50 @@ test('plain host-authorized text works with automatic sending translation disabl
   s.bridge.status = async () => ({ connected: true, sendAutoTranslate: false, targetLanguage: 'en-US' })
   s.bridge.translate = async () => ({ enabled: true, text: 'Hello', requestId: 'send-gv-plain-fixture', untranslated: true })
   await s.guard.prepare(); await s.guard.confirm(); assert.equal(s.sent(), 1)
+})
+
+const syntheticMedia = { fingerprint: 'a'.repeat(64), count: 1, types: ['image/png'], totalBytes: 500 }
+const syntheticRecipients = { kind: 'recipients', recipientKey: 'b'.repeat(64), recipientCount: 2 }
+test('media-only request requires verified images and rejects malformed or incoming recipients', () => {
+  const payload = { id: randomUUID(), conversationId: 'fixture', direction: 'outgoing', text: '', media: syntheticMedia, context: syntheticRecipients }
+  assert.deepEqual(translationPayload(payload).media, syntheticMedia)
+  assert.deepEqual(translationPayload(payload).context, syntheticRecipients)
+  assert.throws(() => translationPayload({ ...payload, media: undefined }))
+  assert.throws(() => translationPayload({ ...payload, direction: 'incoming' }))
+  for (const media of [{ ...syntheticMedia, count: 2 }, { ...syntheticMedia, totalBytes: 21 * 1024 * 1024 }, { ...syntheticMedia, types: ['video/mp4'] }, { ...syntheticMedia, fingerprint: 'x'.repeat(64) }]) assert.throws(() => mediaValue(media))
+  for (const context of [{ ...syntheticRecipients, recipientCount: 8 }, { ...syntheticRecipients, recipientCount: 0 }, { ...syntheticRecipients, recipientKey: 'not-a-hash' }]) assert.throws(() => recipientContextValue(context))
+})
+test('media receipt mismatch and changed recipients during provider work never reach send', async () => {
+  for (const mode of ['missing-media', 'different-media', 'different-recipients']) {
+    const s = guardSetup(); s.snapshot.media = syntheticMedia; s.snapshot.context = syntheticRecipients
+    s.bridge.translate = async () => {
+      if (mode === 'different-recipients') s.snapshot.context = { ...syntheticRecipients, recipientKey: 'c'.repeat(64) }
+      return { enabled: true, text: 'Hello', requestId: 'synthetic-media-receipt', ...(mode === 'missing-media' ? {} : { media: mode === 'different-media' ? { ...syntheticMedia, fingerprint: 'c'.repeat(64) } : syntheticMedia }) }
+    }
+    await assert.rejects(s.guard.prepare()); assert.equal(s.sent(), 0); assert.equal(s.replaced(), 0)
+  }
+})
+test('media replacement during authorization or input settle preserves uncertain reservation without a click', async () => {
+  for (const phase of ['authorize', 'settle']) {
+    const s = guardSetup(); s.snapshot.media = syntheticMedia; s.snapshot.mediaRevision = 1
+    s.bridge.translate = async () => ({ enabled: true, text: 'Hello', requestId: 'synthetic-media-receipt', media: syntheticMedia })
+    await s.guard.prepare()
+    if (phase === 'authorize') s.bridge.authorize = async payload => { s.snapshot.mediaRevision++; return { authorized: true, requestId: payload.requestId, attempt: 1 } }
+    else s.adapter.settle = async () => { s.snapshot.mediaRevision++ }
+    await assert.rejects(s.guard.confirm()); assert.equal(s.sent(), 0); assert.equal(s.guard.state, 'uncertain')
+  }
+})
+test('all outgoing operations retain media and recipient scope including explicit uncertain resolution', async () => {
+  const s = guardSetup(), seen = []; s.snapshot.text = ''; s.snapshot.media = syntheticMedia; s.snapshot.context = syntheticRecipients
+  const resultId = 'send-gv-plain-synthetic'
+  s.bridge.dispatchStatus = async value => { seen.push(value); return { state: 'clear' } }
+  s.bridge.logicalId = async value => { seen.push(value); return { id: randomUUID() } }
+  s.bridge.translate = async value => { seen.push(value); return { enabled: true, text: '', requestId: resultId, media: syntheticMedia, untranslated: true } }
+  s.bridge.authorize = async value => { seen.push(value); return { authorized: true, requestId: resultId, attempt: 1 } }
+  s.bridge.dispatchResolve = async value => { seen.push(value); return { resolved: true } }
+  await s.guard.prepare(); await s.guard.confirm(); await s.guard.resolve('sent')
+  assert.equal(seen.length, 5); assert.equal(s.sent(), 1)
+  for (const value of seen) { assert.deepEqual(value.media, syntheticMedia); assert.deepEqual(value.context, syntheticRecipients) }
 })
 test('draft IDs survive background restart without stored plaintext; sent resolution renews the next explicit draft', async () => {
   const s = setup(); s.values.pairToken = token

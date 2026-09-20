@@ -13,7 +13,7 @@ function fixture() {
     decryptString: (value: Buffer) => { if (decryptionFails) throw new Error('private encryption diagnostic'); return value.toString().replace('encrypted-fixture:', '').split('').reverse().join('') }
   } })
   const { GoogleVoiceRecords } = h.load('src/main/platforms/googleVoice/windowRecords.ts') as typeof import('../src/main/platforms/googleVoice/windowRecords.ts')
-  return { records: new GoogleVoiceRecords(storage), storage, setAvailable: (value: boolean) => { available = value }, setDecryptionFailure: () => { decryptionFails = true }, get writes() { return writes } }
+  return { records: new GoogleVoiceRecords(storage), reload: () => new GoogleVoiceRecords(storage), storage, setAvailable: (value: boolean) => { available = value }, setDecryptionFailure: () => { decryptionFails = true }, get writes() { return writes } }
 }
 
 test('old Voice records retain system routing; new proxy passwords are encrypted and never returned', async () => {
@@ -92,4 +92,17 @@ test('concurrent proxy writes and renames serialize without losing either change
   const row = await h.records.get('owner', added.id)
   assert.equal(row.label, '新窗口'); assert.equal(row.proxy?.host, proxy.host)
   assert.equal(await h.records.proxyPassword('owner', added.id), proxy.password)
+})
+
+test('authenticated SOCKS settings persist encrypted and recover without resending password to the renderer', async () => {
+  const h = fixture(), added = await h.records.add('owner', { proxy: { ...proxy, protocol: 'socks5' } })
+  const reloaded = h.reload(), row = await reloaded.get('owner', added.id)
+  assert.equal(row.proxy?.protocol, 'socks5'); assert.equal(row.proxy?.hasPassword, true)
+  assert.ok(!JSON.stringify(row).includes('proxySecret')); assert.ok(!JSON.stringify(await h.storage.read()).includes(proxy.password))
+  assert.equal(await reloaded.proxyPassword('owner', added.id), proxy.password)
+  assert.equal((await reloaded.proxyForTest('owner', added.id, { password: '' })).password, proxy.password)
+  await assert.rejects(reloaded.update('owner', added.id, { proxy: { username: 'new-user', password: '' } }), /重新填写密码/)
+  await reloaded.update('owner', added.id, { proxy: { username: '', password: '', clearPassword: true } })
+  assert.equal((await reloaded.get('owner', added.id)).proxy?.hasPassword, false)
+  assert.equal(await reloaded.proxyPassword('owner', added.id), '')
 })

@@ -45,6 +45,8 @@ test('Google Voice proxy normalization rejects malformed and oversized input inc
   assert.equal(normalize({ enabled: false }).enabled, false)
   assert.equal(normalize({ enabled: false, protocol: 'http', host: '', port: 8080 }).enabled, false)
   assert.equal(normalize({ ...proxy, protocol: 'socks5', username: '', password: '' }).protocol, 'socks5')
+  assert.equal(normalize({ ...proxy, protocol: 'socks5', password: 'fixture-secret' }).hasPassword, true)
+  for (const input of [{ ...proxy, protocol: 'socks5', password: '汉'.repeat(86) }, { ...proxy, protocol: 'socks5', username: '', password: 'secret' }, { ...proxy, protocol: 'socks5', username: '汉'.repeat(86), password: 'secret' }]) assert.throws(() => normalize(input), /255|同时填写/)
 })
 
 test('IP check uses the supplied window session with cookies off and redirects disabled', async () => {
@@ -88,6 +90,7 @@ test('stalled proxy setup times out without starting the check or retrying direc
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const h = harness(reply, 'stall'), pending = h.module.testGoogleVoiceProxy(proxy, 'fixture-secret')
   const rejected = assert.rejects(pending, /代理设置未成功/)
+  await Promise.resolve(); await Promise.resolve()
   t.mock.timers.tick(12_000)
   await rejected
   assert.equal(h.requests.length, 0)
@@ -148,8 +151,14 @@ test('per-window auth uses the current Electron signature and revokes itself on 
   contents.emit('login', event, { firstAuthAttempt: false }, info, callback)
   contents.emit('login', event, { firstAuthAttempt: true }, info, callback)
   assert.equal(prevented, 3); assert.deepEqual(replies, [['fixture-user', 'fixture-secret'], [], []])
+  contents.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+  contents.emit('login', event, { firstAuthAttempt: true }, info, callback); assert.deepEqual(replies.at(-1), [])
+  contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+  contents.emit('login', event, { firstAuthAttempt: true }, info, callback); assert.deepEqual(replies.at(-1), [])
+  contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+  contents.emit('login', event, { firstAuthAttempt: true }, info, callback); assert.deepEqual(replies.at(-1), ['fixture-user', 'fixture-secret'])
   contents.emit('destroyed')
-  assert.equal(contents.listenerCount('login'), 0); assert.equal(contents.listenerCount('destroyed'), 0)
+  assert.equal(contents.listenerCount('login'), 0); assert.equal(contents.listenerCount('destroyed'), 0); assert.equal(contents.listenerCount('did-start-navigation'), 0)
   remove(); assert.equal(contents.listenerCount('login'), 0)
 })
 
