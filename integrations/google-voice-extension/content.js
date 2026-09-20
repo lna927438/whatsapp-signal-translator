@@ -130,9 +130,20 @@ const mediaFields = original => ({ ...(original.media ? { media: mediaValue(orig
 class SendGuard {
   constructor(adapter, bridge, { randomId = () => crypto.randomUUID() } = {}) {
     this.adapter = adapter; this.bridge = bridge; this.randomId = randomId
-    this.state = 'idle'; this.job = null
+    this.state = 'idle'; this.job = null; this.previewRevision = 0
   }
-  invalidate() { this.invalidated = true; this.state = 'failed'; this.job = null }
+  invalidate() { this.invalidated = true; this.previewRevision++; this.state = 'failed'; this.job = null }
+  dismissPreview() {
+    this.previewRevision++
+    // Closing UI does not cancel a paid translation or discard its durable ID.
+    // An authorization already in flight must finish learning its reservation;
+    // an uncertain submission can only be released by explicit reconciliation.
+    if (['preparing', 'preview'].includes(this.state)) this.state = 'idle'
+  }
+  assertPreviewCurrent(revision) {
+    this.assertSupported()
+    if (revision !== this.previewRevision) throw new Error('预览已关闭，请重新打开草稿预览。')
+  }
   assertSupported() { if (this.invalidated) throw new Error('账号或页面已变化，请重新准备预览。'); if (this.adapter.supported !== true) throw new Error('页面版本尚未支持；发送保护未启用。') }
   async prepare() {
     this.assertSupported()
@@ -146,15 +157,15 @@ class SendGuard {
     }
     // Explicit retry of the same failed draft retains its logical request ID.
     if (!this.job || !sameDraft(this.job.original, original)) this.job = { id: this.randomId(), original }
-    const job = this.job
+    const job = this.job, revision = this.previewRevision
     this.state = 'preparing'
     try {
       const status = await this.bridge.status()
-      this.assertSupported()
+      this.assertPreviewCurrent(revision)
       if (!status.connected || typeof status.targetLanguage !== 'string') throw new Error('客户端未连接或目标语言未就绪。')
       if (this.bridge.dispatchStatus) {
         const pending = await this.bridge.dispatchStatus({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
-        this.assertSupported()
+        this.assertPreviewCurrent(revision)
         if (pending.state === 'uncertain') {
           if (!Number.isSafeInteger(pending.attempt) || pending.attempt < 1) throw new Error('此前发送记录无效。')
           job.pendingRequestId = pending.requestId; job.pendingAttempt = pending.attempt; this.state = 'uncertain'; throw new Error('此前发送结果尚未核对，请先确认是否已发送。')
@@ -163,26 +174,26 @@ class SendGuard {
       }
       if (this.bridge.logicalId) {
         const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
-        this.assertSupported()
+        this.assertPreviewCurrent(revision)
         if (!result || !/^[a-f0-9-]{36}$/i.test(result.id)) throw new Error('草稿编号尚未确认。')
         job.id = result.id
       }
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('草稿或会话已变化，未提交翻译。')
       const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
       const translated = translatedValue(await this.bridge.translate(payload))
-      this.assertSupported()
+      this.assertPreviewCurrent(revision)
       if (JSON.stringify(translated.media) !== JSON.stringify(original.media)) throw new Error('图片草稿回执不一致，已阻止发送。')
       if (hasForbiddenHan(translated.text, status.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
       job.translated = translated; job.targetLanguage = status.targetLanguage
       this.state = 'preview'
       return { text: translated.text, requestId: translated.requestId, untranslated: translated.untranslated === true, ...mediaFields(original) }
-    } catch (error) { if (this.state !== 'uncertain') this.state = 'failed'; throw error }
+    } catch (error) { if (revision === this.previewRevision && this.state !== 'uncertain') this.state = 'failed'; throw error }
   }
   async confirm() {
     this.assertSupported()
     if (this.state !== 'preview' || !this.job?.translated) throw new Error('请先成功翻译并确认预览。')
-    const job = this.job, original = job.original
+    const job = this.job, original = job.original, revision = this.previewRevision
     if (!sameDraft(original, this.adapter.snapshot())) { this.state = 'failed'; throw new Error('草稿已变化，已阻止发送。') }
     this.state = 'authorizing'
     try {
@@ -193,11 +204,12 @@ class SendGuard {
       // Authorization has durably reserved this dispatch. Even DOM write failure
       // now requires explicit outcome reconciliation before any further attempt.
       this.state = 'uncertain'; job.pendingRequestId = job.translated.requestId; job.pendingAttempt = result.attempt
+      this.assertPreviewCurrent(revision)
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
       if (hasForbiddenHan(job.translated.text, job.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
       if (!this.adapter.replace(original, job.translated.text)) throw new Error('译文未写入，已阻止发送。')
       if (this.adapter.settle) await this.adapter.settle()
-      this.assertSupported()
+      this.assertPreviewCurrent(revision)
       const current = this.adapter.snapshot()
       if (!sameTarget(original, current) || !sameMedia(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.targetLanguage)) throw new Error('输入框、图片或目标核对失败，已阻止发送。')
       // No await between final target/text checks and the only permitted click.
@@ -576,31 +588,43 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   if (window !== window.top || location.origin !== 'https://voice.google.com' || typeof sendRequest !== 'function') return null
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
-  let panel, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
+  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
   const removers = []
   function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
   function invalidate() {
     epoch++; runtimeStatus = null; statusAt = 0; guard?.invalidate(); guard = null; guardConversation = null; pending = null
-    removeMessageViews(); panel?.remove(); panel = null
+    removeMessageViews(); panelLifecycle?.dismiss(); panelLifecycle = null; panel?.remove(); panel = null
     currentUrl = location.href
     if (!disposed) scheduleScan()
   }
   function checkNavigation() { if (currentUrl !== location.href) invalidate() }
 
-  function showPanel(title, value, actions = [], note = '请核对内容。只有点击“确认发送”才会提交短信。') {
+  function showPanel(title, value, actions = [], note = '请核对内容。只有点击“确认发送”才会提交短信。', lifecycle) {
     if (disposed) return
+    if (panelLifecycle && panelLifecycle !== lifecycle) panelLifecycle.dismiss()
+    panelLifecycle = lifecycle
     panel?.remove(); panel = document.createElement('div')
     panel.style.cssText = 'position:fixed;bottom:24px;right:24px;width:min(440px,90vw);z-index:2147483647;'
     const shadow = panel.attachShadow({ mode: 'closed' }), style = document.createElement('style')
     style.textContent = ':host{all:initial}section{font:14px/1.5 system-ui;color:#eef6f2;background:#19232a;border:1px solid #48625a;border-radius:12px;padding:18px;box-shadow:0 8px 32px #0006}header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}button{background:#32473f;color:#fff;border:0;border-radius:6px;padding:7px 10px;cursor:pointer}button:disabled{opacity:.5}textarea{box-sizing:border-box;width:100%;min-height:110px;max-height:35vh;background:#111a20;color:#eef6f2;border:1px solid #48625a;border-radius:6px;padding:10px;resize:vertical}p{color:#b9c9c3;font-size:12px;margin-bottom:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}'
     const section = document.createElement('section'), header = document.createElement('header'), heading = document.createElement('strong'), close = document.createElement('button')
-    heading.textContent = title; close.textContent = '关闭'; close.type = 'button'; const currentPanel = panel; close.onclick = () => currentPanel.remove()
+    heading.textContent = title; close.textContent = '关闭'; close.type = 'button'; const currentPanel = panel
+    close.onclick = () => {
+      if (panel !== currentPanel || !currentPanel.isConnected) return
+      panel = null; panelLifecycle = null; currentPanel.remove(); lifecycle?.dismiss(); scheduleScan()
+    }
     const text = document.createElement('textarea'); text.readOnly = true; text.value = value; text.setAttribute('aria-label', '翻译结果'); text.onclick = () => text.select()
     const footer = document.createElement('p'); footer.textContent = note
     const controls = document.createElement('div'); controls.className = 'actions'
     for (const action of actions) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = action.label
-      button.onclick = () => { for (const child of controls.children) child.disabled = true; Promise.resolve().then(action.run).catch(showError).finally(() => { for (const child of controls.children) child.disabled = false }) }
+      button.onclick = () => {
+        if (panel !== currentPanel || !currentPanel.isConnected) return
+        for (const child of controls.children) child.disabled = true
+        Promise.resolve().then(() => { if (panel === currentPanel && currentPanel.isConnected) return action.run() })
+          .catch(error => { if (panel === currentPanel && currentPanel.isConnected) showError(error) })
+          .finally(() => { for (const child of controls.children) child.disabled = false })
+      }
       controls.append(button)
     }
     header.append(heading, close); section.append(header, text, controls, footer); shadow.append(style, section)
@@ -636,18 +660,23 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     const snapshot = adapter.snapshot()
     if (!guard || guardConversation !== snapshot.conversationId) { guard = new SendGuard(adapter, bridge); guardConversation = snapshot.conversationId }
     const active = guard
-    showPanel('HelloDog · 正在准备预览', '正在核对连接、此前发送结果及翻译。请保留草稿。', [], '此时尚未发送短信。')
+    let dismissed = false
+    const lifecycle = { dismiss() { if (dismissed) return; dismissed = true; active.dismissPreview(); scheduleScan() } }
+    showPanel('HelloDog · 正在准备预览', '正在核对连接、此前发送结果及翻译。请保留草稿。', [], snapshot.text.trim() ? '尚未发送短信。需要翻译的文字在成功后扣字符；关闭面板不会取消已开始的翻译。' : '尚未发送短信。纯图片不调用文字翻译，不扣文字字符。', lifecycle)
     let preview
-    try { preview = await active.prepare() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
+    try { preview = await active.prepare() } catch (error) { if (!dismissed && !disposed && epoch === startedEpoch) throw error; return }
+    if (dismissed || disposed || epoch !== startedEpoch) return
     if (guard !== active || adapter.snapshot()?.conversationId !== snapshot.conversationId) throw new Error('会话已变化，译文未发送。')
     toolbar(adapter.supported)
     const targetNote = preview.context ? `已选 ${preview.context.recipientCount} 位收件人，请核对官方收件人列表。\n\n` : ''
     const previewText = targetNote + (preview.media ? `已核对 ${preview.media.count} 张图片，请同时核对原站图片预览。${preview.text ? '\n\n' + preview.text : '\n没有文字说明；此操作不调用文字翻译。'}` : preview.text)
+    const billingNote = preview.untranslated ? (preview.media && !preview.text ? '纯图片不扣文字字符。请核对图片与收件人，确认后才发送。' : '本条文字无需翻译，不扣翻译字符。请核对内容，确认后才发送。') : '文字翻译成功时扣字符；关闭预览不退还已扣字符，确认发送不再重复扣费。请核对内容，确认后才发送。'
     showPanel(preview.media ? 'HelloDog · 图片发送前预览' : preview.untranslated ? 'HelloDog · 原文无需翻译' : 'HelloDog · 发送前预览', previewText, [{ label: '确认发送', run: async () => {
-      try { await active.confirm() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
-      if (disposed || epoch !== startedEpoch) return
+      if (dismissed) return
+      try { await active.confirm() } catch (error) { if (!dismissed && !disposed && epoch === startedEpoch) throw error; return }
+      if (dismissed || disposed || epoch !== startedEpoch) return
       showPanel('HelloDog · 已提交', '已执行一次原站发送操作。送达情况以 Google Voice 官方聊天为准。', [], '可以继续编辑其他短信。同文再次发送前需要先核对此次结果；不会自动重发。')
-    } }])
+    } }], billingNote, lifecycle)
   }
   // Installed before the app's document handlers. Unverified recipients and
   // attachment surfaces using these known controls are blocked, not guessed.
@@ -671,7 +700,7 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       button.style.cssText = 'background:#32473f;color:#fff;border:0;border-radius:5px;padding:5px 9px;cursor:pointer;'; button.onclick = () => { void prepareOutgoing().catch(showError) }
       bar.append(label, button); entry.before(bar)
     }
-    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '发送先预览 · 不自动重发' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
+    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '文字翻译成功扣字符 · 发送先预览' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
     bar.lastChild.disabled = !supported
   }
   async function translateMessage(item, manual) {

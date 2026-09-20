@@ -7,7 +7,7 @@ import type { GoogleVoiceBrowser } from './officialWindow'
 
 export interface GoogleVoiceRecord {
   id: string; owner: string; label: string; tabOrder: number; createdAt: number
-  browser?: GoogleVoiceBrowser; closed?: boolean
+  browser?: GoogleVoiceBrowser; closed?: boolean; notificationsEnabled?: boolean
   proxy?: AccountProxy; proxySecret?: string
 }
 export type GoogleVoicePublicRecord = Omit<GoogleVoiceRecord, 'proxySecret'>
@@ -107,11 +107,15 @@ export class GoogleVoiceRecords {
       data.windows.push(row); return this.publicRecord(row)
     })
   }
-  update(owner: string, id: string, patch: {label?: string; browser?: GoogleVoiceBrowser; closed?: boolean; proxy?: any}) {
+  update(owner: string, id: string, patch: {label?: string; browser?: GoogleVoiceBrowser; closed?: boolean; proxy?: any; notificationsEnabled?: boolean}) {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return Promise.reject(new Error('Google Voice 窗口设置无效。'))
     return this.transact(data => {
       const row = data.windows.find(row => row.owner === owner && row.id === id && !row.closed)
       if (!row || !validId(id)) throw new Error('Google Voice 窗口不存在。')
+      if (patch.notificationsEnabled !== undefined) {
+        if (typeof patch.notificationsEnabled !== 'boolean') throw new Error('通知设置无效。')
+        row.notificationsEnabled = patch.notificationsEnabled
+      }
       const proxyPatch = patch.proxy === undefined ? undefined : this.proxyPatch(patch.proxy, row)
       if (patch.label !== undefined) row.label = this.label(patch.label)
       if (patch.browser) {

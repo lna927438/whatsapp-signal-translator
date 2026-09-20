@@ -5,7 +5,7 @@ import { mainHarness } from './main-harness.ts'
 
 test('desktop notification modes, click navigation and close-to-tray execute their actual handlers',()=>{
  const appEvents:Record<string,any>={},events:Record<string,any>={},notifications:any[]=[];let focused=true,hidden=0,shown=0;const sent:any[]=[]
- const electron={app:{on:(name:string,fn:any)=>{appEvents[name]=fn},setLoginItemSettings:()=>{},quit:()=>{}},Menu:{buildFromTemplate:(value:any)=>value},nativeImage:{createFromPath:()=>({resize:()=>({isEmpty:()=>false})})},Tray:class{setImage(){}setToolTip(){}setContextMenu(){}on(){}destroy(){}},Notification:class{static isSupported(){return true}events:Record<string,any>={};constructor(public options:any){notifications.push(this)}on(name:string,fn:any){this.events[name]=fn}show(){}}}
+ const electron={app:{on:(name:string,fn:any)=>{appEvents[name]=fn},setLoginItemSettings:()=>{},quit:()=>{}},Menu:{buildFromTemplate:(value:any)=>value},nativeImage:{createFromPath:()=>({resize:()=>({isEmpty:()=>false})})},Tray:class{setImage(){}setToolTip(){}setContextMenu(){}on(){}destroy(){}},Notification:class{static isSupported(){return true}events:Record<string,any>={};constructor(public options:any){notifications.push(this)}on(name:string,fn:any){this.events[name]=fn}show(){}close(){this.events.close?.()}}}
  const h=mainHarness(electron)
  try{const runtime=h.load('src/main/desktopRuntime.ts');runtime.attachDesktopRuntime({isDestroyed:()=>false,setOverlayIcon(){},flashFrame(){},on:(name:string,fn:any)=>{events[name]=fn},isFocused:()=>focused,show:()=>{shown++},focus:()=>{},hide:()=>{hidden++},webContents:{send:(...args:any[])=>sent.push(args)}})
  runtime.applyDesktopOptions({notifications:'background',closeToTray:true,notificationSound:false});runtime.notifyAccount('a','Work');assert.equal(notifications.length,0)
@@ -15,6 +15,77 @@ test('desktop notification modes, click navigation and close-to-tray execute the
  focused=true;runtime.applyDesktopOptions({notifications:'always',closeToTray:false,notificationSound:true,hideNotificationNames:true});runtime.notifyAccount('signal','Private contact');assert.equal(notifications.length,2);assert.equal(notifications[1].options.silent,false);assert.equal(notifications[1].options.body,'有新的聊天消息')
  runtime.notifyAccount('signal','Private contact',{silent:true,hideNames:true});assert.equal(notifications[2].options.silent,true);assert.equal(notifications[2].options.body,'有新的聊天消息')
  }finally{rmSync(h.directory,{recursive:true,force:true})}
+})
+
+function notificationFixture() {
+ const notifications: FakeNotification[] = [], events: Record<string, (...args: any[]) => void> = {}, sent: any[] = []
+ let destroyed = false, shown = 0, focused = 0
+ class FakeNotification {
+  static isSupported() { return true }
+  events: Record<string, (...args: any[]) => void> = {}; shown = 0; closed = 0
+  constructor(public options: any) { notifications.push(this) }
+  on(name: string, callback: (...args: any[]) => void) { this.events[name] = callback }
+  show() { this.shown++ }
+  close() { this.closed++; this.events.close?.() }
+ }
+ const h = mainHarness({ app: { on() {}, setLoginItemSettings() {} }, Notification: FakeNotification,
+  nativeImage: { createFromBitmap: () => ({}) } })
+ const runtime = h.load('src/main/desktopRuntime.ts')
+ const live = () => { if (destroyed) throw new Error('Window has been destroyed') }
+ const window = { isDestroyed: () => destroyed, setOverlayIcon() {}, flashFrame() {}, on: (name: string, callback: (...args: any[]) => void) => { events[name] = callback },
+  isFocused: () => { live(); return false }, show: () => { live(); shown++ }, focus: () => { live(); focused++ },
+  get webContents() { live(); return { send: (...args: any[]) => sent.push(args) } } }
+ runtime.attachDesktopRuntime(window)
+ runtime.applyDesktopOptions({ notifications: 'always', closeToTray: false })
+ return { runtime, notifications, events, sent, window, destroy: () => { destroyed = true }, shown: () => shown, focused: () => focused,
+  dispose: () => { runtime.clearAccountNotifications(); rmSync(h.directory, { recursive: true, force: true }) } }
+}
+
+test('a replacement notification revokes old clicks and clearing one account preserves another', () => {
+ const f = notificationFixture()
+ try {
+  f.runtime.notifyAccount('a', 'Account A'); f.runtime.notifyAccount('b', 'Account B')
+  const [oldA, b] = f.notifications
+  f.runtime.notifyAccount('a', 'Account A'); const newA = f.notifications[2]
+  assert.equal(oldA.closed, 1); assert.equal(newA.shown, 1); assert.equal(b.closed, 0)
+  oldA.events.click(); assert.equal(f.shown(), 0); assert.equal(f.sent.length, 0)
+  f.runtime.clearAccountNotifications('a'); assert.equal(newA.closed, 1); assert.equal(b.closed, 0)
+  newA.events.click(); assert.equal(f.shown(), 0)
+  b.events.click(); assert.equal(f.shown(), 1); assert.equal(f.focused(), 1); assert.equal(f.sent[0][1].accountId, 'b')
+  f.runtime.clearAccountNotifications(); assert.equal(b.closed, 1)
+  b.events.click(); assert.equal(f.shown(), 1)
+ } finally { f.dispose() }
+})
+
+test('authorization is checked before display and old notifications cannot focus after revocation or account removal', () => {
+ const f = notificationFixture(); let authorized = false
+ try {
+  f.runtime.notifyAccount('a', 'Account A', { authorized: () => authorized }); assert.equal(f.notifications.length, 0)
+  authorized = true; f.runtime.notifyAccount('a', 'Account A', { authorized: () => authorized })
+  const first = f.notifications[0]; assert.equal(first.shown, 1)
+  authorized = false; first.events.click(); assert.equal(f.shown(), 0); assert.equal(f.sent.length, 0)
+  authorized = true; f.runtime.notifyAccount('a', 'Account A', { authorized: () => authorized })
+  const next = f.notifications[1]; f.runtime.updateAccountUnread('a', 2); f.runtime.clearAccountUnread('a')
+  assert.equal(next.closed, 1); assert.equal(f.runtime.accountUnreadSnapshot().a, undefined)
+  next.events.click(); assert.equal(f.shown(), 0)
+  assert.doesNotThrow(() => f.runtime.notifyAccount('a', 'Account A', { authorized: () => { throw new Error('Revoked') } }))
+  assert.equal(f.notifications.length, 2)
+ } finally { f.dispose() }
+})
+
+test('destroyed or closed windows never receive notification navigation and close releases all notifications', () => {
+ const f = notificationFixture()
+ try {
+  f.runtime.notifyAccount('a', 'Account A'); f.runtime.notifyAccount('b', 'Account B')
+  f.destroy()
+  assert.doesNotThrow(() => f.notifications[0].events.click())
+  assert.doesNotThrow(() => f.runtime.notifyAccount('c', 'Account C'))
+  assert.equal(f.notifications.length, 2); assert.equal(f.shown(), 0); assert.equal(f.sent.length, 0)
+  f.events.closed(); assert.ok(f.notifications.every(item => item.closed === 1))
+  assert.doesNotThrow(() => f.notifications[1].events.click())
+  assert.doesNotThrow(() => f.runtime.notifyAccount('c', 'Account C'))
+  assert.equal(f.notifications.length, 2); assert.equal(f.shown(), 0)
+ } finally { f.dispose() }
 })
 
 test('X minimizes instead of exiting when the tray is unavailable, while explicit exit is allowed',()=>{

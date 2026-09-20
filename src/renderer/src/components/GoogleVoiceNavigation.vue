@@ -4,12 +4,12 @@ import UiIcon from './UiIcon.vue'
 import { uiLanguage } from '../lib/uiLocale'
 import type { GoogleVoiceWindow, GoogleVoiceNetwork } from '../lib/googleVoiceWorkspace'
 
-defineProps<{ windows: GoogleVoiceWindow[]; selectedId: string; busy: boolean; loading: boolean; canGoBack?:boolean; network?:GoogleVoiceNetwork }>()
+defineProps<{ windows: GoogleVoiceWindow[]; selectedId: string; busy: boolean; loading: boolean; canGoBack?:boolean; network?:GoogleVoiceNetwork; unread?:Record<string,number> }>()
 const emit = defineEmits<{ select: [window: GoogleVoiceWindow]; add: []; rename: [window: GoogleVoiceWindow]; close: [window: GoogleVoiceWindow]; reorder: [ids: string[]]; refresh: []; back: []; translation: []; network: [] }>()
 </script>
 
 <template>
-  <AccountNavigation class="google-voice-navigation" :accounts="windows" :selected-id="selectedId" :unread="{}" platform="google-voice" icon-source="./google-voice.svg" position="top" window-labels :close-label="uiLanguage === 'en' ? 'Close account window; keep sign-in data' : '关闭账号窗口；保留登录资料'" :ordering="busy" :busy="busy" @select="emit('select', $event)" @add="emit('add')" @remove="emit('close', $event)" @remark="emit('rename', $event)" @menu="emit('rename', $event)" @reorder="emit('reorder', $event)">
+  <AccountNavigation class="google-voice-navigation" :accounts="windows" :selected-id="selectedId" :unread="unread || {}" platform="google-voice" icon-source="./google-voice.svg" position="top" window-labels :close-label="uiLanguage === 'en' ? 'Close account window; keep sign-in data' : '关闭账号窗口；保留登录资料'" :ordering="busy" :busy="busy" @select="emit('select', $event)" @add="emit('add')" @remove="emit('close', $event)" @remark="emit('rename', $event)" @menu="emit('rename', $event)" @reorder="emit('reorder', $event)">
     <template #tools>
       <div class="voice-window-tools">
         <button type="button" class="text-button voice-network" :class="{failed:network?.status === 'error'}" :disabled="busy || !selectedId" :title="uiLanguage === 'en' ? 'Window proxy and last checked exit IP' : '窗口代理与最近检测的出口 IP'" aria-label="IP settings" @click="emit('network')">{{ network?.status === 'checked' ? 'IP ' + network.ip : network?.status === 'checking' ? (uiLanguage === 'en' ? 'Checking IP…' : '检测 IP…') : network?.status === 'error' ? (uiLanguage === 'en' ? 'Check IP' : 'IP 待检查') : (uiLanguage === 'en' ? 'IP settings' : 'IP 设置') }}</button>

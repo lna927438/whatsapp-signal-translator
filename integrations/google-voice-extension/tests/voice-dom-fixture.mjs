@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url), { chromium } = require('D:/UserA
 const output = new URL('./artifacts/', import.meta.url); await mkdir(output, { recursive: true })
 const h = mainHarness(), { GoogleVoiceExtensionBridge } = h.load('src/main/platforms/googleVoice/extensionBridge.ts'), { GoogleVoiceDispatchLedger } = h.load('src/main/platforms/googleVoice/dispatchLedger.ts'), { createGoogleVoiceTranslator } = h.load('src/main/platforms/googleVoice/translationBridge.ts')
 let pairData = { pairs: [] }, dispatchData = { records: [] }, values = {}, lostReply = false, quotaDenied = false, incomingProviderCalls = 0
+let holdTranslateReply = false, holdAuthorizeReply = false, failHeldReply = false, releaseHeldReply
 const incoming = new Map(), outgoing = new Map(), requests = new Map(), nativeCalls = [], checks = [], errors = []
 const preferences = { localLanguage: 'zh-CN', targetLanguage: 'en-US', receiveAutoTranslate: true, sendAutoTranslate: true, historyMode: 'visible', translationsVisible: true, translationQuality: { tone: 'natural' } }
 const store = (get, set) => ({ read: async () => structuredClone(get()), write: async value => set(structuredClone(value)) })
@@ -27,6 +28,11 @@ const extensionId = 'kigfaejcipjibnmnpinplphfldjahknn', runtime = { id: extensio
     nativeCalls.push({ op, payload: structuredClone(payload) })
     const answer = await host.request({ v: 1, id: randomUUID(), op, payload, pairToken })
     if (!answer.ok) throw new Error('fixture host rejected')
+    if (op === 'translate' && payload.direction === 'outgoing' && holdTranslateReply || op === 'authorize' && holdAuthorizeReply) {
+      holdTranslateReply = false; holdAuthorizeReply = false
+      await new Promise(resolve => { releaseHeldReply = resolve })
+      if (failHeldReply) { failHeldReply = false; throw new Error('fixture lost held receipt') }
+    }
     if (op === 'translate' && payload.direction === 'outgoing' && lostReply) { lostReply = false; throw new Error('fixture lost receipt') }
     return answer.result
   } }
@@ -152,6 +158,55 @@ try {
   preferences.sendAutoTranslate = true; quotaDenied = true; const beforeDenied = outgoing.size; await prepare('余额不足样例'); await panelHas('fixture host rejected'); assert.equal(outgoing.size, beforeDenied)
   checks.push('quota denial preserves original draft and never sends Chinese fallback')
   assert.equal(await page.locator('textarea.message-input').inputValue(), '余额不足样例')
+  quotaDenied = false; await load()
+  await prepare('关闭预览恢复自动翻译'); await panelHas('发送前预览')
+  const paidBeforeClose = outgoing.size, callsBeforeClose = nativeCalls.filter(call => call.op === 'authorize').length
+  const savedPreviewId = nativeCalls.filter(call => call.op === 'translate' && call.payload.direction === 'outgoing').at(-1).payload.id
+  await page.evaluate(() => { window.closedConfirm = [...window.fixtureRoots].reverse().find(root => root.host.isConnected).querySelector('.actions button') })
+  await clickPanel('关闭')
+  await page.evaluate(html => { document.querySelector('gv-message-list').insertAdjacentHTML('beforeend', html); window.closedConfirm.click() }, message('after-close', 'Fresh incoming after preview close', true, '2:40 AM'))
+  await page.waitForFunction(() => document.querySelector('#fixture-after-close [data-hellodog-voice="translation"]')?.textContent.startsWith('样例译文'))
+  assert.equal(nativeCalls.filter(call => call.op === 'authorize').length, callsBeforeClose)
+  await prepare('关闭预览恢复自动翻译'); await panelHas('发送前预览')
+  assert.equal(outgoing.size, paidBeforeClose)
+  assert.equal(nativeCalls.filter(call => call.op === 'translate' && call.payload.direction === 'outgoing').at(-1).payload.id, savedPreviewId)
+  assert.deepEqual(await page.evaluate(() => window.sent), [])
+  checks.push('Closing a paid preview resumes same-conversation automatic incoming translation; detached confirmation cannot send and reopening preserves the original paid ID')
+  await clickPanel('关闭')
+  const waitHeldReply = async () => { for (let i = 0; i < 100 && !releaseHeldReply; i++) await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(typeof releaseHeldReply, 'function') }
+  holdTranslateReply = true; await prepare('准备中关闭保留扣费回执'); await waitHeldReply(); await panelHas('正在准备预览')
+  const paidDuringPreparation = outgoing.size
+  await clickPanel('关闭'); const finishTranslation = releaseHeldReply; releaseHeldReply = undefined; finishTranslation()
+  await page.evaluate(html => document.querySelector('gv-message-list').insertAdjacentHTML('beforeend', html), message('after-pending-close', 'Fresh incoming after pending preview close', true, '2:41 AM'))
+  await page.waitForFunction(() => document.querySelector('#fixture-after-pending-close [data-hellodog-voice="translation"]')?.textContent.startsWith('样例译文'))
+  assert.equal(await page.evaluate(() => window.fixtureRoots.some(root => root.host.isConnected)), false)
+  await prepare('准备中关闭保留扣费回执'); await panelHas('发送前预览'); assert.equal(outgoing.size, paidDuringPreparation)
+  checks.push('Closing an in-flight preview suppresses the late success panel, resumes incoming translation and reopens the same paid draft without another provider charge')
+  holdAuthorizeReply = true; await clickPanel('确认发送'); await waitHeldReply()
+  const reserved = dispatchData.records.at(-1), paidBeforeAuthorizationClose = outgoing.size
+  assert.equal(reserved.state, 'uncertain')
+  await clickPanel('关闭'); const finishAuthorization = releaseHeldReply; releaseHeldReply = undefined; finishAuthorization()
+  await page.evaluate(html => document.querySelector('gv-message-list').insertAdjacentHTML('beforeend', html), message('after-authorize-close', 'Fresh incoming after authorization close', true, '2:42 AM'))
+  await page.waitForFunction(() => document.querySelector('#fixture-after-authorize-close [data-hellodog-voice="translation"]')?.textContent.startsWith('样例译文'))
+  assert.equal(await page.evaluate(() => window.fixtureRoots.some(root => root.host.isConnected)), false)
+  assert.deepEqual(await page.evaluate(() => window.sent), [])
+  assert.equal(await page.locator('textarea.message-input').inputValue(), '准备中关闭保留扣费回执')
+  await prepare('准备中关闭保留扣费回执'); await panelHas('发送结果待核对')
+  assert.equal(outgoing.size, paidBeforeAuthorizationClose); assert.equal(dispatchData.records.at(-1).attempts, 1)
+  await clickPanel('已核对：确认未发送'); await panelHas('已确认未发送')
+  await prepare('准备中关闭保留扣费回执'); await panelHas('发送前预览'); assert.equal(outgoing.size, paidBeforeAuthorizationClose)
+  assert.deepEqual(await page.evaluate(() => window.sent), [])
+  checks.push('Closing during authorization suppresses late UI and native send, preserves the durable uncertain attempt, and requires explicit not-sent before reopening the same paid caption')
+  await clickPanel('关闭'); await prepare('关闭后授权回执丢失'); await panelHas('发送前预览')
+  holdAuthorizeReply = true; failHeldReply = true; await clickPanel('确认发送'); await waitHeldReply()
+  const paidBeforeLostReply = outgoing.size
+  await clickPanel('关闭'); const failAuthorization = releaseHeldReply; releaseHeldReply = undefined; failAuthorization()
+  await page.evaluate(html => document.querySelector('gv-message-list').insertAdjacentHTML('beforeend', html), message('after-lost-close', 'Fresh incoming after closed authorization lost reply', true, '2:43 AM'))
+  await page.waitForFunction(() => document.querySelector('#fixture-after-lost-close [data-hellodog-voice="translation"]')?.textContent.startsWith('样例译文'))
+  assert.equal(await page.evaluate(() => window.fixtureRoots.some(root => root.host.isConnected)), false)
+  await prepare('关闭后授权回执丢失'); await panelHas('发送结果待核对')
+  assert.equal(outgoing.size, paidBeforeLostReply); assert.deepEqual(await page.evaluate(() => window.sent), [])
+  checks.push('A late authorization error after closing cannot reopen UI or clear a committed unknown attempt; fresh preview reconciles it before any translation charge')
   assert.deepEqual(errors, []); assert.equal(JSON.stringify(values.outgoingDraftIds).includes('新的样例'), false)
   await page.screenshot({ path: fileURLToPath(new URL('voice-dom-fixture.png', output)) })
   const result = { at: new Date().toISOString(), passed: true, checks, scope: 'Offline observed Google Voice DOM-shaped fixtures through actual HelloDog main bridge, translation protocol and durable ledger with synthetic in-memory provider/wallet/storage; no real SMS, account, cloud charge or browser extension installation' }

@@ -42,21 +42,23 @@ function fixture() {
     setVisible(value: boolean) { this.visible = value } setBounds(value: any) { this.bounds = value } setBackgroundColor() {}
   }
   class FakeWindow extends EventEmitter {
-    destroyed = false; visible = true; minimized = false; private contents = new FakeContents(); children: FakeView[] = []
+    destroyed = false; visible = true; minimized = false; focused = false; private contents = new FakeContents(); children: FakeView[] = []
     get webContents() { if (this.destroyed) throw new TypeError('Object has been destroyed'); return this.contents }
     contentView = { addChildView: (view: FakeView) => this.children.push(view), removeChildView: (view: FakeView) => { this.children = this.children.filter(item => item !== view) } }
     getContentSize() { return [1400, 1000] } isDestroyed() { return this.destroyed } isVisible() { return this.visible } isMinimized() { return this.minimized }
+    isFocused() { return this.focused }
     close() { this.destroyed = true; this.contents.close(); this.emit('closed') }
   }
   const window = new FakeWindow()
   const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition }, screen: { getDisplayMatching: () => { throw new Error('Native DPI conversion must not be used') } } })
   const { GoogleVoiceWorkspace } = h.load('src/main/platforms/googleVoice/workspace.ts')
   const identity = () => { if (!owner) throw new Error('not logged in'); const saved = owner, revision = authRevision; return { owner, authorized: () => owner === saved && revision === authRevision } }
-  const workspace = new GoogleVoiceWorkspace(window, records, identity, { preloadPath: 'D:/HelloDog/preload/googleVoice.js' })
+  const activity: any[] = []
+  const workspace = new GoogleVoiceWorkspace(window, records, identity, { preloadPath: 'D:/HelloDog/preload/googleVoice.js', onUnread: (id:string,count:number|null) => activity.push(['unread',id,count]), notify: (id:string,authorized:()=>boolean) => activity.push(['notify',id,authorized]), clearNotifications: (id:string) => activity.push(['clear',id]) })
   const focus = workspace.focus.bind(workspace)
   workspace.focus = async (...args: any[]) => { const result = await focus(...args); await tick(); return result }
   workspace.setBounds({ x: 50, y: 100, width: 900, height: 650 })
-  return { workspace, window, records, data, calls, views, sessions, getGates, setOwner: (value: string) => { owner = value; authRevision++ }, setZoom: (value: number) => { zoom = value; window.webContents.emit('zoom-changed') } }
+  return { workspace, window, records, data, calls, views, sessions, getGates, activity, setOwner: (value: string) => { owner = value; authRevision++ }, setZoom: (value: number) => { zoom = value; window.webContents.emit('zoom-changed') } }
 }
 
 test('workspace opens actual child views, preserves record identities and never binds a Chrome process', async () => {
@@ -239,4 +241,57 @@ test('intentional close and logout do not emit misleading unexpected-closure err
   await h.workspace.close(A); await h.workspace.detachAll()
   const errors = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state' && call[2].state === 'error')
   assert.equal(errors.length, 0); assert.equal(h.data[0].closed, true); assert.equal(h.data[1].closed, false)
+})
+
+test('Voice unread uses trusted page identity and local notification consent, suppressing focused and duplicate alerts', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  const wc = h.views[0].webContents, event = { sender: wc, senderFrame: wc.mainFrame }
+  const sample = (count: number | null, sequence: number) => ({ source: 'sms-navigation', documentId: '10000000-0000-4000-8000-000000000001', count, sequence })
+  assert.equal(h.workspace.observeUnread(event, sample(0, 1)), true)
+  assert.equal(h.workspace.observeUnread(event, sample(1, 2)), true)
+  assert.equal(h.activity.filter(row => row[0] === 'notify').length, 0)
+  await h.workspace.setPermissionConsent(A, 'notifications', true)
+  assert.equal(h.workspace.observeUnread(event, sample(2, 3)), true)
+  assert.equal(h.workspace.observeUnread(event, sample(2, 4)), false)
+  assert.equal(h.activity.filter(row => row[0] === 'notify').length, 1)
+  const notification = h.activity.find(row => row[0] === 'notify'); assert.equal(notification[2](), true)
+  h.window.focused = true; h.workspace.observeUnread(event, sample(3, 5))
+  assert.equal(h.activity.filter(row => row[0] === 'notify').length, 1)
+  h.workspace.hide(); h.workspace.observeUnread(event, sample(4, 6))
+  assert.equal(h.activity.filter(row => row[0] === 'notify').length, 2)
+  await h.workspace.setPermissionConsent(A, 'notifications', false); assert.equal(notification[2](), false)
+  assert.ok(h.activity.some(row => row[0] === 'clear' && row[1] === A))
+  assert.throws(() => h.workspace.observeUnread({sender:{},senderFrame:wc.mainFrame},sample(9,7)))
+  assert.throws(() => h.workspace.observeUnread({sender:wc,senderFrame:{}},sample(9,7)))
+  wc.url = 'https://accounts.google.com/'; assert.throws(() => h.workspace.observeUnread(event,sample(9,7)))
+})
+
+test('Voice notification choice persists independently while microphone consent resets; closing clears only its activity', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B)
+  assert.equal((await h.workspace.getPermissions(A)).notifications, false)
+  await h.workspace.setPermissionConsent(A, 'notifications', true)
+  await h.workspace.setPermissionConsent(A, 'microphone', true)
+  assert.equal((await h.workspace.getPermissions(B)).notifications, false)
+  await h.workspace.detachAll(); await h.workspace.focus(A)
+  assert.deepEqual(JSON.parse(JSON.stringify(await h.workspace.getPermissions(A))), { microphone: false, notifications: true })
+  const wc = h.views.at(-1)!.webContents, event = { sender:wc,senderFrame:wc.mainFrame }
+  h.workspace.observeUnread(event,{source:'sms-navigation',documentId:'20000000-0000-4000-8000-000000000002',sequence:1,count:2})
+  const start = h.activity.length
+  await h.workspace.close(A)
+  assert.ok(h.activity.slice(start).some(row => row[0] === 'unread' && row[1] === A && row[2] === null))
+  assert.ok(h.activity.slice(start).every(row => row[1] === A))
+  assert.throws(() => h.workspace.observeUnread(event,{source:'sms-navigation',documentId:'20000000-0000-4000-8000-000000000002',sequence:2,count:3}))
+})
+
+test('closing immediately revokes an existing Voice notification before the record lookup finishes', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.setPermissionConsent(A, 'notifications', true)
+  const wc = h.views[0].webContents, event = { sender:wc,senderFrame:wc.mainFrame }
+  h.workspace.observeUnread(event,{source:'sms-navigation',documentId:'30000000-0000-4000-8000-000000000003',sequence:1,count:0})
+  h.workspace.observeUnread(event,{source:'sms-navigation',documentId:'30000000-0000-4000-8000-000000000003',sequence:2,count:1})
+  const notification = h.activity.find(row => row[0] === 'notify'); assert.equal(notification[2](), true)
+  const gate = deferred(); h.getGates.set(A, gate.promise)
+  const closing = h.workspace.close(A)
+  assert.equal(notification[2](), false)
+  gate.resolve(); await closing
+  assert.equal(notification[2](), false)
 })

@@ -5,9 +5,19 @@ import { RestartCoordinator } from './restartCoordinator'
 import { setMainUiLanguage, t } from './uiLocale'
 import { UnreadState, unreadBitmap } from './unreadState'
 const unread = new UnreadState()
+const accountNotifications = new Map<string, Notification>()
 export function accountUnreadSnapshot() { return unread.snapshot() }
 export function updateAccountUnread(id:string,count:number) { const increased=unread.set(id,count); refreshUnreadBadge(); return increased }
-export function clearAccountUnread(id?:string) { unread.remove(id); refreshUnreadBadge() }
+export function clearAccountUnread(id?:string) { unread.remove(id); clearAccountNotifications(id); refreshUnreadBadge() }
+export function clearAccountNotifications(accountId?: string) {
+  const notifications = accountId ? [accountNotifications.get(accountId)] : [...accountNotifications.values()]
+  if (accountId) accountNotifications.delete(accountId)
+  else accountNotifications.clear()
+  // Revoke clicks before closing; a native notification can deliver a late event.
+  for (const notification of notifications) {
+    try { notification?.close() } catch { /* Native notification already disposed. */ }
+  }
+}
 function refreshUnreadBadge() {
   if (!window || window.isDestroyed()) return
   const count=unread.total
@@ -56,6 +66,7 @@ export function applyDesktopOptions(value: Partial<AppSettings>) {
 export function attachDesktopRuntime(main: BrowserWindow) {
   window = main
   main.on('focus',()=>main.flashFrame(false))
+  main.on('closed', () => { if (window === main) { window = undefined; clearAccountNotifications() } })
   refreshUnreadBadge()
   app.on('before-quit', event => {
     if (quitting || !quitCheck) { quitting = true; return }
@@ -78,10 +89,25 @@ export function attachDesktopRuntime(main: BrowserWindow) {
   })
 }
 export function shouldStartMinimized() { return preferences.startMinimized === true }
-export function notifyAccount(accountId: string, label: string, options?: { always?: boolean; silent?: boolean; hideNames?: boolean }) {
-  if (!window || preferences.notifications === 'off' || (!options?.always && preferences.notifications !== 'always' && window.isFocused()) || !Notification.isSupported()) return
+export function notifyAccount(accountId: string, label: string, options?: { always?: boolean; silent?: boolean; hideNames?: boolean; authorized?: () => boolean }) {
+  const target = window
+  const allowed = () => {
+    try { return Boolean(target && window === target && !target.isDestroyed() && (!options?.authorized || options.authorized())) }
+    catch { return false }
+  }
+  if (!target || !allowed() || preferences.notifications === 'off' || (!options?.always && preferences.notifications !== 'always' && target.isFocused()) || !Notification.isSupported()) return
+  clearAccountNotifications(accountId)
   const notification = new Notification({ title: t('HelloDog · 新消息'), icon: join(__dirname, '../../resources/brand/hellodog-icon.png'), body: preferences.hideNotificationNames || options?.hideNames ? t('有新的聊天消息') : label + t(' 有新消息'), silent: options?.silent ?? preferences.notificationSound !== true })
-  notification.on('click', () => { window?.show(); window?.focus(); window?.webContents.send('ui:account-action', { action: 'focus', accountId }) })
+  accountNotifications.set(accountId, notification)
+  const current = () => accountNotifications.get(accountId) === notification && allowed()
+  const forget = () => { if (accountNotifications.get(accountId) === notification) accountNotifications.delete(accountId) }
+  notification.on('close', forget)
+  notification.on('failed', forget)
+  notification.on('click', () => {
+    if (!current()) return
+    target.show(); target.focus(); target.webContents.send('ui:account-action', { action: 'focus', accountId })
+  })
+  if (!current()) { clearAccountNotifications(accountId); return }
   notification.show()
-  if (!window.isFocused()) window.flashFrame(true)
+  if (current() && !target.isFocused()) target.flashFrame(true)
 }

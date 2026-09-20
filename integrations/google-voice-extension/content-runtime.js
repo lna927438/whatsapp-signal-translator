@@ -7,31 +7,43 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   if (window !== window.top || location.origin !== 'https://voice.google.com' || typeof sendRequest !== 'function') return null
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
-  let panel, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
+  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
   const removers = []
   function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
   function invalidate() {
     epoch++; runtimeStatus = null; statusAt = 0; guard?.invalidate(); guard = null; guardConversation = null; pending = null
-    removeMessageViews(); panel?.remove(); panel = null
+    removeMessageViews(); panelLifecycle?.dismiss(); panelLifecycle = null; panel?.remove(); panel = null
     currentUrl = location.href
     if (!disposed) scheduleScan()
   }
   function checkNavigation() { if (currentUrl !== location.href) invalidate() }
 
-  function showPanel(title, value, actions = [], note = '请核对内容。只有点击“确认发送”才会提交短信。') {
+  function showPanel(title, value, actions = [], note = '请核对内容。只有点击“确认发送”才会提交短信。', lifecycle) {
     if (disposed) return
+    if (panelLifecycle && panelLifecycle !== lifecycle) panelLifecycle.dismiss()
+    panelLifecycle = lifecycle
     panel?.remove(); panel = document.createElement('div')
     panel.style.cssText = 'position:fixed;bottom:24px;right:24px;width:min(440px,90vw);z-index:2147483647;'
     const shadow = panel.attachShadow({ mode: 'closed' }), style = document.createElement('style')
     style.textContent = ':host{all:initial}section{font:14px/1.5 system-ui;color:#eef6f2;background:#19232a;border:1px solid #48625a;border-radius:12px;padding:18px;box-shadow:0 8px 32px #0006}header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}button{background:#32473f;color:#fff;border:0;border-radius:6px;padding:7px 10px;cursor:pointer}button:disabled{opacity:.5}textarea{box-sizing:border-box;width:100%;min-height:110px;max-height:35vh;background:#111a20;color:#eef6f2;border:1px solid #48625a;border-radius:6px;padding:10px;resize:vertical}p{color:#b9c9c3;font-size:12px;margin-bottom:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}'
     const section = document.createElement('section'), header = document.createElement('header'), heading = document.createElement('strong'), close = document.createElement('button')
-    heading.textContent = title; close.textContent = '关闭'; close.type = 'button'; const currentPanel = panel; close.onclick = () => currentPanel.remove()
+    heading.textContent = title; close.textContent = '关闭'; close.type = 'button'; const currentPanel = panel
+    close.onclick = () => {
+      if (panel !== currentPanel || !currentPanel.isConnected) return
+      panel = null; panelLifecycle = null; currentPanel.remove(); lifecycle?.dismiss(); scheduleScan()
+    }
     const text = document.createElement('textarea'); text.readOnly = true; text.value = value; text.setAttribute('aria-label', '翻译结果'); text.onclick = () => text.select()
     const footer = document.createElement('p'); footer.textContent = note
     const controls = document.createElement('div'); controls.className = 'actions'
     for (const action of actions) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = action.label
-      button.onclick = () => { for (const child of controls.children) child.disabled = true; Promise.resolve().then(action.run).catch(showError).finally(() => { for (const child of controls.children) child.disabled = false }) }
+      button.onclick = () => {
+        if (panel !== currentPanel || !currentPanel.isConnected) return
+        for (const child of controls.children) child.disabled = true
+        Promise.resolve().then(() => { if (panel === currentPanel && currentPanel.isConnected) return action.run() })
+          .catch(error => { if (panel === currentPanel && currentPanel.isConnected) showError(error) })
+          .finally(() => { for (const child of controls.children) child.disabled = false })
+      }
       controls.append(button)
     }
     header.append(heading, close); section.append(header, text, controls, footer); shadow.append(style, section)
@@ -67,18 +79,23 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     const snapshot = adapter.snapshot()
     if (!guard || guardConversation !== snapshot.conversationId) { guard = new SendGuard(adapter, bridge); guardConversation = snapshot.conversationId }
     const active = guard
-    showPanel('HelloDog · 正在准备预览', '正在核对连接、此前发送结果及翻译。请保留草稿。', [], '此时尚未发送短信。')
+    let dismissed = false
+    const lifecycle = { dismiss() { if (dismissed) return; dismissed = true; active.dismissPreview(); scheduleScan() } }
+    showPanel('HelloDog · 正在准备预览', '正在核对连接、此前发送结果及翻译。请保留草稿。', [], snapshot.text.trim() ? '尚未发送短信。需要翻译的文字在成功后扣字符；关闭面板不会取消已开始的翻译。' : '尚未发送短信。纯图片不调用文字翻译，不扣文字字符。', lifecycle)
     let preview
-    try { preview = await active.prepare() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
+    try { preview = await active.prepare() } catch (error) { if (!dismissed && !disposed && epoch === startedEpoch) throw error; return }
+    if (dismissed || disposed || epoch !== startedEpoch) return
     if (guard !== active || adapter.snapshot()?.conversationId !== snapshot.conversationId) throw new Error('会话已变化，译文未发送。')
     toolbar(adapter.supported)
     const targetNote = preview.context ? `已选 ${preview.context.recipientCount} 位收件人，请核对官方收件人列表。\n\n` : ''
     const previewText = targetNote + (preview.media ? `已核对 ${preview.media.count} 张图片，请同时核对原站图片预览。${preview.text ? '\n\n' + preview.text : '\n没有文字说明；此操作不调用文字翻译。'}` : preview.text)
+    const billingNote = preview.untranslated ? (preview.media && !preview.text ? '纯图片不扣文字字符。请核对图片与收件人，确认后才发送。' : '本条文字无需翻译，不扣翻译字符。请核对内容，确认后才发送。') : '文字翻译成功时扣字符；关闭预览不退还已扣字符，确认发送不再重复扣费。请核对内容，确认后才发送。'
     showPanel(preview.media ? 'HelloDog · 图片发送前预览' : preview.untranslated ? 'HelloDog · 原文无需翻译' : 'HelloDog · 发送前预览', previewText, [{ label: '确认发送', run: async () => {
-      try { await active.confirm() } catch (error) { if (!disposed && epoch === startedEpoch) throw error; return }
-      if (disposed || epoch !== startedEpoch) return
+      if (dismissed) return
+      try { await active.confirm() } catch (error) { if (!dismissed && !disposed && epoch === startedEpoch) throw error; return }
+      if (dismissed || disposed || epoch !== startedEpoch) return
       showPanel('HelloDog · 已提交', '已执行一次原站发送操作。送达情况以 Google Voice 官方聊天为准。', [], '可以继续编辑其他短信。同文再次发送前需要先核对此次结果；不会自动重发。')
-    } }])
+    } }], billingNote, lifecycle)
   }
   // Installed before the app's document handlers. Unverified recipients and
   // attachment surfaces using these known controls are blocked, not guessed.
@@ -102,7 +119,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       button.style.cssText = 'background:#32473f;color:#fff;border:0;border-radius:5px;padding:5px 9px;cursor:pointer;'; button.onclick = () => { void prepareOutgoing().catch(showError) }
       bar.append(label, button); entry.before(bar)
     }
-    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '发送先预览 · 不自动重发' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
+    bar.firstChild.textContent = supported ? runtimeStatus?.connected ? '文字翻译成功扣字符 · 发送先预览' : '发送前需连接 HelloDog' : adapter.reason || '当前编辑器未识别 · 已阻止已知发送入口'
     bar.lastChild.disabled = !supported
   }
   async function translateMessage(item, manual) {

@@ -33,7 +33,7 @@ import { SignalDesktopHost } from './platforms/signal/signalDesktopHost'
 import { validateTranslation } from './translation/translationValidation'
 import { reusableDisplayOriginal } from '../shared/translationResult'
 import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoingPolicy'
-import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread } from './desktopRuntime'
+import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread, clearAccountNotifications } from './desktopRuntime'
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
 import { GoogleVoiceWorkspace } from './platforms/googleVoice/workspace'
@@ -94,7 +94,15 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return { owner, authorized: () => onlineIdentity?.userId === owner && identityRevision === revision }
   }
   const googleVoiceRecords = new GoogleVoiceRecords(new JsonStore<GoogleVoiceData>('google-voice-windows-v1.json',{windows:[]},true))
-  const googleVoice = new GoogleVoiceWorkspace(mainWindow,googleVoiceRecords,taskIdentity,{preloadPath:join(__dirname,'../preload/googleVoice.js')})
+  const googleVoice = new GoogleVoiceWorkspace(mainWindow,googleVoiceRecords,taskIdentity,{
+    preloadPath:join(__dirname,'../preload/googleVoice.js'),
+    onUnread:(accountId,count)=>{
+      if(count===null)clearAccountUnread(accountId);else updateAccountUnread(accountId,count)
+      if(!mainWindow.isDestroyed())mainWindow.webContents.send('accounts:unread',{accountId,count:count??0})
+    },
+    notify:(accountId,authorized)=>notifyAccount(accountId,'Google Voice',{hideNames:true,authorized}),
+    clearNotifications:clearAccountNotifications
+  })
   let workspaceSelection=0
   let workspaceFocusWrites:Promise<unknown>=Promise.resolve()
   const focusWorkspace=(action:()=>Promise<unknown>)=>{
@@ -169,6 +177,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   // This channel has its own registered-webContents, main-frame and owner check.
   // Google pages never receive the trusted shell's general IPC permissions.
   electronIpcMain.handle('google-voice:translate-request',(event,message)=>embeddedVoiceTranslation.request(event,message))
+  electronIpcMain.handle('google-voice:unread',(event,message)=>{try{return googleVoice.observeUnread(event,message)}catch{return false}})
   ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
   ipcMain.handle('google-voice:add',(event,options?:{label?:string;proxy?:unknown})=>{requireMain(event);return googleVoice.add(options)})
   ipcMain.handle('google-voice:update',(event,id:string,patch:{label?:string;proxy?:unknown})=>{requireMain(event);return googleVoice.update(id,patch)})

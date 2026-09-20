@@ -3,11 +3,16 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { GoogleVoiceRecords, type GoogleVoiceRecord } from './windowRecords'
 import { GoogleVoiceEmbeddedViews, type GoogleVoiceEmbeddedOptions, type GoogleVoiceEmbeddedState, type GoogleVoiceTrustedPage } from './embeddedViews'
 import { testGoogleVoiceProxy } from './network'
+import { GoogleVoiceUnread } from './unread'
 
 type Identity = { owner: string; authorized: () => boolean }
 type Bounds = { x: number; y: number; width: number; height: number }
 type Instance = { owner: string; ownerHash: string; record: GoogleVoiceRecord }
-type Options = Pick<GoogleVoiceEmbeddedOptions, 'preloadPath' | 'onPage'>
+type Options = Pick<GoogleVoiceEmbeddedOptions, 'preloadPath' | 'onPage'> & {
+  onUnread?: (id: string, count: number | null) => void
+  notify?: (id: string, authorized: () => boolean) => void
+  clearNotifications?: (id: string) => void
+}
 
 /** Main-process owner boundary for genuine in-client Google Voice views. */
 export class GoogleVoiceWorkspace {
@@ -23,6 +28,7 @@ export class GoogleVoiceWorkspace {
   private changing = new Set<string>()
   private proxyTesting = false
   private windowRevisions = new Map<string, number>()
+  private unread = new GoogleVoiceUnread()
 
   constructor(private window: BrowserWindow, readonly records: GoogleVoiceRecords, private identity: () => Identity, private options: Options = {}) {
     const layout = () => this.applyBounds()
@@ -78,6 +84,7 @@ export class GoogleVoiceWorkspace {
     const item = this.instances.get(state.windowId)
     if (!item || item.ownerHash !== state.ownerHash) return
     if (state.status === 'closed') {
+      this.clearUnread(state.windowId)
       const intentional = this.closed || this.tearingDown || this.changing.has(state.windowId)
       // The embedded manager has removed the dead contents. Forget our live
       // index as well, so retry creates a view with the same persistent profile.
@@ -254,17 +261,48 @@ export class GoogleVoiceWorkspace {
 
   async getPermissions(id: string) {
     const identity = this.identity(), lifecycle = this.lifecycle
-    await this.records.get(identity.owner, id); this.requireAvailable(identity, lifecycle)
-    if (!this.instances.has(id) || !this.views) return { microphone: false, notifications: false }
-    return this.views.getPermissions(identity.owner, id)
+    const row = await this.records.get(identity.owner, id); this.requireAvailable(identity, lifecycle)
+    const live = this.instances.has(id) && this.views ? this.views.getPermissions(identity.owner, id) : { microphone: false }
+    return { microphone: live.microphone, notifications: row.notificationsEnabled === true }
   }
 
   async setPermissionConsent(id: string, permission: 'microphone' | 'notifications', allowed: boolean) {
     if (!['microphone', 'notifications'].includes(permission) || typeof allowed !== 'boolean') throw new Error('Google Voice 权限无效。')
     const identity = this.identity(), lifecycle = this.lifecycle
     await this.records.get(identity.owner, id); this.requireAvailable(identity, lifecycle)
+    if (permission === 'notifications') {
+      const row = await this.records.update(identity.owner, id, { notificationsEnabled: allowed }); this.requireAvailable(identity, lifecycle)
+      const item = this.instances.get(id)
+      if (item?.owner === identity.owner) {
+        item.record.notificationsEnabled = row.notificationsEnabled === true
+        // HelloDog owns the privacy-preserving desktop notification. Granting
+        // the website as well could expose SMS bodies and produce two alerts.
+        this.views?.setPermissionConsent(identity.owner, id, 'notifications', false)
+      }
+      if (!allowed) this.options.clearNotifications?.(id)
+      return this.getPermissions(id)
+    }
     if (this.instances.get(id)?.owner !== identity.owner || !this.views) throw new Error('请先打开对应的 Google Voice 窗口。')
-    return this.views.setPermissionConsent(identity.owner, id, permission, allowed)
+    this.views.setPermissionConsent(identity.owner, id, permission, allowed)
+    return this.getPermissions(id)
+  }
+
+  observeUnread(event: IpcMainInvokeEvent, raw: unknown): boolean {
+    const page = this.trustedPage(event), item = this.instances.get(page.accountId)
+    if (!item || !page.authorized()) return false
+    const update = this.unread.observe(page.accountId, raw)
+    if (!update) return false
+    this.options.onUnread?.(page.accountId, update.count)
+    if (update.count === 0) this.options.clearNotifications?.(page.accountId)
+    const identity = this.identity(), lifecycle = this.lifecycle
+    const authorized = () => this.available(identity, lifecycle) && page.authorized() && this.instances.get(page.accountId) === item && item.record.notificationsEnabled === true
+    const attended = this.active === page.accountId && !this.overlay && this.bounds.width > 0 && this.bounds.height > 0 && this.window.isVisible() && !this.window.isMinimized() && this.window.isFocused()
+    if (update.increased && authorized() && !attended) this.options.notify?.(page.accountId, authorized)
+    return true
+  }
+
+  private clearUnread(id: string): void {
+    this.unread.clear(id); this.options.onUnread?.(id, null); this.options.clearNotifications?.(id)
   }
 
   trustedPage(event: IpcMainInvokeEvent): GoogleVoiceTrustedPage {
@@ -281,6 +319,7 @@ export class GoogleVoiceWorkspace {
 
   detachAll(): Promise<void> {
     this.lifecycle++; this.hide()
+    for (const id of this.instances.keys()) this.clearUnread(id)
     this.tearingDown = true
     try { this.views?.destroy() }
     finally { this.views = undefined; this.instances.clear(); this.tearingDown = false }

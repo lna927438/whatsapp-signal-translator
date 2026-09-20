@@ -158,6 +158,62 @@ test('explicit confirm required; authorization denial never changes composer', a
   s.bridge.authorize = async () => ({ authorized: false })
   await assert.rejects(s.guard.confirm(), /授权/); assert.equal(s.replaced(), 0)
 })
+test('closing a paid preview resumes idle without discarding its draft identity or charging again', async () => {
+  const s = guardSetup(), paid = new Set()
+  s.bridge.translate = async payload => { paid.add(payload.id); return { enabled: true, text: 'Hello', requestId: 'gv-fixture-1' } }
+  await s.guard.prepare(); const id = s.guard.job.id
+  s.guard.dismissPreview(); assert.equal(s.guard.state, 'idle'); assert.equal(s.guard.job.id, id)
+  await assert.rejects(s.guard.confirm(), /预览/)
+  await s.guard.prepare(); assert.equal(s.guard.job.id, id); assert.equal(paid.size, 1)
+  assert.equal(s.sent(), 0); assert.equal(s.replaced(), 0)
+})
+test('closing preparation discards its late result but preserves the paid draft for a new preview', async () => {
+  const s = guardSetup(); let finish
+  s.bridge.translate = () => new Promise(resolve => { finish = resolve })
+  const pending = s.guard.prepare(); await new Promise(resolve => setImmediate(resolve))
+  const id = s.guard.job.id; s.guard.dismissPreview(); assert.equal(s.guard.state, 'idle')
+  finish({ enabled: true, text: 'Hello', requestId: 'gv-fixture-1' })
+  await assert.rejects(pending, /预览已关闭/); assert.equal(s.guard.state, 'idle'); assert.equal(s.guard.job.id, id)
+  assert.equal(s.sent(), 0); assert.equal(s.replaced(), 0)
+})
+test('a dismissed preparation cannot overwrite a newer preview when its response arrives last', async () => {
+  const s = guardSetup(); let finish, first = true
+  s.bridge.translate = async () => {
+    if (first) { first = false; return new Promise(resolve => { finish = resolve }) }
+    return { enabled: true, text: 'Current preview', requestId: 'gv-fixture-1' }
+  }
+  const pending = s.guard.prepare(); await new Promise(resolve => setImmediate(resolve))
+  s.guard.dismissPreview(); await s.guard.prepare()
+  finish({ enabled: true, text: 'Obsolete preview', requestId: 'gv-fixture-1' })
+  await assert.rejects(pending, /预览已关闭/)
+  assert.equal(s.guard.state, 'preview'); assert.equal(s.guard.job.translated.text, 'Current preview')
+})
+test('closing authorization preserves a late durable reservation and never writes or sends', async () => {
+  const s = guardSetup(); await s.guard.prepare(); let finish
+  s.bridge.authorize = () => new Promise(resolve => { finish = resolve })
+  const pending = s.guard.confirm(); s.guard.dismissPreview(); assert.equal(s.guard.state, 'authorizing')
+  finish({ authorized: true, requestId: 'gv-fixture-1', attempt: 3 })
+  await assert.rejects(pending, /预览已关闭/); assert.equal(s.guard.state, 'uncertain')
+  assert.equal(s.guard.job.pendingAttempt, 3); assert.equal(s.replaced(), 0); assert.equal(s.sent(), 0)
+  await assert.rejects(s.guard.prepare(), /待确认/)
+  s.bridge.dispatchResolve = async payload => { assert.equal(payload.attempt, 3); return { resolved: true } }
+  await s.guard.resolve('not-sent'); assert.equal(s.guard.state, 'idle')
+})
+test('closing authorization with a lost reply keeps durable reconciliation ahead of another translation', async () => {
+  const s = guardSetup(); await s.guard.prepare(); let fail
+  s.bridge.authorize = () => new Promise((_resolve, reject) => { fail = reject })
+  const pending = s.guard.confirm(); s.guard.dismissPreview(); fail(new Error('lost receipt'))
+  await assert.rejects(pending, /lost receipt/); assert.equal(s.guard.state, 'failed')
+  s.bridge.dispatchStatus = async () => ({ state: 'uncertain', requestId: 'gv-fixture-1', attempt: 1 })
+  await assert.rejects(s.guard.prepare(), /此前发送/); assert.equal(s.calls.length, 1); assert.equal(s.sent(), 0)
+})
+test('closing while the translated editor settles preserves uncertainty and cancels the native click', async () => {
+  const s = guardSetup(); await s.guard.prepare(); let finish
+  s.adapter.settle = () => new Promise(resolve => { finish = resolve })
+  const pending = s.guard.confirm(); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(s.replaced(), 1); s.guard.dismissPreview(); finish()
+  await assert.rejects(pending, /预览已关闭/); assert.equal(s.guard.state, 'uncertain'); assert.equal(s.sent(), 0)
+})
 test('conversation changes during authorization are rechecked before write', async () => {
   const s = guardSetup(); await s.guard.prepare(); s.bridge.authorize = async payload => { s.snapshot.conversationId = 'thread-2'; return { authorized: true, requestId: payload.requestId, attempt: 1 } }
   await assert.rejects(s.guard.confirm(), /变化/); assert.equal(s.replaced(), 0)

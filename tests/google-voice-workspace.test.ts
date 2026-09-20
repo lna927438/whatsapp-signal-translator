@@ -169,3 +169,20 @@ test('Document loading and back state follow embedded updates, never an external
   voice.leave();voice.acceptState({id:'one',state:'error',message:'late'});assert.equal(voice.message.value,'')
   voice.dispose()
 })
+
+test('Voice notification focus reloads owned window records and does not reopen a closed or stale target', async () => {
+  const h = fixture(), target = 'gv-10000000-0000-4000-8000-000000000001'
+  h.api.listGoogleVoiceWindows = async () => [{id:target,label:'Synthetic Voice',tabOrder:0}]
+  await h.voice.focusNotification(target)
+  assert.equal(h.voice.active.value,true); assert.equal(h.voice.selectedId.value,target)
+  assert.deepEqual(h.calls.at(-1),['focus',target])
+  const before = h.calls.length
+  h.api.listGoogleVoiceWindows = async () => []
+  await h.voice.focusNotification(target); assert.equal(h.calls.length,before)
+  const delayed = deferred<GoogleVoiceWindow[]>()
+  h.api.listGoogleVoiceWindows = () => delayed.promise
+  const late = h.voice.focusNotification(target); h.voice.leave()
+  delayed.resolve([{id:target,label:'Synthetic Voice'}]); await late
+  assert.equal(h.voice.active.value,false); assert.equal(h.calls.length,before)
+  h.voice.dispose()
+})

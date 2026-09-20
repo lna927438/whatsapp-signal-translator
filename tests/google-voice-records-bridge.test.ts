@@ -71,3 +71,17 @@ test('named pipe exchanges bounded frames without a network listener',async()=>{
     assert.equal(result.ok,true)
   }finally{socket.destroy();await server.stop()}
 })
+
+test('Voice desktop alert choice defaults off, persists across store reconstruction, and remains owner/window scoped', async () => {
+  const storage = store<GoogleVoiceData>({windows:[]}), first = new GoogleVoiceRecords(storage)
+  const a = await first.add('owner-a'), b = await first.add('owner-a')
+  assert.notEqual((await first.get('owner-a',a.id)).notificationsEnabled,true)
+  await first.update('owner-a',a.id,{notificationsEnabled:true})
+  const restarted = new GoogleVoiceRecords(storage)
+  assert.equal((await restarted.get('owner-a',a.id)).notificationsEnabled,true)
+  assert.notEqual((await restarted.get('owner-a',b.id)).notificationsEnabled,true)
+  await assert.rejects(restarted.update('owner-b',a.id,{notificationsEnabled:false}))
+  await assert.rejects(restarted.update('owner-a',a.id,{notificationsEnabled:'yes' as any}))
+  await restarted.update('owner-a',a.id,{notificationsEnabled:false})
+  assert.equal((await new GoogleVoiceRecords(storage).get('owner-a',a.id)).notificationsEnabled,false)
+})

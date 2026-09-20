@@ -1,9 +1,11 @@
 import { ipcRenderer } from 'electron'
 import { installGoogleVoiceRuntime } from '../../integrations/google-voice-extension/content-runtime.js'
+import { installGoogleVoiceUnread } from './googleVoiceUnread'
 
 // Runs only in the isolated preload world. No bridge or IPC primitive is
 // exposed to Google page scripts, including on accounts.google.com.
 if (process.isMainFrame && window === window.top && location.origin === 'https://voice.google.com') {
+  installGoogleVoiceUnread(document, value => ipcRenderer.invoke('google-voice:unread', value))
   installGoogleVoiceRuntime({
     sendRequest: message => ipcRenderer.invoke('google-voice:translate-request', message),
     subscribe: listener => {

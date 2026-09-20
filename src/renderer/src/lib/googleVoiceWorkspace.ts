@@ -96,6 +96,16 @@ export function useGoogleVoiceWorkspace(options: {
       else { selectedId.value = ''; state.value = 'idle' }
     } catch (error) { if (current(revision)) showFailure(error) }
   }
+  async function focusNotification(id: string) {
+    if (disposed || !/^gv-[a-f0-9-]{36}$/.test(id)) return
+    const revision = ++focusRevision
+    try {
+      const records = await options.api().listGoogleVoiceWindows()
+      if (disposed || revision !== focusRevision || !records.some(record => record.id === id)) return
+      windows.value = orderedAccounts(records)
+      await focus(id)
+    } catch (error) { if (!disposed && revision === focusRevision) options.reportError(failure(error)) }
+  }
   function leave() {
     active.value = false
     focusRevision++
@@ -210,5 +220,5 @@ export function useGoogleVoiceWorkspace(options: {
   }
   async function flush() { await pendingWrite }
   function dispose() { disposed = true; leave() }
-  return { active, windows, selectedId, selected, state, message, canGoBack, network, busy, enter, leave, focus, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
+  return { active, windows, selectedId, selected, state, message, canGoBack, network, busy, enter, leave, focus, focusNotification, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
 }

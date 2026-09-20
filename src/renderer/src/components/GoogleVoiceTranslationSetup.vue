@@ -23,14 +23,14 @@ onUnmounted(()=>{disposed=true})
   <section ref="panel" class="panel voice-translation-setup" role="dialog" aria-modal="true" :aria-label="uiLanguage==='en'?'Google Voice settings':'Google Voice 设置'" @keydown="trap">
    <header><h2>{{uiLanguage==='en'?'Google Voice settings':'Google Voice 设置'}}</h2><button type="button" :aria-label="uiLanguage==='en'?'Close':'关闭'" @click="emit('close')">×</button></header>
    <p class="voice-window-label">{{windowLabel}}</p>
-   <p>{{uiLanguage==='en'?'Text translation is built in. Recognized text messages are previewed before sending.':'已内置短信翻译。已识别的纯文字短信会在发送前预览。'}}</p>
+   <p>{{uiLanguage==='en'?'Text and image captions are translated before a send preview. Image-only messages use no translation characters.':'已内置文字和图片说明翻译，发送前先预览。纯图片不扣文字字符。'}}</p>
    <button type="button" class="secondary" @click="emit('settings')">{{uiLanguage==='en'?'Translation language and preferences':'翻译语言与偏好'}}</button>
-   <p class="voice-hint">{{uiLanguage==='en'?'Translation follows your global settings. Attachments and new-recipient send protection still require validation.':'翻译沿用全局设置。附件和新建收件人发送保护仍待验证。'}}</p>
+   <p class="voice-hint">{{uiLanguage==='en'?'Translation follows global settings. Select 1–7 recipients and review the official image preview before confirming. An uncertain send is never retried automatically.':'翻译沿用全局设置。发送前请核对已选的 1–7 位收件人与官方图片预览；结果不明时不会自动重发。'}}</p>
    <div class="voice-permissions">
     <label><span>{{uiLanguage==='en'?'Call microphone':'通话麦克风'}}</span><input type="checkbox" :checked="permissions.microphone" :disabled="busy" @change="change('microphone',$event)" /></label>
-    <label><span>{{uiLanguage==='en'?'Desktop notifications':'桌面通知'}}</span><input type="checkbox" :checked="permissions.notifications" :disabled="busy" @change="change('notifications',$event)" /></label>
+    <label><span>{{uiLanguage==='en'?'HelloDog desktop alerts':'HelloDog 桌面提醒'}}</span><input type="checkbox" :checked="permissions.notifications" :disabled="busy" @change="change('notifications',$event)" /></label>
    </div>
-   <p class="voice-hint">{{uiLanguage==='en'?'Applies only to this account window. Permissions reset when the window is closed.':'仅对当前账号窗口生效，关闭窗口后需重新允许。'}}</p>
+   <p class="voice-hint">{{uiLanguage==='en'?'Desktop alerts are saved for this window, follow global notification settings, and contain no message text or contact names. Alerts stay quiet while viewing this window; unread badges still update. Microphone permission resets when the window closes.':'桌面提醒仅对当前窗口生效并保存，遵循全局通知设置，不显示短信正文或联系人。查看当前窗口时不弹提醒，未读角标仍会更新。麦克风权限关闭窗口后需重新允许。'}}</p>
    <p v-if="error" class="voice-error" role="alert">{{error}}</p>
    <footer><button v-if="error" type="button" class="secondary" :disabled="busy" @click="load">{{uiLanguage==='en'?'Retry':'重试'}}</button><button class="primary" type="button" @click="emit('close')">{{uiLanguage==='en'?'Done':'完成'}}</button></footer>
   </section>
