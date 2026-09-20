@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { app, WebContentsView, session, type BrowserWindow, type Rectangle, type Session, type WebContents, type WebPreferences, type IpcMainInvokeEvent, type DownloadItem } from 'electron'
+import { isOfficialGoogleAccountsHost } from './googleAccountDomains'
 
 const START_URL = 'https://voice.google.com/u/0/'
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -10,10 +11,17 @@ export function isGoogleVoiceEmbeddedUrl(value: string): boolean {
   try {
     const url = new URL(value)
     if (url.protocol !== 'https:' || url.username || url.password || url.port) return false
-    if (['voice.google.com', 'accounts.google.com', 'support.google.com'].includes(url.hostname)) return true
+    if (['voice.google.com', 'support.google.com'].includes(url.hostname)) return true
+    // Google can complete verification on a country Accounts host. Trust only
+    // the pinned official list and a literal HTTPS authority, not URL-parser
+    // normalizations of Unicode, escaped or backslash-containing hostnames.
+    if (isOfficialGoogleAccountsHost(url.hostname)) {
+      const authority = /^https:\/\/([a-z0-9.-]+)(?::443)?(?:[/?#]|$)/i.exec(value)
+      return authority?.[1].toLowerCase() === url.hostname
+    }
     // Google lists accounts.youtube.com as a sign-in dependency. Its SetSID
     // bridge may be a top-level redirect after verification; allow only these
-    // exact endpoints, not YouTube browsing or guessed regional Google hosts.
+    // exact endpoints, not YouTube browsing.
     if (url.hostname === 'accounts.youtube.com') return /^https:\/\/accounts\.youtube\.com(?:[/?#]|$)/i.test(value) &&
       ['/SetSID', '/accounts/SetSID'].includes(url.pathname)
     return url.hostname === 'workspace.google.com' && /^\/(?:intl\/[^/]+\/)?products\/voice(?:\/|$)/.test(url.pathname)

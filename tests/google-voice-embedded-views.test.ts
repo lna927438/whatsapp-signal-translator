@@ -286,12 +286,14 @@ test('a popup loadURL rejection cannot replace a newer ready popup with a stale 
   assert.equal(h.manager.getState('owner', A).status, 'failed')
 })
 
-test('Google post-verification CheckCookie and exact YouTube SetSID redirects stay in the same embedded view', () => {
+test('Google post-verification regional Accounts and YouTube SetSID redirects stay in the same embedded view', () => {
   const h = fixture(); h.manager.create('owner', A); const wc = h.views[0].webContents
   wc.url = 'https://accounts.google.com/v3/signin/challenge/totp'
   let prevented = 0
   for (const url of [
     'https://accounts.google.com/CheckCookie?checkedDomains=youtube',
+    'https://accounts.google.co.th/accounts/SetSID?token=synthetic-test-only',
+    'https://accounts.google.co.uk/CheckCookie?token=synthetic-test-only',
     'https://accounts.youtube.com/accounts/SetSID?sidt=synthetic-test-only&continue=https%3A%2F%2Faccounts.google.com',
     'https://accounts.google.com/ServiceLogin',
     'https://voice.google.com/u/0/'
@@ -318,7 +320,7 @@ test('SetSID permission does not allow lookalike domains, other YouTube pages, p
     'https://accounts.youtube.com/watch',
     'https://accounts.youtube.com/accounts/SetSID/extra',
     'https://accounts.youtube.com/accounts/setsid',
-    'https://accounts.google.fr/accounts/SetSID'
+    'https://accounts.google.example/accounts/SetSID'
   ]
   let prevented = 0
   for (const url of denied) {
@@ -326,7 +328,61 @@ test('SetSID permission does not allow lookalike domains, other YouTube pages, p
     wc.emit('will-redirect', { isMainFrame: true, url, preventDefault: () => { prevented++ } }, url, false, true)
   }
   assert.equal(prevented, denied.length)
-  assert.equal(h.blocked.at(-1).origin, 'https://accounts.google.fr')
+  assert.equal(h.blocked.at(-1).origin, 'https://accounts.google.example')
+})
+
+test('official country Accounts hosts are pinned exact names with no wildcard or authority tricks', () => {
+  const h = fixture(), domains = mainHarness().load('src/main/platforms/googleVoice/googleAccountDomains.ts')
+  const hosts: string[] = domains.GOOGLE_ACCOUNT_HOSTS
+  assert.equal(hosts.length, 187); assert.equal(new Set(hosts).size, 187)
+  for (const host of hosts) {
+    assert.equal(h.module.isGoogleVoiceEmbeddedUrl('https://' + host + '/accounts/SetSID?synthetic=true'), true, host)
+    assert.equal(h.module.isGoogleVoiceEmbeddedUrl('https://' + host + '.evil.invalid/'), false, host)
+    assert.equal(h.module.isGoogleVoiceEmbeddedUrl('https://' + host.replace('accounts.', '') + '/'), false, host)
+  }
+  for (const host of ['accounts.google.co.th', 'accounts.google.co.id', 'accounts.google.com.ph', 'accounts.google.com.my', 'accounts.google.com.sg', 'accounts.google.com.vn', 'accounts.google.fr']) assert.ok(hosts.includes(host), host)
+  assert.equal(h.module.isGoogleVoiceEmbeddedUrl('https://ACCOUNTS.GOOGLE.CO.TH:443/ServiceLogin'), true)
+  for (const value of [
+    'http://accounts.google.co.th/', 'https://accounts.google.co.th:8443/',
+    'https://user@accounts.google.co.th/', 'https://accounts.google.co.th@evil.invalid/',
+    'https://foo.accounts.google.co.th/', 'https://accounts.google.evil/',
+    'https://accounts.google.co.th./', 'https://accounts.gоogle.co.th/',
+    'https://accounts.ｇoogle.co.th/', 'https://%61ccounts.google.co.th/',
+    'https://accounts.google.co.th\\evil.invalid/', ' https://accounts.google.co.th/'
+  ]) assert.equal(h.module.isGoogleVoiceEmbeddedUrl(value), false, value)
+})
+
+test('regional Accounts POST popups retain the original guest without replaying the request', () => {
+  const h = fixture(); h.manager.create('owner', A); const opener = h.views[0].webContents
+  const body = { data: [{ bytes: Buffer.from('fixture=synthetic-only') }], contentType: 'application/x-www-form-urlencoded' }
+  const response = h.popup(opener, 'https://accounts.google.co.th/ServiceLogin', { postBody: body })
+  assert.equal(response.action, 'allow')
+  const guest = new h.FakeContents(opener.session); guest.url = 'https://accounts.google.co.th/ServiceLogin'
+  const child = response.createWindow({ webContents: guest, webPreferences: response.overrideBrowserWindowOptions.webPreferences })
+  assert.equal(child, guest)
+  assert.equal(child.session, opener.session); assert.equal(h.sessions.size, 1)
+  assert.equal(h.parent.children.length, 2); assert.equal(h.blocked.length, 0)
+  assert.equal(child.calls.length, 0)
+  assert.ok(!JSON.stringify(h.states).includes('synthetic-only'))
+})
+
+test('regional login pages gain no translation, media, notification, clipboard or download privileges', () => {
+  const h = fixture(); h.manager.create('owner', A); const wc = h.views[0].webContents
+  h.manager.setPermissionConsent('owner', A, 'microphone', true)
+  h.manager.setPermissionConsent('owner', A, 'notifications', true)
+  const event = { sender: wc, senderFrame: wc.mainFrame }, original = h.manager.trustedPage(event)
+  for (const host of ['accounts.google.co.th', 'accounts.google.co.uk', 'accounts.google.com.vn']) {
+    const origin = 'https://' + host; wc.url = origin + '/ServiceLogin'
+    assert.equal(original.authorized(), false); assert.throws(() => h.manager.trustedPage(event), /页面已变化/)
+    for (const permission of ['media', 'notifications', 'clipboard-sanitized-write', 'clipboard-read']) {
+      assert.equal(wc.session.check(wc, permission, origin, { mediaType: 'audio', isMainFrame: true }), false)
+      let accepted: unknown
+      wc.session.request(wc, permission, (value: boolean) => { accepted = value }, { mediaTypes: ['audio'], isMainFrame: true, requestingUrl: wc.url })
+      assert.equal(accepted, false)
+    }
+    const download = { cancel: () => { cancelled = true } }; let cancelled = false
+    wc.session.emit('will-download', {}, download, wc); assert.equal(cancelled, true)
+  }
 })
 
 test('trusted translation IPC requires a registered current main frame at the exact Voice origin', () => {

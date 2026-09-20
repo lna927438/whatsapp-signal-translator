@@ -14,7 +14,7 @@ mkdirSync(profile,{recursive:true});app.setPath('userData',profile);app.setPath(
 app.setName('HelloDogVoiceValidation')
 const {GoogleVoiceEmbeddedViews}=require(join(evidence,'prototype/embeddedViews.cjs'))
 let window,workspace,selected='',accounts=[],lastState,error=''
-const owner='embed-validation-owner',fixtureRequests=[]
+const owner='embed-validation-owner',fixtureRequests=[],fixtureRedirects=[],fixtureBlocked=[]
 // Google Voice's own public Sign in link; this opens the official page, not an OAuth workaround.
 const officialSignIn='https://accounts.google.com/AccountChooser?continue=https%3A%2F%2Fvoice.google.com%2Flanding'
 if(!selfTest&&!inspectPublic){if(!app.requestSingleInstanceLock())app.exit(0);blockedDiagnostic=require('./diagnostics.cjs').installDiagnostics(app,evidence);app.on('second-instance',()=>{if(window&&!window.isDestroyed()){window.restore();window.show();window.focus()}})}
@@ -28,17 +28,29 @@ function topView(){return viewList().filter(view=>view.getVisible()).at(-1)}
 function layout(){if(!workspace||window.isDestroyed())return;const [width,height]=window.getContentSize();workspace.setBounds({x:0,y:142,width,height:Math.max(1,height-142)})}
 async function add(){if(accounts.length>=4)return;const id='gv-00000000-0000-4000-8000-'+String(accounts.length+1).padStart(12,'0');accounts.push({id,label:'账号 '+(accounts.length+1)});selected=id;error='';emit();try{await workspace.create(owner,id);workspace.focus(owner,id);lastState=workspace.getState(owner,id);emit()}catch{error='官方页面暂时无法加载；没有切换到外部浏览器。可点击重新加载。';emit()}}
 function fixture(request){
- fixtureRequests.push({method:request.method,origin:new URL(request.url).origin,path:new URL(request.url).pathname})
- if(new URL(request.url).pathname==='/verification-complete')return new Response(null,{status:302,headers:{location:'https://accounts.youtube.com/accounts/SetSID?fixture=synthetic-only'}})
- if(new URL(request.url).hostname==='accounts.youtube.com')return new Response(null,{status:302,headers:{location:'https://accounts.google.com/settled'}})
- const isMain=new URL(request.url).hostname==='voice.google.com'
+ const url=new URL(request.url)
+ fixtureRequests.push({method:request.method,origin:url.origin,path:url.pathname})
+ // Entirely synthetic completion chain: every session's HTTPS protocol is
+ // intercepted below, so these regional sign-in URLs never reach Google.
+ const completionRedirects={
+  'https://accounts.google.com/verification-complete':'https://accounts.google.co.th/accounts/SetSID?fixture=synthetic-only',
+  'https://accounts.google.co.th/accounts/SetSID':'https://accounts.google.co.uk/accounts/SetSID?fixture=synthetic-only',
+  'https://accounts.google.co.uk/accounts/SetSID':'https://accounts.youtube.com/accounts/SetSID?fixture=synthetic-only',
+  'https://accounts.youtube.com/accounts/SetSID':'https://voice.google.com/settled'
+ }
+ const next=completionRedirects[url.origin+url.pathname]
+ if(next)return new Response(null,{status:302,headers:{location:next}})
+ const isMain=url.hostname==='voice.google.com'
  return new Response(isMain?`<!doctype html><meta charset="utf-8"><h1>LOCAL FIXTURE · NOT GOOGLE</h1><button id="popup" onclick="window.open('https://accounts.google.com/embed-fixture','auth')">Popup</button><a id="link" href="https://accounts.google.com/link-fixture" target="_blank">Link popup</a><form id="post" target="_blank" action="https://accounts.google.com/post-fixture" method="POST"><input name="fixture" value="synthetic-only"><button>POST</button></form><button id="outside" onclick="window.open('https://example.invalid/blocked','out')">Unknown outside</button>`:`<!doctype html><meta charset="utf-8"><h1>LOCAL POPUP FIXTURE · NOT GOOGLE</h1>`,{headers:{'content-type':'text/html; charset=utf-8'}})
 }
-if(selfTest){const intercepted=new WeakSet();app.on('web-contents-created',(_event,wc)=>{if(intercepted.has(wc.session))return;intercepted.add(wc.session);wc.session.protocol.handle('https',fixture);wc.session.protocol.handle('http',()=>new Response('blocked',{status:403}))})}
+if(selfTest){const intercepted=new WeakSet();app.on('web-contents-created',(_event,wc)=>{
+ wc.on('will-redirect',(event,value,_inPlace,isMain)=>{if(event.isMainFrame??isMain){const url=new URL(event.url||value);fixtureRedirects.push({webContents:wc,session:wc.session,origin:url.origin,path:url.pathname})}})
+ if(intercepted.has(wc.session))return;intercepted.add(wc.session);wc.session.protocol.handle('https',fixture);wc.session.protocol.handle('http',()=>new Response('blocked',{status:403}))
+})}
 app.whenReady().then(async()=>{
  window=new BrowserWindow({width:1120,height:800,minWidth:760,minHeight:580,show:!selfTest&&!inspectPublic,title:'HelloDog · Google Voice 真正内嵌验证',backgroundColor:'#11191e',webPreferences:{preload:join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true,webSecurity:true}})
  window.setMenu(null)
- workspace=new GoogleVoiceEmbeddedViews(window,{onState:state=>{if(inspectPublic)trace({status:state.status,origin:state.origin,popupDepth:state.popupDepth});if(state.windowId===selected){lastState=state;workspace?.setOverlayOpen(state.status==='failed');emit()}},onBlockedNavigation:event=>{blockedDiagnostic(event);if(inspectPublic)trace({blocked:event.reason,origin:event.origin});error=(event.reason==='navigation'?'页面跳转未在验证版中开放，当前页面仍留在客户端内。':'这个弹窗暂不兼容，当前页面仍留在客户端内。')+(event.origin?' 来源：'+event.origin:'');emit()}})
+ workspace=new GoogleVoiceEmbeddedViews(window,{onState:state=>{if(inspectPublic)trace({status:state.status,origin:state.origin,popupDepth:state.popupDepth});if(state.windowId===selected){lastState=state;workspace?.setOverlayOpen(state.status==='failed');emit()}},onBlockedNavigation:event=>{if(selfTest)fixtureBlocked.push(event);blockedDiagnostic(event);if(inspectPublic)trace({blocked:event.reason,origin:event.origin});error=(event.reason==='navigation'?'页面跳转未在验证版中开放，当前页面仍留在客户端内。':'这个弹窗暂不兼容，当前页面仍留在客户端内。')+(event.origin?' 来源：'+event.origin:'');emit()}})
  window.on('resize',layout);window.on('closed',()=>{workspace.destroy();app.quit()})
  ipcMain.handle('embed-prototype:snapshot',event=>{allowed(event);return snapshot()})
  ipcMain.handle('embed-prototype:add',event=>{allowed(event);return add()})
@@ -77,9 +89,25 @@ async function runSelfTest(){
  await until(()=>fixtureRequests.some(row=>row.path==='/post-fixture'),'POST popup')
  assert.equal(fixtureRequests.find(row=>row.path==='/post-fixture').method,'POST');assert.equal(BrowserWindow.getAllWindows().length,1);checks.push('POST popup stays internal and preserves its HTTP method')
  workspace.back(owner,selected);await until(()=>viewList().length===1,'return from POST popup')
+ const redirectsBefore=fixtureRedirects.length,blockedBefore=fixtureBlocked.length
  await first.webContents.executeJavaScript("window.open('https://accounts.google.com/verification-complete','auth-complete');undefined")
- await until(()=>fixtureRequests.some(row=>row.path==='/settled'),'Google account completion redirect chain')
- assert.equal(BrowserWindow.getAllWindows().length,1);assert.equal(viewList().length,2);assert.equal(topView().webContents.session,first.webContents.session);checks.push('Official account completion redirect through accounts.youtube.com stays internal without dropping the session')
+ await until(()=>fixtureRequests.some(row=>row.origin==='https://voice.google.com'&&row.path==='/settled'),'Google regional account completion redirect chain')
+ const completion=topView();await until(()=>!completion.webContents.isLoading(),'regional account completion final document')
+ const expectedRedirects=[
+  ['https://accounts.google.co.th','/accounts/SetSID'],
+  ['https://accounts.google.co.uk','/accounts/SetSID'],
+  ['https://accounts.youtube.com','/accounts/SetSID'],
+  ['https://voice.google.com','/settled']
+ ]
+ const completionRedirects=fixtureRedirects.slice(redirectsBefore)
+ assert.deepEqual(completionRedirects.map(row=>[row.origin,row.path]),expectedRedirects)
+ for(const [origin,path] of expectedRedirects)assert.ok(fixtureRequests.some(row=>row.origin===origin&&row.path===path),'Synthetic completion target must be requested: '+origin+path)
+ assert.equal(fixtureBlocked.length,blockedBefore,'Official regional completion redirects must not be blocked')
+ assert.equal(BrowserWindow.getAllWindows().length,1);assert.equal(viewList().length,2)
+ assert.equal(topView(),completion);assert.notEqual(completion,first);assert.equal(completion.webContents.getURL(),'https://voice.google.com/settled')
+ assert.equal(completion.webContents.session,first.webContents.session)
+ for(const row of completionRedirects){assert.equal(row.webContents,completion.webContents,'Every redirect must retain the same child view');assert.equal(row.session,first.webContents.session,'Every redirect must retain the same account session')}
+ checks.push('Regional sign-in redirects through accounts.google.co.th, accounts.google.co.uk and accounts.youtube.com return to Voice in one child view and session without blocking')
  workspace.back(owner,selected);await until(()=>viewList().length===1,'return from completion redirect')
  await first.webContents.executeJavaScript("document.getElementById('outside').click()")
  await delay(150);assert.equal(viewList().length,1);assert.equal(BrowserWindow.getAllWindows().length,1);checks.push('Unknown external destination is blocked rather than opening a browser')
