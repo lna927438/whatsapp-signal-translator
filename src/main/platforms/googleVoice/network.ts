@@ -42,6 +42,13 @@ export function normalizeGoogleVoiceProxy(input: any): AccountProxy {
   const socks = input.protocol === 'socks5'
   const proxy = normalizeProxy({ ...input, host, enabled: enabled || hasEndpoint, ...(socks ? { protocol: 'http', username: '', password: '', hasPassword: false } : {}) })
   if (host && !isIP(host) && !host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) throw new Error('请输入有效的代理主机地址，不包含协议或路径。')
+  if (host && isIP(host) !== 6) {
+    // Chromium interprets legacy numeric hosts as IPv4. Never route or send
+    // credentials to an endpoint different from the address shown to the user.
+    try { if (new URL('http://' + host).hostname !== host) throw new Error() }
+    catch { throw new Error('请输入完整且有效的代理主机地址，不使用缩写或特殊数字格式。') }
+  }
+  if (!socks && proxy.username?.includes(':')) throw new Error('HTTP 和 HTTPS 代理账号不能包含冒号。请核对代理服务提供的账号。')
   if (socks) {
     const username = input.username || '', hasPassword = Boolean(!input.clearPassword && (input.password || input.hasPassword))
     if (Buffer.byteLength(username, 'utf8') > 255 || input.password && Buffer.byteLength(input.password, 'utf8') > 255 || Boolean(username) !== hasPassword) throw new Error('SOCKS5 账号和密码需要同时填写，且各不超过 255 个 UTF-8 字节。')

@@ -2,16 +2,20 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { uiError, uiLanguage } from '../lib/uiLocale'
 import type { GoogleVoiceWindow, GoogleVoiceWindowOptions, GoogleVoiceNetwork } from '../lib/googleVoiceWorkspace'
+import { parseGoogleVoiceProxyImport } from '../../../shared/googleVoiceProxyImport'
 const props = defineProps<{ record?: GoogleVoiceWindow; network?: GoogleVoiceNetwork; save: (value: GoogleVoiceWindowOptions) => Promise<boolean> }>()
 const emit = defineEmits<{ close: [] }>()
 const text = (zh: string, en: string) => uiLanguage.value === 'en' ? en : zh
 const panel = ref<HTMLElement>(), busy = ref(false), testing = ref(false), error = ref(''), pasted = ref('')
 const tested = ref<{ ip: string; latencyMs: number; checkedAt: number }>()
+const importError = ref(''), importNotice = ref('')
+const importFeedback = ref<HTMLElement>()
 const draft = reactive({ label: props.record?.label || 'Google Voice', proxy: { enabled: false, protocol: 'http' as 'http'|'https'|'socks5', host: '', port: 8080, username: '', hasPassword: false, ...props.record?.proxy, password: '', clearPassword: false } })
 const locked = computed(() => busy.value || testing.value)
 let disposed = false
 watch(() => JSON.stringify(draft.proxy), () => { tested.value = undefined })
 watch(() => draft.proxy.password, value => { if (value) draft.proxy.clearPassword = false })
+watch(pasted, () => { importError.value = ''; importNotice.value = '' }, { flush: 'sync' })
 function close() { if (!locked.value) emit('close') }
 function proxyInput() {
   const input = JSON.parse(JSON.stringify(draft.proxy))
@@ -23,13 +27,15 @@ function proxyInput() {
   return input
 }
 function parse() {
-  error.value = ''
+  if (locked.value) return
+  error.value = ''; importError.value = ''; importNotice.value = ''
   try {
-    const value = new URL(pasted.value.trim())
-    if (!['http:', 'https:', 'socks5:'].includes(value.protocol) || (value.pathname && value.pathname !== '/') || value.search || value.hash) throw new Error()
-    Object.assign(draft.proxy, { enabled: true, protocol: value.protocol.slice(0, -1), host: value.hostname, port: Number(value.port || (value.protocol === 'https:' ? 443 : value.protocol === 'socks5:' ? 1080 : 80)), username: decodeURIComponent(value.username), password: decodeURIComponent(value.password), clearPassword: !value.password, hasPassword: false })
+    const value = parseGoogleVoiceProxyImport(pasted.value, draft.proxy.protocol)
+    Object.assign(draft.proxy, value)
     pasted.value = ''
-  } catch { error.value = text('代理链接格式无效，请检查协议、地址和端口。', 'Check the proxy URL, protocol, host and port.') }
+    importNotice.value = text('已填入代理配置，请先检测，再保存使用。', 'Proxy fields filled. Test the configuration, then save it.')
+  } catch (e) { importError.value = text(e instanceof Error ? e.message : '代理格式无效，请检查地址和端口。', 'Check the proxy format, host, port and credentials. Your existing fields have not changed.') }
+  void nextTick(() => { if (!disposed) importFeedback.value?.scrollIntoView({ block: 'nearest' }) })
 }
 async function test() {
   if (locked.value) return
@@ -82,7 +88,10 @@ onUnmounted(() => { disposed = true; draft.proxy.password = ''; pasted.value = '
           <label>{{ text('代理地址','Proxy host') }}<input v-model="draft.proxy.host" placeholder="proxy.example.com" autocomplete="off" required /></label>
           <div class="grid"><label>{{ text('代理账号','Proxy username') }}<input v-model="draft.proxy.username" autocomplete="off" maxlength="256" /></label><label>{{ text('代理密码','Proxy password') }}<input v-model="draft.proxy.password" type="password" autocomplete="new-password" maxlength="1024" :placeholder="text(draft.proxy.hasPassword ? '已保存，留空保留' : '可选', draft.proxy.hasPassword ? 'Saved; leave blank to keep' : 'Optional')" /></label></div>
           <label v-if="draft.proxy.hasPassword" class="clear"><input v-model="draft.proxy.clearPassword" type="checkbox" />{{ text('清除已保存的代理密码','Clear saved proxy password') }}</label>
-          <div class="import"><input v-model="pasted" type="password" autocomplete="off" :aria-label="text('导入代理链接','Import proxy URL')" placeholder="socks5://user:password@host:port" /><button type="button" class="secondary" @click="parse">{{ text('解析','Parse') }}</button></div>
+          <div class="import"><input v-model="pasted" type="password" autocomplete="off" :aria-label="text('导入代理链接','Import proxy URL')" :aria-invalid="!!importError" aria-describedby="voice-proxy-import-help" :placeholder="text('粘贴代理地址或完整链接','Paste proxy address or full URL')" /><button type="button" class="secondary" :disabled="!pasted.trim()" @click="parse">{{ text('解析','Parse') }}</button></div>
+          <p id="voice-proxy-import-help" class="hint">{{ text('支持：地址:端口:账号:密码、账号:密码@地址:端口，或完整代理链接。没有协议前缀时使用上方所选协议。', 'Accepts host:port:username:password, username:password@host:port, or a full proxy URL. Without a prefix, the selected protocol is used.') }}</p>
+          <p v-if="importError" ref="importFeedback" class="error" role="alert">{{ importError }}</p>
+          <p v-else-if="importNotice" ref="importFeedback" class="result" role="status">{{ importNotice }}</p>
           <button type="button" class="secondary" @click="test">{{ text(testing ? '正在检测…' : '检测此配置', testing ? 'Checking…' : 'Test this configuration') }}</button>
           <p v-if="tested" class="result" role="status">{{ text('检测出口 IP：','Test exit IP: ') }}{{ tested.ip }} · {{ tested.latencyMs }} ms</p>
           <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测成功后再保存使用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test the configuration before saving.') }}</p>

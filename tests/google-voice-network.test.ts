@@ -49,6 +49,23 @@ test('Google Voice proxy normalization rejects malformed and oversized input inc
   for (const input of [{ ...proxy, protocol: 'socks5', password: '汉'.repeat(86) }, { ...proxy, protocol: 'socks5', username: '', password: 'secret' }, { ...proxy, protocol: 'socks5', username: '汉'.repeat(86), password: 'secret' }]) assert.throws(() => normalize(input), /255|同时填写/)
 })
 
+test('manual proxy settings reject reinterpreted numeric hosts and invalid HTTP usernames without changing valid credentials', () => {
+  const { normalizeGoogleVoiceProxy: normalize } = harness().module
+  for (const host of ['0x7f000001', '0x7f.0.0.1', '127.1', '2130706433', '0177.0.0.1', '127.0.0.01', '999.0.0.1']) {
+    assert.throws(() => normalize({ ...proxy, host }), /完整且有效/)
+    assert.throws(() => normalize({ ...proxy, host, enabled: false }), /完整且有效/)
+  }
+  for (const protocol of ['http', 'https']) {
+    assert.throws(() => normalize({ ...proxy, protocol, username: 'fixture:name' }), /账号不能包含冒号/)
+    const normalized = normalize({ ...proxy, protocol, host: '127.0.0.1', password: 'fixture:secret', hasPassword: true })
+    assert.equal(normalized.host, '127.0.0.1'); assert.equal(normalized.username, proxy.username); assert.equal(normalized.hasPassword, true)
+  }
+  for (const host of ['proxy.example.test', 'localhost', '2001:0db8:0:0:0:0:0:1', '[::1]']) {
+    const normalized = normalize({ ...proxy, host, protocol: 'socks5', username: 'fixture:name', password: 'fixture:secret' })
+    assert.equal(normalized.host, host.replace(/^\[|\]$/g, '')); assert.equal(normalized.username, 'fixture:name'); assert.equal(normalized.hasPassword, true)
+  }
+})
+
 test('IP check uses the supplied window session with cookies off and redirects disabled', async () => {
   const h = harness(reply), existing = {} as Electron.Session
   const result = await h.module.checkGoogleVoiceSession(existing)
