@@ -9,11 +9,17 @@ const tick = () => new Promise<void>(resolve => setTimeout(resolve, 5))
 
 function fixture(options: any = {}) {
   const sessions = new Map<string, any>(), views: FakeView[] = [], states: any[] = [], blocked: any[] = []
+  const networkCalls: any[] = []
+  let proxyGate: Promise<void> | undefined, rejectProxy = false
   let loadingFailure: Promise<void> | undefined
   let failNextView = false
   function getSession(partition: string) {
     if (!sessions.has(partition)) sessions.set(partition, Object.assign(new EventEmitter(), {
       partition, check: undefined, request: undefined, display: undefined,
+      webRequest: { before: undefined as any, onBeforeRequest(callback: any) { this.before = callback } },
+      async setProxy(value: any) { networkCalls.push(['proxy', partition, value]); await proxyGate; if (rejectProxy) throw new Error('synthetic setup failure') },
+      async closeAllConnections() { networkCalls.push(['close', partition]) },
+      async clearAuthCache() { networkCalls.push(['auth-clear', partition]) },
       setPermissionCheckHandler(callback: any) { this.check = callback },
       setPermissionRequestHandler(callback: any) { this.request = callback },
       setDisplayMediaRequestHandler(callback: any) { this.display = callback }
@@ -22,7 +28,8 @@ function fixture(options: any = {}) {
   }
   class FakeContents extends EventEmitter {
     destroyed = false; url = ''; focused = 0; reloads = 0; calls: any[] = []; open: any; sent: any[] = []; mainFrame: any
-    history = false; backCalls = 0
+    history = false; backCalls = 0; rtcPolicy = ''
+    setWebRTCIPHandlingPolicy(value: string) { this.rtcPolicy = value }
     navigationHistory = { canGoBack: () => this.history, goBack: () => { this.backCalls++ } }
     constructor(public session: any) { super(); const contents = this; this.mainFrame = { get url() { return contents.url }, detached: false } }
     getURL() { return this.url }
@@ -57,13 +64,88 @@ function fixture(options: any = {}) {
     getContentSize() { return this.size }
   }
   const parent = new FakeParent()
-  const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition: getSession } })
+  const h = mainHarness({ WebContentsView: FakeView, session: { fromPartition: getSession } }, undefined, { './network': {
+    attachGoogleVoiceProxyAuth: () => () => {},
+    checkGoogleVoiceSession: async (...args: any[]) => { networkCalls.push(['check', ...args]); return options.networkCheck ? options.networkCheck(...args) : { ip: '203.0.113.10', latencyMs: 8, checkedAt: 1000 } }
+  } })
   const module = h.load('src/main/platforms/googleVoice/embeddedViews.ts')
   const manager = new module.GoogleVoiceEmbeddedViews(parent, { ...options, onState: (state: any) => states.push(state), onBlockedNavigation: (event: any) => blocked.push(event) })
   manager.setBounds({ x: 60, y: 120, width: 1100, height: 650 })
   const popup = (contents: FakeContents, url = 'https://accounts.google.com/ServiceLogin', extra: any = {}) => contents.open({ url, disposition: 'new-window', referrer: { url: 'https://voice.google.com/u/0/', policy: 'strict-origin-when-cross-origin' }, ...extra })
-  return { manager, parent, module, sessions, views, states, blocked, popup, FakeContents, failNextView: () => { failNextView = true }, setLoadingFailure: (promise: Promise<void>) => { loadingFailure = promise } }
+  return { manager, parent, module, sessions, views, states, blocked, popup, FakeContents, networkCalls, setProxyGate: (gate?: Promise<void>) => { proxyGate = gate }, rejectProxy: (value: boolean) => { rejectProxy = value }, failNextView: () => { failNextView = true }, setLoadingFailure: (promise: Promise<void>) => { loadingFailure = promise } }
 }
+
+const proxyConfig = { enabled: true, protocol: 'http', host: 'proxy.example.invalid', port: 3128, username: 'synthetic' }
+function requestCancelled(session: any): boolean { let result: any; session.webRequest.before({}, (value: any) => { result = value }); return result.cancel }
+
+test('proxy setup gates every request before navigation and applies WebRTC protection to root and popup', async () => {
+  const h = fixture(); let release!: () => void; h.setProxyGate(new Promise<void>(resolve => { release = resolve }))
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'synthetic-only' })
+  const wc = h.views[0].webContents
+  assert.equal(wc.calls.length, 0); assert.equal(requestCancelled(wc.session), true)
+  assert.equal(wc.rtcPolicy, 'disable_non_proxied_udp')
+  release(); await tick()
+  assert.equal(requestCancelled(wc.session), false); assert.equal(wc.calls[0].url, 'https://voice.google.com/u/0/')
+  assert.equal(h.networkCalls[0][2].proxyRules, 'http://proxy.example.invalid:3128')
+  assert.equal(h.networkCalls[0][2].proxyBypassRules, '<-loopback>')
+  assert.equal(h.networkCalls.find(row => row[0] === 'check')[1], wc.session)
+  const child = h.popup(wc).createWindow({}); assert.equal(child.session, wc.session); assert.equal(child.rtcPolicy, 'disable_non_proxied_udp')
+  const state = h.manager.getState('owner', A); assert.equal(state.network.ip, '203.0.113.10')
+  assert.ok(!JSON.stringify(h.states).includes('synthetic-only'))
+  h.manager.close('owner', A); assert.equal(requestCancelled(wc.session), true)
+})
+
+test('failed proxy setup stays blocked and retry never substitutes system or direct routing', async () => {
+  const h = fixture(); h.rejectProxy(true)
+  h.manager.create('owner', A, { proxy: proxyConfig, password: '' }); await tick()
+  const wc = h.views[0].webContents
+  assert.equal(wc.calls.length, 0); assert.equal(requestCancelled(wc.session), true)
+  assert.equal(h.manager.getState('owner', A).status, 'failed')
+  h.rejectProxy(false); h.manager.reload('owner', A); await tick()
+  assert.equal(wc.calls[0].url, 'https://voice.google.com/u/0/')
+  assert.ok(h.networkCalls.filter(row => row[0] === 'proxy').every(row => row[2].mode === 'fixed_servers'))
+})
+
+test('a hung native proxy setup becomes a visible error and cannot load late after its deadline', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture(); let release!: () => void; h.setProxyGate(new Promise<void>(resolve => { release = resolve }))
+  h.manager.create('owner', A, { proxy: proxyConfig, password: '' })
+  context.mock.timers.tick(15_000)
+  assert.equal(h.manager.getState('owner', A).status, 'failed')
+  assert.match(h.manager.getState('owner', A).network.message, /初始化超时/)
+  assert.throws(() => h.manager.reload('owner', A), /初始化超时/)
+  assert.equal(h.manager.getState('owner', A).status, 'failed')
+  const wc = h.views[0].webContents; assert.equal(requestCancelled(wc.session), true)
+  release(); for (let index = 0; index < 15; index++) await Promise.resolve()
+  assert.equal(wc.calls.length, 0); assert.equal(requestCancelled(wc.session), true)
+  h.manager.close('owner', A)
+})
+
+test('closing during pending proxy setup cannot navigate later or override a replacement route', async () => {
+  const h = fixture(); let release!: () => void; h.setProxyGate(new Promise<void>(resolve => { release = resolve }))
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'first-only' }); await tick()
+  const old = h.views[0].webContents
+  h.manager.close('owner', A)
+  h.manager.create('owner', A, { proxy: { ...proxyConfig, host: 'second.example.invalid' }, password: 'second-only' })
+  const replacement = h.views[1].webContents
+  assert.equal(replacement.session, old.session); assert.equal(requestCancelled(replacement.session), true)
+  release(); await tick()
+  assert.ok(!old.calls.some(row => row.url)); assert.equal(replacement.calls[0].url, 'https://voice.google.com/u/0/')
+  const configurations = h.networkCalls.filter(row => row[0] === 'proxy')
+  assert.equal(configurations.length, 2); assert.equal(configurations[1][2].proxyRules, 'http://second.example.invalid:3128')
+  assert.equal(requestCancelled(replacement.session), false)
+})
+
+test('system windows explicitly clear previous proxy routing before loading and late IP checks cannot revive closed windows', async () => {
+  let finish!: (value: any) => void
+  const h = fixture({ networkCheck: () => new Promise(resolve => { finish = resolve }) })
+  h.manager.create('owner', A, { password: '' }); await tick()
+  assert.equal(h.networkCalls.find(row => row[0] === 'proxy')[2].mode, 'system')
+  const wc = h.views[0].webContents; assert.equal(wc.rtcPolicy, 'default')
+  const check = h.manager.checkNetwork('owner', A); await tick(); h.manager.close('owner', A)
+  const count = h.states.length; finish({ ip: '203.0.113.20', latencyMs: 1, checkedAt: 1000 })
+  await assert.rejects(check, /窗口已关闭/); assert.equal(h.states.length, count)
+})
 
 test('embedded views use isolated persistent partitions and never put owner identities in disk paths', () => {
   const h = fixture()

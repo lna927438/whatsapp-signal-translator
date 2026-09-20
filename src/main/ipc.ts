@@ -170,8 +170,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   // Google pages never receive the trusted shell's general IPC permissions.
   electronIpcMain.handle('google-voice:translate-request',(event,message)=>embeddedVoiceTranslation.request(event,message))
   ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
-  ipcMain.handle('google-voice:add',event=>{requireMain(event);return googleVoice.add()})
-  ipcMain.handle('google-voice:update',(event,id:string,patch:{label?:string})=>{requireMain(event);return googleVoice.update(id,patch)})
+  ipcMain.handle('google-voice:add',(event,options?:{label?:string;proxy?:unknown})=>{requireMain(event);return googleVoice.add(options)})
+  ipcMain.handle('google-voice:update',(event,id:string,patch:{label?:string;proxy?:unknown})=>{requireMain(event);return googleVoice.update(id,patch)})
+  ipcMain.handle('google-voice:test-proxy',(event,input:unknown,id?:string)=>{requireMain(event);return googleVoice.testProxy(input,id)})
+  ipcMain.handle('google-voice:check-network',(event,id:string)=>{requireMain(event);return googleVoice.checkNetwork(id)})
   ipcMain.handle('google-voice:reorder',(event,ids:string[])=>{requireMain(event);return googleVoice.reorder(ids)})
   ipcMain.handle('google-voice:focus',async(event,id?:string)=>{requireMain(event);taskIdentity();return focusWorkspace(()=>googleVoice.focus(id))})
   ipcMain.handle('google-voice:close',(event,id:string)=>{requireMain(event);return googleVoice.close(id)})

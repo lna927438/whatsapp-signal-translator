@@ -218,7 +218,16 @@ function installSendInterception(target, adapter, onIntent, reportError = () => 
 
 
 const one = (root, selector) => { const found = [...root.querySelectorAll(selector)].filter(node => node.getClientRects().length > 0); return found.length === 1 ? found[0] : null }
-const sourceText = node => node.textContent?.trim() || ''
+// Translations live inside the official text bubble. Exclude our entire UI
+// subtree so a redraw never turns the previous translation into source text,
+// changes a message's durable identity or charges for the same SMS again.
+const sourceText = node => {
+  if (!node) return ''
+  const walker = node.ownerDocument.createTreeWalker(node, 4 /* SHOW_TEXT */)
+  const parts = []
+  while (walker.nextNode()) if (!walker.currentNode.parentElement?.closest('[data-hellodog-voice]')) parts.push(walker.currentNode.nodeValue || '')
+  return parts.join('').trim()
+}
 const hashUuid = value => `${value.slice(0,8)}-${value.slice(8,12)}-5${value.slice(13,16)}-a${value.slice(17,20)}-${value.slice(20,32)}`
 
 /** Selectors verified read-only against the official English SMS page.
@@ -341,7 +350,7 @@ class GoogleVoiceDomAdapter {
     }
     return this.snapshot()?.conversationId === current.conversationId ? candidates : []
   }
-  validMessage(item) { return item.element.isConnected && this.snapshot()?.conversationId === item.conversationId && sourceText(item.content) === item.text }
+  validMessage(item) { return item.element.isConnected && item.content.isConnected && item.element.contains(item.content) && this.snapshot()?.conversationId === item.conversationId && sourceText(item.content) === item.text }
   visibleMessage(item) {
     const rect = item.element.getBoundingClientRect(), view = this.document.defaultView
     return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < view.innerHeight && rect.right > 0 && rect.left < view.innerWidth
@@ -473,6 +482,7 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       if (!element.isConnected) { state.views.delete(element); continue }
       if (!adapter.validMessage(view.item)) continue
       view.node.style.display = runtimeStatus?.translationsVisible === false ? 'none' : ''
+      if (runtimeStatus?.localLanguage) view.node.lang = runtimeStatus.localLanguage
       if (state.text) { if (view.node.textContent !== state.text) view.node.textContent = state.text }
       else { view.button.textContent = state.work ? '翻译中…' : state.error ? '重试翻译' : state.retryAfter ? '等待翻译' : '翻译'; view.button.disabled = state.work === true }
     }
@@ -492,13 +502,18 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     }
     if (!state) { state = { views: new Map() }; messages.set(key, state) }
     const oldView = state.views.get(item.element)
-    if (!oldView?.node.isConnected || oldView.node.parentElement !== item.element) {
+    if (!oldView?.node.isConnected || oldView.node.parentElement !== item.content) {
       oldView?.node.remove(); const node = document.createElement('div'); node.dataset.hellodogVoice = 'translation'
-      node.style.cssText = 'font:13px/1.5 system-ui;color:#8abdaa;margin:5px 16px 9px;white-space:pre-wrap;overflow-wrap:anywhere;'
+      // Keep the original annotation/links untouched, with the translation
+      // below it inside the same native bubble (before the official timestamp).
+      // Inherit its foreground for readable light/dark and incoming/outgoing
+      // colors instead of applying a low-contrast fixed green to white pages.
+      node.dir = 'auto'; node.setAttribute('aria-label', '译文')
+      node.style.cssText = 'font:13px/1.55 system-ui;color:inherit;box-sizing:border-box;max-width:100%;min-width:0;margin:6px 0 0;padding:6px 0 0;border-top:1px solid color-mix(in srgb,currentColor 22%,transparent);white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;text-align:start;user-select:text;'
       const button = document.createElement('button'); button.type = 'button'; button.textContent = state.error ? '重试翻译' : '翻译'
-      button.style.cssText = 'font:12px system-ui;color:#3c8064;background:transparent;border:0;cursor:pointer;padding:3px 0;'
+      button.style.cssText = 'font:12px system-ui;color:inherit;background:transparent;border:0;cursor:pointer;padding:3px 0;'
       button.onclick = () => { void translateMessage(item, true) }
-      node.append(button); item.element.append(node); state.views.set(item.element, { node, button, item })
+      node.append(button); item.content.append(node); state.views.set(item.element, { node, button, item })
     } else oldView.item = item
     renderMessageViews(state)
     return state

@@ -1,7 +1,16 @@
 import { digest } from './protocol.mjs'
 
 const one = (root, selector) => { const found = [...root.querySelectorAll(selector)].filter(node => node.getClientRects().length > 0); return found.length === 1 ? found[0] : null }
-const sourceText = node => node.textContent?.trim() || ''
+// Translations live inside the official text bubble. Exclude our entire UI
+// subtree so a redraw never turns the previous translation into source text,
+// changes a message's durable identity or charges for the same SMS again.
+const sourceText = node => {
+  if (!node) return ''
+  const walker = node.ownerDocument.createTreeWalker(node, 4 /* SHOW_TEXT */)
+  const parts = []
+  while (walker.nextNode()) if (!walker.currentNode.parentElement?.closest('[data-hellodog-voice]')) parts.push(walker.currentNode.nodeValue || '')
+  return parts.join('').trim()
+}
 const hashUuid = value => `${value.slice(0,8)}-${value.slice(8,12)}-5${value.slice(13,16)}-a${value.slice(17,20)}-${value.slice(20,32)}`
 
 /** Selectors verified read-only against the official English SMS page.
@@ -124,7 +133,7 @@ export class GoogleVoiceDomAdapter {
     }
     return this.snapshot()?.conversationId === current.conversationId ? candidates : []
   }
-  validMessage(item) { return item.element.isConnected && this.snapshot()?.conversationId === item.conversationId && sourceText(item.content) === item.text }
+  validMessage(item) { return item.element.isConnected && item.content.isConnected && item.element.contains(item.content) && this.snapshot()?.conversationId === item.conversationId && sourceText(item.content) === item.text }
   visibleMessage(item) {
     const rect = item.element.getBoundingClientRect(), view = this.document.defaultView
     return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < view.innerHeight && rect.right > 0 && rect.left < view.innerWidth

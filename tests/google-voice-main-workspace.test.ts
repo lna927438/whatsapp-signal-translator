@@ -5,19 +5,21 @@ import { mainHarness } from './main-harness.ts'
 
 const A = 'gv-10000000-0000-4000-8000-000000000001', B = 'gv-20000000-0000-4000-8000-000000000002'
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes }); return { promise, resolve } }
+const tick = () => new Promise(resolve => setTimeout(resolve, 5))
 function fixture() {
   let owner = 'owner-a', authRevision = 0, zoom = 1
   const calls: any[] = [], views: FakeView[] = [], sessions = new Map<string, any>(), getGates = new Map<string, Promise<void>>()
-  const data = [A, B].map((id, tabOrder) => ({ id, owner, label: id, tabOrder, browser: 'chrome', closed: false }))
+  const data: any[] = [A, B].map((id, tabOrder) => ({ id, owner, label: id, tabOrder, browser: 'chrome', closed: false }))
   const records = {
     list: async (who: string) => data.filter(row => row.owner === who && !row.closed),
     get: async (who: string, id: string) => { await getGates.get(id); const row = data.find(row => row.id === id && row.owner === who && !row.closed); if (!row) throw new Error('missing'); return row },
+    proxyPassword: async (who: string, id: string) => { await records.get(who, id); return '' },
     add: async (who: string) => { const row = { id: 'gv-30000000-0000-4000-8000-000000000003', owner: who, label: 'Google Voice 3', tabOrder: 2, browser: 'chrome', closed: false }; data.push(row); return row },
     update: async (who: string, id: string, patch: any) => { const row = await records.get(who, id); Object.assign(row, patch); return row },
     reorder: async (who: string, ids: string[]) => { const rows = await records.list(who); rows.forEach(row => { row.tabOrder = ids.indexOf(row.id) }); return rows.sort((a, b) => a.tabOrder - b.tabOrder) }
   }
   function fromPartition(key: string): any {
-    if (!sessions.has(key)) sessions.set(key, Object.assign(new EventEmitter(), { partition: key, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDisplayMediaRequestHandler() {} }))
+    if (!sessions.has(key)) sessions.set(key, Object.assign(new EventEmitter(), { partition: key, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDisplayMediaRequestHandler() {}, webRequest: { onBeforeRequest() {} }, async setProxy(config: any) { calls.push(['proxy', key, config]) }, async closeAllConnections() {}, async clearAuthCache() {} }))
     return sessions.get(key)
   }
   class FakeContents extends EventEmitter {
@@ -25,6 +27,7 @@ function fixture() {
     navigationHistory = { canGoBack: () => this.history, goBack: () => { calls.push(['back']) } }
     constructor(options: any = {}) { super(); this.session = options.session || fromPartition(options.partition); const wc = this; this.mainFrame = { get url() { return wc.url }, detached: false } }
     getURL() { return this.url } isDestroyed() { return this.destroyed }
+    setWebRTCIPHandlingPolicy() {}
     loadURL(url: string) { this.url = url; calls.push(['load', url]); return Promise.resolve() }
     setWindowOpenHandler(callback: any) { this.open = callback }
     focus() { this.focused = true }
@@ -49,6 +52,8 @@ function fixture() {
   const { GoogleVoiceWorkspace } = h.load('src/main/platforms/googleVoice/workspace.ts')
   const identity = () => { if (!owner) throw new Error('not logged in'); const saved = owner, revision = authRevision; return { owner, authorized: () => owner === saved && revision === authRevision } }
   const workspace = new GoogleVoiceWorkspace(window, records, identity, { preloadPath: 'D:/HelloDog/preload/googleVoice.js' })
+  const focus = workspace.focus.bind(workspace)
+  workspace.focus = async (...args: any[]) => { const result = await focus(...args); await tick(); return result }
   workspace.setBounds({ x: 50, y: 100, width: 900, height: 650 })
   return { workspace, window, records, data, calls, views, sessions, getGates, setOwner: (value: string) => { owner = value; authRevision++ }, setZoom: (value: number) => { zoom = value; window.webContents.emit('zoom-changed') } }
 }
@@ -67,7 +72,28 @@ test('workspace CRUD remains owner-scoped and safe metadata excludes storage and
   assert.equal((await h.workspace.update(A, { label: 'Primary' })).label, 'Primary')
   assert.equal((await h.workspace.reorder([B, A]))[0].id, B)
   assert.equal((await h.workspace.add()).label, 'Google Voice 3')
-  await assert.rejects(h.workspace.update(A, {}), /名称无效/)
+  await assert.rejects(h.workspace.update(A, {}), /窗口设置无效/)
+})
+
+test('changing one proxy invalidates its old view and keeps other accounts and login partitions', async () => {
+  const h = fixture(); await h.workspace.focus(A); await h.workspace.focus(B)
+  const a = h.views[0].webContents, b = h.views[1].webContents, session = a.session
+  const result = await h.workspace.update(A, { proxy: { enabled: true, protocol: 'http', host: 'proxy.invalid', port: 3128 } })
+  assert.equal(result.proxy.host, 'proxy.invalid'); assert.equal(result.proxySecret, undefined)
+  assert.equal(a.destroyed, true); assert.equal(b.destroyed, false); assert.equal(h.views[1].visible, true)
+  await h.workspace.focus(A); const replacement = h.views[2].webContents
+  assert.equal(replacement.session, session)
+  await h.workspace.refresh(A); assert.equal(replacement.destroyed, true)
+  assert.equal(h.views[3].webContents.session, session); assert.equal(b.destroyed, false)
+})
+
+test('disabled proxy never decrypts an obsolete password, and a slow refresh cannot steal another selection', async () => {
+  const h = fixture(); h.data[0].proxy = { enabled: false, protocol: 'http', host: 'old.invalid', port: 3128 }
+  h.records.proxyPassword = async () => { throw new Error('saved secret unavailable') }
+  await h.workspace.focus(A); assert.equal(h.views[0].webContents.url, 'https://voice.google.com/u/0/')
+  const gate = deferred(); h.getGates.set(A, gate.promise)
+  const late = h.workspace.refresh(A); await h.workspace.focus(B); gate.resolve()
+  assert.equal((await late).state, 'cancelled'); assert.equal(h.views[1].visible, true)
 })
 
 test('a late record lookup cannot restore an earlier selection or create an abandoned view', async () => {

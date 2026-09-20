@@ -2,11 +2,14 @@ import { computed, ref } from 'vue'
 import { orderedAccounts } from '../../../shared/accountOrder'
 import { uiError, uiLanguage } from './uiLocale'
 
-export type GoogleVoiceWindow = { id: string; label: string; tabOrder?: number }
+export type GoogleVoiceProxy = { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: number; username?: string; hasPassword?: boolean }
+export type GoogleVoiceNetwork = { mode: 'proxy' | 'system'; status: 'unchecked' | 'checking' | 'checked' | 'error'; ip?: string; latencyMs?: number; checkedAt?: number; message?: string }
+export type GoogleVoiceWindow = { id: string; label: string; tabOrder?: number; proxy?: GoogleVoiceProxy }
+export type GoogleVoiceWindowOptions = { label?: string; proxy?: GoogleVoiceProxy & { password?: string; clearPassword?: boolean } }
 export interface GoogleVoiceWorkspaceApi {
   listGoogleVoiceWindows(): Promise<GoogleVoiceWindow[]>
-  addGoogleVoiceWindow(): Promise<GoogleVoiceWindow>
-  updateGoogleVoiceWindow(id: string, patch: { label: string }): Promise<GoogleVoiceWindow>
+  addGoogleVoiceWindow(options?: GoogleVoiceWindowOptions): Promise<GoogleVoiceWindow>
+  updateGoogleVoiceWindow(id: string, patch: GoogleVoiceWindowOptions): Promise<GoogleVoiceWindow>
   reorderGoogleVoiceWindows(ids: string[]): Promise<GoogleVoiceWindow[]>
   focusGoogleVoiceWindow(id?: string): Promise<unknown>
   refreshGoogleVoiceWindow(id: string): Promise<unknown>
@@ -27,6 +30,8 @@ export function useGoogleVoiceWorkspace(options: {
   const state = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const message = ref('')
   const canGoBack = ref(false)
+  const networks = ref<Record<string, GoogleVoiceNetwork>>({})
+  const network = computed(() => networks.value[selectedId.value])
   const writing = ref(false), listing = ref(0)
   const busy = computed(() => writing.value || listing.value > 0)
   const selected = computed(() => windows.value.find(window => window.id === selectedId.value))
@@ -44,7 +49,9 @@ export function useGoogleVoiceWorkspace(options: {
     else options.reportError(text)
   }
   function acceptState(value: any) {
-    if(disposed || !active.value || value?.id!==selectedId.value || !windows.value.some(row=>row.id===value.id))return
+    if(disposed || !windows.value.some(row=>row.id===value?.id))return
+    if(value.network && ['proxy','system'].includes(value.network.mode) && ['unchecked','checking','checked','error'].includes(value.network.status)) networks.value[value.id] = { ...value.network }
+    if(!active.value || value.id!==selectedId.value)return
     if(!['loading','ready','error'].includes(value.state))return
     eventRevision++;state.value=value.state;message.value=typeof value.message==='string'?value.message:'';canGoBack.value=value.canGoBack===true
   }
@@ -104,13 +111,28 @@ export function useGoogleVoiceWorkspace(options: {
     catch (error) { if (!disposed) options.reportError(failure(error)); return }
     finally { if (pendingWrite === operation) pendingWrite = undefined; writing.value = false }
   }
-  async function add() {
+  async function add(input?: GoogleVoiceWindowOptions) {
     const result = await write(async () => {
-      const record = await options.api().addGoogleVoiceWindow()
+      const record = await options.api().addGoogleVoiceWindow(input)
       if (!disposed) windows.value = orderedAccounts([...windows.value.filter(window => window.id !== record.id), record])
       return record
     })
     if (result && active.value && !disposed) await focus(result.id)
+    return !!result
+  }
+  async function configure(id: string, input: GoogleVoiceWindowOptions): Promise<boolean> {
+    if (!windows.value.some(window => window.id === id)) return false
+    const result = await write(async () => {
+      const saved = await options.api().updateGoogleVoiceWindow(id, input)
+      if (!disposed) {
+        const index = windows.value.findIndex(window => window.id === id)
+        if (index >= 0) windows.value[index] = saved
+        delete networks.value[id]
+      }
+      return saved
+    })
+    if (result && active.value && selectedId.value === id && !disposed) await focus(id)
+    return !!result
   }
   async function rename(id: string, label: string): Promise<boolean> {
     const value = label.trim().slice(0, 60)
@@ -130,6 +152,7 @@ export function useGoogleVoiceWorkspace(options: {
       if (disposed) return undefined
       const wasSelected = selectedId.value === id
       windows.value = windows.value.filter(window => window.id !== id)
+      delete networks.value[id]
       if (!wasSelected) return undefined
       focusRevision++
       const next = windows.value[Math.min(before, windows.value.length - 1)]
@@ -187,5 +210,5 @@ export function useGoogleVoiceWorkspace(options: {
   }
   async function flush() { await pendingWrite }
   function dispose() { disposed = true; leave() }
-  return { active, windows, selectedId, selected, state, message, canGoBack, busy, enter, leave, focus, add, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
+  return { active, windows, selectedId, selected, state, message, canGoBack, network, busy, enter, leave, focus, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
 }

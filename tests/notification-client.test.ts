@@ -45,12 +45,15 @@ test('logout discards in-flight data and does not expose notices to the next use
  }finally{s.parent.destroy()}
 })
 test('only actual paint acknowledges display; failed receipts persist, dismissal stops repeats after restart',async()=>{
- const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts');const n=notice(),sent:any[]=[];let failed=true
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts');const n=notice(),sent:any[]=[];let failed=true,offlineAttempts=0
+ // IPC acknowledgement does not wait for the receipt journal's durable writes.
+ const until=async(check:()=>void)=>{const deadline=Date.now()+3000;for(;;){try{check();return}catch(error){if(Date.now()>=deadline)throw error}await delay()}}
+ const persisted=()=>JSON.parse(readFileSync(s.h.directory+'/notification-receipts.json','utf8')).owners.A[n.id+':1']
  const updates={notice:async()=>({available:false,show:false})}
- const manager=new ClientNotifications(s.parent,updates,()=> 'A',async()=>({notices:[{...n}]}),async(v:any)=>{if(failed)throw new Error('offline');sent.push(v);return {accepted:true}})
- try{manager.setIdentity();await delay();await manager.refresh();const popup=s.windows[1];assert.ok(popup);assert.equal(sent.length,0)
-  await s.invoke('notice-window:painted',popup,n.id+':1');await delay();assert.equal(sent.length,0)
-  failed=false;await s.invoke('notices:action',s.parent,n.id+':1','dismiss');await delay();assert.equal(manager.snapshot().notices[0].dismissed,true);assert.equal(sent.length,2)
+ const manager=new ClientNotifications(s.parent,updates,()=> 'A',async()=>({notices:[{...n}]}),async(v:any)=>{if(failed){offlineAttempts++;throw new Error('offline')}sent.push(v);return {accepted:true}})
+ try{manager.setIdentity();await until(()=>assert.equal(s.windows[1]?.visible,true));await manager.refresh();const popup=s.windows[1];assert.ok(popup);assert.equal(sent.length,0);assert.equal(offlineAttempts,0)
+  await s.invoke('notice-window:painted',popup,n.id+':1');await until(()=>{assert.equal(offlineAttempts,1);assert.equal(persisted().displayed,true);assert.equal(persisted().displayAck,false)});assert.equal(sent.length,0)
+  failed=false;await s.invoke('notices:action',s.parent,n.id+':1','dismiss');await until(()=>{assert.deepEqual(sent.map(v=>v.state),['displayed','dismissed']);assert.equal(persisted().displayAck,true);assert.equal(persisted().dismissAck,true)});assert.equal(manager.snapshot().notices[0].dismissed,true);assert.equal(sent.length,2)
   manager.nextAttempt=0;await manager.refresh();assert.equal(popup.visible,false);assert.equal(manager.snapshot().notices[0].dismissed,true)
   assert.equal(s.opened.length,0);assert.equal(JSON.parse(readFileSync(s.h.directory+'/notification-receipts.json','utf8')).owners.A[n.id+':1'].dismissAck,true)
  }finally{s.parent.destroy()}

@@ -125,6 +125,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       if (!element.isConnected) { state.views.delete(element); continue }
       if (!adapter.validMessage(view.item)) continue
       view.node.style.display = runtimeStatus?.translationsVisible === false ? 'none' : ''
+      if (runtimeStatus?.localLanguage) view.node.lang = runtimeStatus.localLanguage
       if (state.text) { if (view.node.textContent !== state.text) view.node.textContent = state.text }
       else { view.button.textContent = state.work ? '翻译中…' : state.error ? '重试翻译' : state.retryAfter ? '等待翻译' : '翻译'; view.button.disabled = state.work === true }
     }
@@ -144,13 +145,18 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     }
     if (!state) { state = { views: new Map() }; messages.set(key, state) }
     const oldView = state.views.get(item.element)
-    if (!oldView?.node.isConnected || oldView.node.parentElement !== item.element) {
+    if (!oldView?.node.isConnected || oldView.node.parentElement !== item.content) {
       oldView?.node.remove(); const node = document.createElement('div'); node.dataset.hellodogVoice = 'translation'
-      node.style.cssText = 'font:13px/1.5 system-ui;color:#8abdaa;margin:5px 16px 9px;white-space:pre-wrap;overflow-wrap:anywhere;'
+      // Keep the original annotation/links untouched, with the translation
+      // below it inside the same native bubble (before the official timestamp).
+      // Inherit its foreground for readable light/dark and incoming/outgoing
+      // colors instead of applying a low-contrast fixed green to white pages.
+      node.dir = 'auto'; node.setAttribute('aria-label', '译文')
+      node.style.cssText = 'font:13px/1.55 system-ui;color:inherit;box-sizing:border-box;max-width:100%;min-width:0;margin:6px 0 0;padding:6px 0 0;border-top:1px solid color-mix(in srgb,currentColor 22%,transparent);white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;text-align:start;user-select:text;'
       const button = document.createElement('button'); button.type = 'button'; button.textContent = state.error ? '重试翻译' : '翻译'
-      button.style.cssText = 'font:12px system-ui;color:#3c8064;background:transparent;border:0;cursor:pointer;padding:3px 0;'
+      button.style.cssText = 'font:12px system-ui;color:inherit;background:transparent;border:0;cursor:pointer;padding:3px 0;'
       button.onclick = () => { void translateMessage(item, true) }
-      node.append(button); item.element.append(node); state.views.set(item.element, { node, button, item })
+      node.append(button); item.content.append(node); state.views.set(item.element, { node, button, item })
     } else oldView.item = item
     renderMessageViews(state)
     return state
