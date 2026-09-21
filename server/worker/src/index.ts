@@ -558,15 +558,27 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
   // time for durable settlement before the desktop's own request timeout.
   const translationDeadline = Date.now() + 20_000
   const url = new URL(request.url)
+  // This pre-authentication cap is per shared public IP (1,800/minute), not
+  // per account. Authenticated users retain the database's 180/minute cap and
+  // the separate translation concurrency/cost guards below.
   if (request.method !== 'OPTIONS' && !(request.method === 'GET' && url.pathname === '/health')) {
     if (!env.API_RATE_LIMITER || !(await env.API_RATE_LIMITER.limit({ key: await rateKey(request) })).success) return failure('rate_limited')
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.16', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, translationTargetBound: true, translationQuestionGuard: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.16', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, translationTargetBound: true, translationQuestionGuard: true, accountSnapshot: true, clientMeConsolidated: true, adminOverviewLightweight: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
   if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.15', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
+  if (request.method === 'GET' && url.pathname === '/api/me') {
+    // Keep authentication live, but combine the four subsequent database trips.
+    // The service-only RPC validates account status and rate limits before it
+    // reads the current wallet; neither balances nor authorization are cached.
+    const snapshot = await adminPost<{ profile: Awaited<ReturnType<typeof getProfile>>; wallet: Awaited<ReturnType<typeof getWallet>>; error?: 'rate_limited' }>(
+      env, '/rest/v1/rpc/client_me', { p_user_id: user.id })
+    if (snapshot.error) return failure(snapshot.error)
+    return json({ user: { id: user.id, email: user.email || null }, profile: snapshot.profile, wallet: snapshot.wallet })
+  }
   const profile = await getProfile(env, user.id)
   if (!profile || profile.status !== 'active') return failure('account_disabled')
   if (!await adminPost<boolean>(env, '/rest/v1/rpc/security_rate_limit', { p_user_id: user.id, p_scope: 'api' })) return failure('rate_limited')
@@ -577,10 +589,6 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
     return json(await adminPost(env,'/rest/v1/rpc/client_notice_receipt',{p_user_id:user.id,p_notice_id:body.id,p_revision:body.revision,p_state:body.state}))
   }
 
-  if (request.method === 'GET' && url.pathname === '/api/me') {
-    await adminPost(env,'/rest/v1/rpc/touch_client_presence',{p_user_id:user.id}).catch(()=>null)
-    return json({ user: { id: user.id, email: user.email || null }, profile, wallet: await getWallet(env, user.id) })
-  }
   if (request.method === 'GET' && url.pathname === '/api/wallet') {
     return json({ wallet: await getWallet(env, user.id) })
   }

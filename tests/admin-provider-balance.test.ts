@@ -9,12 +9,13 @@ let bundle:string;before(async()=>{bundle=await adminCostsBundle()})
 const tick=async()=>{for(let i=0;i<4;i++)await new Promise(resolve=>setTimeout(resolve,0))}
 async function mount(options:{access?:boolean;request?:(path:string,body?:unknown)=>unknown}={}) {
   const dom=new JSDOM('<!doctype html><html><head></head><body><div id="app"></div></body></html>',{url:'https://admin.example.invalid/admin/costs',runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window as any,calls:string[]=[],timers=new Map<number,{fn:()=>void;ms:number}>();let timerId=0
+  let now=Date.now();const RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[now]))}static now(){return now}}
   w.__officialAccess=options.access!==false
   w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id)
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
   w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
   w.eval(bundle);await tick()
-  return {dom,w,calls,timers,body:()=>w.document.body.textContent as string,run:(ms:number)=>{for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
+  return {dom,w,calls,timers,body:()=>w.document.body.textContent as string,advance:(ms:number)=>{now+=ms},run:(ms:number)=>{now+=ms;for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
 }
 test('official USD/CNY amounts retain every decimal digit and reject numeric or invented currencies',()=>{
   assert.equal(currencyAmount('999999999999.999999999999','USD'),'USD 999,999,999,999.999999999999')
@@ -46,7 +47,7 @@ test('30-second visible checks and the manual button share one guarded request a
     h.run(30000);h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(balanceCalls,1)
     assert.equal(h.w.document.querySelector('.adm-funding-heading button').disabled,true)
     resolveBalance!(balanceFixture());await tick();assert.match(h.body(),/USD 1,234\.123456789012/)
-    h.run(10000);await tick();assert.match(h.body(),/USD 1,234\.123456789012/);assert.doesNotMatch(h.body(),/999999999999/)
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.body(),/USD 1,234\.123456789012/);assert.doesNotMatch(h.body(),/999999999999/)
     Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});h.run(30000);await tick();assert.equal(balanceCalls,1)
     Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));await tick();assert.equal(balanceCalls,2)
     resolveBalance!(balanceFixture());await tick()
@@ -57,7 +58,7 @@ test('a failed refresh retains the sampled amount and time, then reconnect recov
   const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?fail?Promise.reject(Error('暂时无法连接')):sampled:{configured:true}})
   try{
     fail=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/上次核对的资金数据/);assert.match(h.body(),/2026-09-15 01:00:00 UTC/);assert.match(h.body(),/USD 1,234\.123456789012/)
-    fail=false;sampled.balances[0].total='1234.000000000001';sampled.fetchedAt=new Date().toISOString();h.w.dispatchEvent(new h.w.Event('online'));await tick();assert.match(h.body(),/USD 1,234\.000000000001/);assert.doesNotMatch(h.body(),/暂时无法连接/)
+    fail=false;sampled.balances[0].total='1234.000000000001';sampled.fetchedAt=new Date().toISOString();h.advance(60000);h.w.dispatchEvent(new h.w.Event('online'));await tick();assert.match(h.body(),/USD 1,234\.000000000001/);assert.doesNotMatch(h.body(),/暂时无法连接/)
   }finally{h.close()}
 })
 test('explicit absent account data clears old balance and a role change cannot receive an in-flight private balance',async()=>{
@@ -75,7 +76,7 @@ test('cost-reader roles make no owner-only balance or official-bill requests',as
 test('background cost refresh preserves the submitted filter until Query is pressed',async()=>{
   const h=await mount();try{
     const input=h.w.document.querySelector('input[type=date]');input.value='2026-01-01';input.dispatchEvent(new h.w.Event('input',{bubbles:true}));await tick()
-    const previous=h.calls.filter(p=>p.startsWith('costs?')).at(-1);h.run(10000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),previous)
+    const previous=h.calls.filter(p=>p.startsWith('costs?')).at(-1);h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),previous)
     h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.calls.filter(p=>p.startsWith('costs?')).at(-1)!,/from=2026-01-01/)
   }finally{h.close()}
 })

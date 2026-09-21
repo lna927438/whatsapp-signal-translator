@@ -13,6 +13,7 @@ import AdminMfa from './AdminMfa.vue'
 import AdminSecurity from './AdminSecurity.vue'
 import {fundingDecimal} from './providerFunding'
 import {usd,tokens} from './client'
+import {ReadPolling} from './readPolling'
 
 const route=useRoute(),router=useRouter()
 const mfaOpen=ref(false)
@@ -34,11 +35,13 @@ const costsPanel=ref<InstanceType<typeof AdminCosts>|null>(null)
 let loadRevision=0,detailRevision=0
 let readScope=''
 let refreshTimer:ReturnType<typeof setInterval>|undefined
+const readPolling=new ReadPolling(15000)
+let liveRefreshing=false
 function overviewCount(value:unknown,suffix=''){
   const count=typeof value==='number'?value:typeof value==='string'&&/^\d+$/.test(value)?Number(value):NaN
   return Number.isSafeInteger(count)&&count>=0?fmt(count)+suffix:busy.value?'读取中…':'尚未取得'
 }
-function clearReadData(){rows.value=[];overview.value={};snapshot.value='';hasMore.value=false;readScope=''}
+function clearReadData(){rows.value=[];overview.value={};snapshot.value='';hasMore.value=false;readScope='';readPolling.reset()}
 const write=(scope:'users'|'billing'|'content'|'roles')=>Boolean(session.value&&canWrite(session.value.role,scope))
 const isSearch=computed(()=>['users','translations','orders','audit'].includes(active.value))
 const filters=computed(()=>active.value==='users'?['active','blocked']:active.value==='translations'?['matched','mismatch','pending','not_charged','cache','free']:active.value==='orders'?['pending','paid','cancelled','failed']:[])
@@ -59,8 +62,9 @@ const columns=computed<Column[]>(()=>{
 async function signIn(){loginBusy.value=true;loginError.value='';try{session.value=await login(email.value,password.value,testRole.value);password.value='';pending.value=loadPending(session.value.id);await router.replace('/admin/overview');await load()}catch(e){loginError.value=message(e)}finally{loginBusy.value=false}}
 async function signOut(){++loadRevision;++detailRevision;mfaOpen.value=false;password.value='';session.value=null;clearReadData();detail.value=null;pending.value=null;busy.value=false;error.value='';loginError.value='';notice.value='';await logout();await router.replace('/admin/login')}
 function message(e:unknown){return e instanceof Error?e.message:'暂时无法完成，请重试。'}
-async function load(){
-  if(!session.value)return
+async function load(automatic:unknown=false){
+  const passive=automatic===true
+  if(!session.value||(passive&&(!readPolling.due()||document.visibilityState!=='visible')))return
   const revision=++loadRevision,sectionId=active.value,identity=session.value.id+':'+session.value.role
   const filters={q:query.value,status:status.value,offset:offset.value}
   const scope=JSON.stringify([identity,sectionId,filters])
@@ -72,13 +76,13 @@ async function load(){
   try{
     if(sectionId==='overview'){
       // The billing card owns its errors and loading state; it must not delay these independent statistics.
-      void overviewBilling.value?.refresh()
+      void overviewBilling.value?.refresh(!passive)
       const data=await request<Row>('overview')
       if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('总览数据尚未取得，请稍后刷新。')
-      if(current()){overview.value=data;snapshot.value=Number.isFinite(Date.parse(s(data,'snapshotAt')))?s(data,'snapshotAt'):'';error.value=''}
+      if(current()){overview.value=data;snapshot.value=Number.isFinite(Date.parse(s(data,'snapshotAt')))?s(data,'snapshotAt'):'';error.value='';readPolling.succeeded()}
     }
-    else {const data=await readPage(sectionId,filters);if(current()){rows.value=data.rows;hasMore.value=data.hasMore;snapshot.value=data.snapshotAt;error.value=''}}
-  }catch(e){if(current()){error.value=message(e);if(e instanceof ApiError&&['unauthorized','admin_forbidden'].includes(e.code)){session.value=null;clearReadData();detail.value=null;loginError.value=message(e)}}}
+    else {const data=await readPage(sectionId,filters);if(current()){rows.value=data.rows;hasMore.value=data.hasMore;snapshot.value=data.snapshotAt;error.value='';readPolling.succeeded()}}
+  }catch(e){if(current()){readPolling.failed();error.value=message(e);if(e instanceof ApiError&&['unauthorized','admin_forbidden'].includes(e.code)){session.value=null;clearReadData();detail.value=null;loginError.value=message(e)}}}
   finally{if(revision===loadRevision)busy.value=false}
 }
 async function search(){offset.value=0;await load()}
@@ -223,13 +227,16 @@ const ledgerColumns:Column[]=[{key:'type',title:'类型',format:r=>label(r.type)
 const deviceColumns:Column[]=[{key:'device_name',title:'设备'},{key:'platform',title:'系统'},{key:'app_version',title:'版本'},{key:'status',title:'状态',format:r=>label(r.status)},{key:'last_seen_at',title:'上次登记',format:r=>date(r.last_seen_at)}]
 onMounted(async()=>{window.addEventListener('hellodog:admin-mfa',needMfa);try{await adminMfaStatus();session.value=await request<AdminSession>('session');pending.value=loadPending(session.value.id);if(active.value==='login')await router.replace('/admin/overview');booting.value=false;await load()}catch(e){if(e instanceof ApiError&&!['unauthorized','not_configured','mfa_required'].includes(e.code))loginError.value=message(e)}finally{booting.value=false}})
 async function refreshLive(){
-  if(!session.value||busy.value||document.visibilityState!=='visible'||['costs','account'].includes(active.value))return
-  await load()
-  const id=s(profile.value,'id'),revision=detailRevision
-  if(id&&!editor.value&&!saving.value){try{const value=await request<Row>('user?userId='+encodeURIComponent(id));if(revision===detailRevision&&detail.value)detail.value=value}catch(e){detailError.value=message(e)}}
+  if(!session.value||busy.value||liveRefreshing||!readPolling.due()||document.visibilityState!=='visible'||['costs','account','security'].includes(active.value))return
+  liveRefreshing=true
+  try{
+    await load(true)
+    const id=s(profile.value,'id'),revision=detailRevision
+    if(!error.value&&id&&!editor.value&&!saving.value){try{const value=await request<Row>('user?userId='+encodeURIComponent(id));if(revision===detailRevision&&detail.value)detail.value=value}catch(e){detailError.value=message(e)}}
+  }finally{liveRefreshing=false}
 }
-onMounted(()=>{refreshTimer=setInterval(()=>void refreshLive(),5000)})
-onUnmounted(()=>{++loadRevision;++detailRevision;clearInterval(refreshTimer);window.removeEventListener('hellodog:admin-mfa',needMfa)})
+onMounted(()=>{refreshTimer=setInterval(()=>void refreshLive(),15000);document.addEventListener('visibilitychange',refreshLive);window.addEventListener('online',refreshLive)})
+onUnmounted(()=>{++loadRevision;++detailRevision;clearInterval(refreshTimer);document.removeEventListener('visibilitychange',refreshLive);window.removeEventListener('online',refreshLive);window.removeEventListener('hellodog:admin-mfa',needMfa)})
 </script>
 
 <template>
@@ -259,7 +266,7 @@ onUnmounted(()=>{++loadRevision;++detailRevision;clearInterval(refreshTimer);win
           <div v-if="error" class="adm-error" role="alert">{{ error }}<button class="adm-button" :disabled="busy" @click="load">重新加载</button><small v-if="snapshot">读取失败，保留上次数据，可能已过期：{{ date(snapshot) }}</small><small v-else>尚未取得的数据不会显示为零。</small></div>
           <template v-if="active==='overview'">
             <section class="adm-stat-grid"><article class="adm-overview-users" :aria-busy="busy"><span>客户端用户</span><strong>{{ overviewCount(overview.users) }}</strong><small>最近 2 分钟联机：{{overviewCount(overview.recentClients,' 位')}}</small></article><article class="adm-overview-today" :aria-busy="busy"><span>今日已扣字符</span><strong>{{overviewCount(overview.todayCharacters)}}</strong><small>今日 GMT+8 · 云端实际流水</small></article><AdminOverviewBilling ref="overviewBilling" :key="session.id+':'+session.role" :identity="session.id+':'+session.role" :can-read-costs="canView(session.role,'costs')" :official-access="session.role==='owner'" /></section>
-            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink v-if="canView(session.role,'costs')" to="/admin/costs">查看用量与资金 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list" :aria-busy="busy"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>每 5 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{overviewCount(overview.pendingTranslations,' 条')}}</dd></div><div><dt>翻译对账异常</dt><dd>{{overviewCount((overview.costs as Row)?.mismatches,' 条')}}</dd></div></dl><p class="adm-help">今日字符按 GMT+8、本月字符按 UTC 统计。DeepSeek 金额为当前账号累计资金，不随日期筛选变化；历史账期账单保留在用量与费用中。</p></article></section>
+            <section class="adm-overview-grid"><article class="adm-card"><h2>用户管理</h2><p>添加的字符写入客户端共用的钱包。客户端连接正常时，约 5 秒内刷新余额。</p><div class="adm-shortcuts"><RouterLink to="/admin/users">查找用户 · 添加字符 <span>↗</span></RouterLink><RouterLink to="/admin/translations">查看翻译记录 <span>↗</span></RouterLink><RouterLink v-if="canView(session.role,'costs')" to="/admin/costs">查看用量与资金 <span>↗</span></RouterLink></div></article><article class="adm-card"><h2>当前数据</h2><dl class="adm-status-list" :aria-busy="busy"><div><dt>来源</dt><dd>{{localPreview?'本机样例数据库':'客户端共用云端数据库'}}</dd></div><div><dt>刷新频率</dt><dd>总览约 15 秒 · 用量约 30 秒</dd></div><div><dt>等待结果的翻译</dt><dd>{{overviewCount(overview.pendingTranslations,' 条')}}</dd></div><div><dt>翻译对账异常</dt><dd>{{overviewCount((overview.costs as Row)?.mismatches,' 条')}}</dd></div></dl><p class="adm-help">今日字符按 GMT+8、本月字符按 UTC 统计。DeepSeek 金额为当前账号累计资金，不随日期筛选变化；历史账期账单保留在用量与费用中。</p></article></section>
           </template>
           <AdminCosts v-else-if="active==='costs'" ref="costsPanel" :key="session.id+':'+session.role" :official-access="session.role==='owner'" @reconcile="reconcile" @funding="fundingConfirm" />
           <AdminAccount v-else-if="active==='account'" :session="session" />

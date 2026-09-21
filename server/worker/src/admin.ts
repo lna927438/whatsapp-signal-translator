@@ -5,7 +5,7 @@ import {currentOfficialBillScopes,officialReportingBasis} from './officialBillSc
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
-  rpc(name: 'admin_read' | 'admin_mutate' | 'admin_security_overview', args: JsonObject): Promise<unknown>
+  rpc(name: 'admin_read' | 'admin_mutate' | 'admin_security_overview' | 'admin_overview', args: JsonObject): Promise<unknown>
   securityEvent?(actor:string,code:string):Promise<void>
   origins: readonly string[]
   providerBalance?():Promise<unknown>
@@ -189,6 +189,9 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
       if(filter.userId && !uuid.test(filter.userId))fail()
       if(kind==='user' && !filter.userId)fail()
       if(kind==='operation' && !uuid.test(filter.operationId||''))fail()
+      // Overview needs only its visible counters, not the full cost report.
+      // The service-only RPC still applies the same database admin-access check.
+      if(kind==='overview')return json(await services.rpc('admin_overview',{p_actor:actor}))
       return json(await services.rpc('admin_read',{p_actor:actor,p_kind:kind,p_filter:filter}))
     }
     if(request.method==='POST' && kind==='mutate') {

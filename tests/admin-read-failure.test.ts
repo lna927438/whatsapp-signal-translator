@@ -16,6 +16,7 @@ async function mount(request:(path:string)=>unknown){
   const errors:string[]=[],console=new VirtualConsole();console.on('jsdomError',error=>errors.push(error.message))
   const dom=new JSDOM('<!doctype html><html><head></head><body><div id="app"></div></body></html>',{url:'https://admin.example.invalid/admin/overview',runScripts:'outside-only',pretendToBeVisual:true,virtualConsole:console}),w=dom.window as any
   const timers=new Map<number,()=>void>();let timerId=0
+  let now=Date.now();const RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[now]))}static now(){return now}}
   w.__session={id:'fixture-owner',email:'owner@example.invalid',role:'owner'}
   w.setInterval=(fn:()=>void)=>{timers.set(++timerId,fn);return timerId};w.clearInterval=(id:number)=>timers.delete(id);w.scrollTo=()=>{}
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
@@ -28,7 +29,7 @@ async function mount(request:(path:string)=>unknown){
   const find=(selector:string)=>w.document.querySelector(selector)
   return {w,errors,find,body:()=>w.document.body.textContent as string,
     refresh:()=>{find('.adm-heading button').click()},
-    poll:()=>{for(const fn of timers.values())fn()},
+    poll:()=>{now+=15000;for(const fn of timers.values())fn()},
     navigate:async(path:string)=>{await w.__navigate(path);await tick()},
     close:()=>{w.__dispose();dom.window.close()}}
 }

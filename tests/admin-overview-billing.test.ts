@@ -44,16 +44,16 @@ test('real parent overview and costs share lifetime 20 / 19.70 / 0.30 funds, ind
   await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.30/);assert.deepEqual(h.errors,[])
  }finally{h.close()}
 })
-test('parent five-second usage refresh checks funds every thirty seconds; manual funding refresh is immediate',async()=>{
+test('parent fifteen-second overview refresh checks usage and funds every thirty seconds; manual funding refresh is immediate',async()=>{
  let now=initialTime;const h=await mount({now:()=>now});try{
-  assert.equal([...h.timers.values()].filter(timer=>timer.ms===5000).length,1)
+  assert.equal([...h.timers.values()].filter(timer=>timer.ms===15000).length,1)
   const count=()=>h.calls.filter(p=>p==='provider-balance').length;assert.equal(count(),1)
-  now+=5000;h.run(5000);await tick();assert.equal(count(),1)
-  now+=25000;h.run(5000);await tick();assert.equal(count(),2)
+  now+=15000;h.run(15000);await tick();assert.equal(count(),1)
+  now+=15000;h.run(15000);await tick();assert.equal(count(),2)
   h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(count(),3)
-  Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});now+=30000;h.run(5000);await tick();assert.equal(count(),3)
-  Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});await h.navigate('/admin/costs');const reads=count();h.run(30000);await tick();assert.equal(count(),reads+1)
-  const usage=h.calls.filter(p=>p.startsWith('costs?')).length;h.run(10000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).length,usage+1)
+  Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});now+=30000;h.run(15000);await tick();assert.equal(count(),3)
+  Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});await h.navigate('/admin/costs');const reads=count();now+=30000;h.run(30000);await tick();assert.equal(count(),reads+1)
+  const usage=h.calls.filter(p=>p.startsWith('costs?')).length;now+=30000;h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).length,usage+1)
  }finally{h.close()}
 })
 test('missing monthly bills or changed calendar periods never erase current account funds',async()=>{
@@ -68,7 +68,7 @@ test('failure retains prior funds and usage with stale labels; first-read unknow
  const h=await mount({mode:'component',now:()=>now,request:path=>{if(fail)throw Error('synthetic offline');return path==='provider-balance'?fundingBalanceFixture(now):snapshot(path,now)}})
  try{
   fail=true;now+=30000;await h.refresh();await tick();assert.match(h.official().textContent,/\$0\.30/);assert.match(h.official().textContent,/上次核对的资金数据/);assert.match(h.characters().textContent,/保留上次数据/)
-  fail=false;now+=30000;await h.refresh();await tick();assert.doesNotMatch(h.official().textContent,/offline|上次核对/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
+  fail=false;now+=60000;await h.refresh();await tick();assert.doesNotMatch(h.official().textContent,/offline|上次核对/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
  }finally{h.close()}
  const empty=await mount({mode:'component',request:()=>{throw Error('offline')}});try{assert.match(empty.characters().textContent,/尚未取得/);assert.equal(empty.official().querySelector('.adm-cost-value'),null);assert.doesNotMatch(empty.official().textContent,/\$0/)}finally{empty.close()}
 })

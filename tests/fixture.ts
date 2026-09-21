@@ -62,6 +62,7 @@ const signatures: Record<string, string[]> = {
   client_notices: ['p_user_id'],
   client_notice_receipt: ['p_user_id','p_notice_id','p_revision','p_state'],
   touch_client_presence: ['p_user_id'],
+  client_me: ['p_user_id'],
   translation_status: ['p_user_id', 'p_request_id'],
   verify_original_translation: ['p_user_id','p_request_id','p_payload_hashes','p_characters'],
   account_snapshot: ['p_user_id'],

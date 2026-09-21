@@ -4,6 +4,7 @@ import {request,fmt,localPreview,type Row} from './client'
 import {currentBillPeriod,enabledBillProviders} from './officialBills'
 import {parseProviderBalance,utcTimestamp,type ProviderBalance} from './providerBalance'
 import ProviderFundingCard from './ProviderFundingCard.vue'
+import {ReadPolling} from './readPolling'
 
 const props=defineProps<{identity:string;canReadCosts:boolean;officialAccess:boolean}>()
 const data=ref<Row>({}),busy=ref(false),error=ref(''),clock=ref(Date.now())
@@ -17,14 +18,15 @@ const characters=computed(()=>{
  const amount=typeof value==='number'?value:typeof value==='string'&&/^\d+$/.test(value)?Number(value):NaN
  return Number.isSafeInteger(amount)&&amount>=0?amount:null
 })
-let revision=0,balanceRevision=0,lastBalanceAttempt:number|null=null,disposed=false,again=false,inFlight:Promise<void>|undefined
+let revision=0,balanceRevision=0,disposed=false,again=false,inFlight:Promise<void>|undefined
+const readPolling=new ReadPolling(30000),balancePolling=new ReadPolling(30000)
 const denied=(e:unknown)=>Boolean(e&&typeof e==='object'&&'code' in e&&['unauthorized','admin_forbidden'].includes(String(e.code)))
-function clearBalance(){++balanceRevision;balance.value=null;balanceError.value='';balanceBusy.value=false;lastBalanceAttempt=null}
+function clearBalance(){++balanceRevision;balance.value=null;balanceError.value='';balanceBusy.value=false;balancePolling.reset()}
 async function readBalance(force=true){
- if(disposed||!props.canReadCosts||!props.officialAccess||!deepseekEnabled.value||localPreview||balanceBusy.value||(!force&&lastBalanceAttempt!==null&&Date.now()-lastBalanceAttempt<30000))return
- const version=++balanceRevision,identity=props.identity;lastBalanceAttempt=Date.now();balanceBusy.value=true;balanceError.value=''
- try{const result=parseProviderBalance(await request<unknown>('provider-balance'));if(!disposed&&version===balanceRevision&&identity===props.identity&&props.officialAccess){balance.value=result;balanceReadAt.value=Date.now()}}
- catch(e){if(!disposed&&version===balanceRevision&&identity===props.identity){if(denied(e))balance.value=null;balanceError.value=e instanceof Error?e.message:'暂时无法读取资金。'}}
+ if(disposed||!props.canReadCosts||!props.officialAccess||!deepseekEnabled.value||localPreview||balanceBusy.value||(!force&&(!balancePolling.due()||document.visibilityState!=='visible')))return
+ const version=++balanceRevision,identity=props.identity;balanceBusy.value=true;balanceError.value=''
+ try{const result=parseProviderBalance(await request<unknown>('provider-balance'));if(!disposed&&version===balanceRevision&&identity===props.identity&&props.officialAccess){balance.value=result;balanceReadAt.value=Date.now();balancePolling.succeeded()}}
+ catch(e){if(!disposed&&version===balanceRevision&&identity===props.identity){balancePolling.failed();if(denied(e))balance.value=null;balanceError.value=e instanceof Error?e.message:'暂时无法读取资金。'}}
  finally{if(!disposed&&version===balanceRevision){balanceBusy.value=false;clock.value=Date.now()}}
 }
 function matchesPeriod(value:Row,period:typeof queried.value){
@@ -33,11 +35,12 @@ function matchesPeriod(value:Row,period:typeof queried.value){
   &&Date.parse(String(value.toExclusive))===Date.parse(period.to+'T00:00:00Z')+86400000
   &&Number.isFinite(Date.parse(String(value.snapshotAt)))
 }
-async function refresh():Promise<void>{
+async function refresh(force=true):Promise<void>{
  clock.value=Date.now()
  if(disposed||!props.canReadCosts)return
  void readBalance(false)
- if(inFlight){again=true;return inFlight}
+ if(inFlight){if(force)again=true;return inFlight}
+ if(!force&&(!readPolling.due()||document.visibilityState!=='visible'))return
  const version=++revision,identity=props.identity
  const selected={...currentBillPeriod('UTC'),timezone:'UTC',provider:''}
  busy.value=true
@@ -47,11 +50,11 @@ async function refresh():Promise<void>{
    if(disposed||version!==revision||identity!==props.identity||!props.canReadCosts)return
    if(!matchesPeriod(result,selected))throw new Error('账期数据尚未核实，请稍后刷新。')
    data.value=props.officialAccess?result:{...result,officialBills:[]}
-   queried.value=selected;clock.value=Date.now();error.value=''
+   queried.value=selected;clock.value=Date.now();error.value='';readPolling.succeeded()
    if(!deepseekEnabled.value)clearBalance()
   }catch(e){
    if(!disposed&&version===revision&&identity===props.identity){
-    if(denied(e)){data.value={};clearBalance()}
+    readPolling.failed();if(denied(e)){data.value={};clearBalance()}
     error.value=e instanceof Error?e.message:'暂时无法读取本月数据。'
    }
   }finally{if(!disposed&&version===revision)busy.value=false}
@@ -66,7 +69,7 @@ async function refresh():Promise<void>{
  }
 }
 watch(()=>[props.identity,props.canReadCosts,props.officialAccess],()=>{
- ++revision;inFlight=undefined;again=false;data.value={};error.value='';busy.value=false
+ ++revision;inFlight=undefined;again=false;data.value={};error.value='';busy.value=false;readPolling.reset()
  clearBalance()
  queried.value={...currentBillPeriod('UTC'),timezone:'UTC',provider:''}
  void refresh()

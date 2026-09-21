@@ -6,7 +6,7 @@
   "workers_dev": true,
   "preview_urls": true,
   "observability": { "enabled": true, "head_sampling_rate": 0.1 },
-  "ratelimits": [{ "name": "API_RATE_LIMITER", "namespace_id": "105801", "simple": { "limit": 180, "period": 60 } }],
+  "ratelimits": [{ "name": "API_RATE_LIMITER", "namespace_id": "105801", "simple": { "limit": 1800, "period": 60 } }],
   "triggers": { "crons": ["17 * * * *", "*/5 * * * *"] },
   "vars": {
     "TRANSLATION_PROVIDER": "deepseek",

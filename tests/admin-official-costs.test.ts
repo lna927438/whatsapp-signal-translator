@@ -63,12 +63,12 @@ let bundle:string;before(async()=>{bundle=await adminCostsBundle()})
 const tick=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0))}
 async function mount(options:{access?:boolean;now?:()=>number;request?:(path:string,body?:unknown)=>unknown}={}){
   const dom=new JSDOM('<!doctype html><html><head></head><body><div id="app"></div></body></html>',{url:'https://admin.example.invalid/admin/costs',runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window as any,calls:string[]=[],timers=new Map<number,{fn:()=>void;ms:number}>();let timerId=0
-  if(options.now){const RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[options.now!()]))}static now(){return options.now!()}}}
+  let localNow=Date.now();const now=options.now||(()=>localNow),RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[now()]))}static now(){return now()}}
   w.__officialAccess=options.access!==false;w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id)
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
   w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
   w.eval(bundle);await tick()
-  return {w,calls,card:()=>w.document.querySelector('.adm-official-breakdown'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
+  return {w,calls,card:()=>w.document.querySelector('.adm-official-breakdown'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{localNow+=ms;for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
 }
 test('historical breakdown retains each provider bill and missing-period labels, with local evidence collapsed',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data)]
@@ -78,9 +78,9 @@ test('historical breakdown retains each provider bill and missing-period labels,
     assert.doesNotMatch(h.card().textContent,/0\.123456789012|987654321/)
     assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/0\.123456789012/)
     assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/官方账单不能直接分摊到每个用户/)
-    data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(10000);await tick()
+    data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(30000);await tick()
     assert.match(h.card().textContent,/\$0\.0329117/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/官方账单 · 手动录入/)
-    data.officialBills=[];h.run(10000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
+    data.officialBills=[];h.run(30000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
   }finally{h.close()}
 })
 
@@ -108,7 +108,7 @@ test('official sync refreshes historical bill details immediately even when a ba
   const h=await mount({request:path=>path.startsWith('costs?')?(++count===1?old:count===2?new Promise(resolve=>{resolveRead=resolve}):updated):path==='billing-sync'?new Promise(resolve=>{resolveSync=resolve}):path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单') as HTMLButtonElement
-    button.click();await tick();h.run(10000);await tick();resolveSync({message:'已同步'});await tick();resolveRead(old);await tick()
+    button.click();await tick();h.run(30000);await tick();resolveSync({message:'已同步'});await tick();resolveRead(old);await tick()
     assert.equal(count,3);assert.match(h.card().textContent,/\$0\.20/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/)
   }finally{h.close()}
 })
@@ -119,10 +119,10 @@ test('default current-month queries follow UTC midnight and month rollover; manu
     assert.match(h.calls.find(path=>path.startsWith('costs?'))!,/from=2026-09-01&to=2026-09-30/)
     const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
     assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-09-01&to=2026-09-30/,'A business timezone change cannot move the default official calendar month')
-    now=Date.parse('2026-10-01T00:00:03Z');h.run(10000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-10-01&to=2026-10-01/)
+    now=Date.parse('2026-10-01T00:00:33Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-10-01&to=2026-10-01/)
     const inputs=h.w.document.querySelectorAll('input[type=date]');inputs[0].value='2026-08-01';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[1].value='2026-08-31';inputs[1].dispatchEvent(new h.w.Event('input',{bubbles:true}))
     h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-    now=Date.parse('2026-10-02T00:00:03Z');h.run(10000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-08-01&to=2026-08-31/)
+    now=Date.parse('2026-10-02T00:00:03Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-08-01&to=2026-08-31/)
   }finally{h.close()}
 })
 test('OpenAI current-day sync delay remains visible after GMT+8 midnight under a GMT+8 business filter',async()=>{
@@ -183,9 +183,9 @@ test('a failed manual sync clears only after a newer matching OpenAI API snapsho
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement
     button.click();await tick();assert.match(h.body(),/同步未完成，已保留上次结果/)
-    now+=2000;data.snapshotAt=new Date(now).toISOString();data.officialBills[1].fetched_at=new Date(now).toISOString();h.run(10000);await tick()
+    now+=30000;data.snapshotAt=new Date(now).toISOString();data.officialBills[1].fetched_at=new Date(now).toISOString();h.run(30000);await tick()
     assert.match(h.body(),/同步未完成，已保留上次结果/)
-    now+=2000;data.snapshotAt=new Date(now).toISOString();data.officialBills[0].fetched_at=new Date(now).toISOString();h.run(10000);await tick()
+    now+=30000;data.snapshotAt=new Date(now).toISOString();data.officialBills[0].fetched_at=new Date(now).toISOString();h.run(30000);await tick()
     assert.doesNotMatch(h.body(),/同步未完成，已保留上次结果/);assert.match(h.body(),/OpenAI 官方账单已恢复同步/)
     assert.match(h.card().textContent,/\$0\.20/)
   }finally{h.close()}

@@ -20,7 +20,7 @@ export async function adminOverviewBundle(mode:'app'|'component'='app'):Promise<
     import {createApp,h,reactive,ref} from 'vue';import AdminOverviewBilling from './AdminOverviewBilling.vue';
     const props=reactive({identity:'fixture-owner',canReadCosts:true,officialAccess:true,...window.__props}),component=ref();
     const app=createApp({render:()=>h(AdminOverviewBilling,{...props,ref:component})});app.mount('#app');
-    window.__setProps=value=>Object.assign(props,value);window.__refreshOverview=()=>component.value.refresh();window.__dispose=()=>app.unmount();
+    window.__setProps=value=>Object.assign(props,value);window.__refreshOverview=force=>component.value.refresh(force);window.__dispose=()=>app.unmount();
   `
   const result=await build({stdin:{sourcefile:'admin-overview-fixture.ts',resolveDir:admin,contents:entry},bundle:true,write:false,format:'iife',platform:'browser',target:'es2022',define:{'process.env.NODE_ENV':'"production"','import.meta.env.MODE':'"test"','__VUE_OPTIONS_API__':'true','__VUE_PROD_DEVTOOLS__':'false','__VUE_PROD_HYDRATION_MISMATCH_DETAILS__':'false'},plugins:[{
     name:'real-overview-with-synthetic-transport',setup(build:any){
