@@ -100,3 +100,35 @@ test('an untrusted conversation cannot authorize an assistant claim or enter sys
   assert.ok(!calls[0].instructions.includes(context[0].text))
   assert.deepEqual(JSON.parse(calls[0].input),{source_language:'en-US',target_language:'zh-CN',context:[{direction:'incoming',text:context[0].text}],current_message:source})
 })
+
+test('an English send stays English even with Chinese context, and replay settles once', async () => {
+  const text = 'And you?'
+  output=body=>success(body.instructions.includes('OUTPUT LANGUAGE is American English') ? text : '那你呢？')
+  const patch={text,sourceLanguage:'auto',targetLanguage:'en-US',context:[{role:'incoming',text:'你喜欢旅行吗？'}]}
+  const result=await translate('send-sd-target-regression',patch)
+  assert.equal(result.status,200);assert.equal(result.body.translation,text)
+  assert.equal(calls.length,1);assert.equal(await debits(),1)
+  assert.equal((await wallet(db)).lifetime_debited,Array.from(text).length)
+  assert.deepEqual(await translate('send-sd-target-regression',patch),result)
+  assert.equal(calls.length,1);assert.equal(await debits(),1)
+})
+
+for (const response of ['市场目前充满不确定性，需要谨慎。','我认为应该等一等。你怎么看？']) {
+  test('a question answered without an AI disclaimer is corrected before charging: '+response, async () => {
+    output=body=>success(body.instructions.includes('A previous translation was rejected:') ? good : response)
+    const result=await translate('semantic-question-preserved')
+    assert.equal(result.status,200);assert.equal(result.body.translation,good)
+    assert.equal(calls.length,2);assert.equal(await debits(),1)
+    assert.deepEqual((await evidence()).map(x=>x.error_code),['provider_not_translation',null])
+  })
+}
+
+test('a repeated impersonal answer fails with no debit and no indefinite model retries', async () => {
+  output=()=>success('市场目前充满不确定性，需要谨慎。')
+  const result=await translate('semantic-impersonal-failed')
+  assert.equal(result.status,502);assert.equal(result.body.error,'provider_not_translation')
+  assert.equal(calls.length,2);assert.equal(await debits(),0)
+  assert.equal((await wallet(db)).reserved_characters,0)
+  assert.deepEqual(await translate('semantic-impersonal-failed'),result)
+  assert.equal(calls.length,2)
+})

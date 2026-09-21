@@ -27,6 +27,35 @@ function firstPersonAnswer(value: string): boolean {
   return !/[?？]|(?:什么|怎么|如何|多少|是否|吗|呢)[，。！\s]*$/u.test(text)
 }
 
+/** Clear, single questions cannot become an answer. Keep this deliberately
+ * limited to English/Chinese, and exclude quotations/multi-sentence sources
+ * whose faithful translation may reorder a statement before its question. */
+function lostQuestion(source: string, result: string): boolean {
+  const original = source.trim()
+  if (/["“”「」『』;；]|[.!。！?？]\s*\p{L}|(?:^|[\s,:])'[^']+'|[,，]\s*(?:i\b|我)/iu.test(original)) return false
+  const englishQuestion = /^(?:what|why|how|when|where|which|who)\s+(?!a\b|an\b|you\b|your\b)(?:[^.!?\n,;]{0,100}\s)?(?:is|are|was|were|do|does|did|have|has|will|would|can|could)\s+(?:you|your)\b/iu.test(original)
+    || /^(?:do|does|did|is|are|was|were|has|have|will)\s+you\b/iu.test(original)
+  const chineseQuestion = /^(?:请问[，,]?\s*)?你/u.test(original)
+    && /什么|为何|为什么|怎么|如何|多少|哪|是否|[吗呢么][?？。！\s]*$/u.test(original)
+  if (!englishQuestion && !chineseQuestion) return false
+  const translated = result.trim()
+  const letters = translated.match(/\p{L}/gu) || []
+  const han = translated.match(/\p{Script=Han}/gu) || []
+  const evidence = detectLanguageEvidence(translated)
+  const english = evidence.language?.startsWith('en')
+    || !evidence.language && !/[^\x00-\x7f]/u.test(letters.join(''))
+      && /^(?:i\s|my\s|(?:yes|no|sure)[,\s]+(?:i|we)\s|this\s|that\s|we\s|in my\s|sure[,.!\s]*$)/iu.test(translated)
+  if (!(han.length >= 2 && han.length / letters.length > .85) && !english) return false
+  const ending = /[.!。！?？]/u.exec(translated)
+  const firstSentence = (ending ? translated.slice(0, ending.index) : translated).trim()
+  if (ending && /[?？]/u.test(ending[0])) return false
+  // Polite questions may be faithfully rendered as requests. A statement that
+  // answers then appends its own question must not pass via that later question.
+  if (/^(?:请|麻烦|劳驾|please\b)/iu.test(firstSentence)) return false
+  return !/什么|为何|为什么|怎么|如何|多少|哪|是否|还是|干嘛|有没有|是不是|能不能|可不可以|好不好|行不行|对不对|[吗呢么]$|没有$/u.test(firstSentence)
+    && !/^(?:what|why|how|when|where|which|who|do|does|did|is|are|was|were|has|have|can|could|will|would|should)\b/iu.test(firstSentence)
+}
+
 function isTaskEnvelope(value: string): boolean {
   try {
     // A complete JSON code fence is only an output wrapper. Unwrap exactly one
@@ -58,5 +87,5 @@ export function isSemanticTranslationMismatch(source: string, translation: strin
   for (const claim of assistantClaims) {
     if (claim.test(result) && !claim.test(original)) return true
   }
-  return directQuestion(original) && firstPersonAnswer(result)
+  return lostQuestion(original, result) || directQuestion(original) && firstPersonAnswer(result)
 }

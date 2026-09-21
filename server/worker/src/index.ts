@@ -131,7 +131,7 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   const started = Date.now()
   const protectedText = protectLiterals(text, body.quality)
   if (!config.key) throw new ProviderFailure('provider_auth')
-  const instructions = translationInstructions(body.quality, correction)
+  const instructions = translationInstructions(body.quality, correction, body.targetLanguage)
   const input = translationInput(protectedText.input, String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context)
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
@@ -259,7 +259,7 @@ async function requestHash(body: TranslateBody, model: string): Promise<string> 
 
 function translationBounds(body: ReturnType<typeof normalizeBody>, allowCorrection: boolean) {
   const instructions = [undefined, 'protected_literal_mismatch', 'provider_wrong_language', 'provider_not_translation']
-    .map(code => translationInstructions(body.quality, allowCorrection ? code as TranslationCorrection | undefined : undefined))
+    .map(code => translationInstructions(body.quality, allowCorrection ? code as TranslationCorrection | undefined : undefined, body.targetLanguage))
     .sort((a, b) => new TextEncoder().encode(b).byteLength - new TextEncoder().encode(a).byteLength)[0]
   return providerTokenBounds(body.text, instructions + translationInput(
     protectLiterals(body.text, body.quality).input, body.sourceLanguage, body.targetLanguage, body.context))
@@ -563,7 +563,7 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.15', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
+  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.16', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, translationTargetBound: true, translationQuestionGuard: true, accountSnapshot: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
   if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.15', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
 
   const user = await requireUser(request, env)
