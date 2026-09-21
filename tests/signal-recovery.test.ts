@@ -7,7 +7,7 @@ test('native translation rejection fails only that message and releases the next
   const failed:Error[]=[],dispatched:string[]=[]
   const jobs=[async()=>{throw Error('译文语言与目标不符')},async()=>{}]
   for(const [index,translate] of jobs.entries())if(await prepareHelloDogSend(translate,async(e:Error)=>{failed.push(e)},()=>false))dispatched.push(String(index))
-  assert.equal(failed.length,1);assert.match(failed[0].message,/目标/);assert.deepEqual(dispatched,['1'])
+  assert.equal(failed.length,1);assert.equal(failed[0].name,'HelloDogSendPreparationError');assert.match(failed[0].message,/目标/);assert.deepEqual(dispatched,['1'])
 })
 test('an erased native message never returns to the send queue',async()=>{
   let failed=0

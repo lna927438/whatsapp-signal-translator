@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
+import { patchSignalSendStatus } from './patch-signal-send-status.mjs';
 const root=resolve(import.meta.dirname,'..'), upstream=resolve(root,'integrations/signal-desktop');
 async function replace(file,oldValue,newValue){const path=resolve(upstream,file);let value=(await readFile(path,'utf8')).replace(/\r\n/g,'\n');if(value.includes(newValue))return;if(!value.includes(oldValue))throw new Error('Upstream anchor changed: '+file);await writeFile(path,value.replace(oldValue,newValue));}
 for(const [from,to] of [['hellodog.main.ts','app/hellodog.main.ts'],['hellodog.preload.ts','ts/hellodog/hellodog.preload.ts'],['hellodog.recovery.preload.ts','ts/hellodog/hellodog.recovery.preload.ts'],['hellodog.focus.preload.ts','ts/hellodog/hellodog.focus.preload.ts'],['fs-xattr.d.ts','ts/hellodog/fs-xattr.d.ts']]){const path=resolve(upstream,to);await mkdir(dirname(path),{recursive:true});await copyFile(resolve(root,'integrations/hellodog-source',from),path);}
@@ -91,4 +92,9 @@ await replace('ts/sql/Client.preload.ts', '  await writableChannel.removeMessage
 // one private HelloDog notification, avoiding duplicate Signal taskbar entries.
 {const file=resolve(upstream,'ts/services/notifications.preload.ts');const value=(await readFile(file,'utf8')).replace("    if (process.env.HELLODOG_EMBEDDED === '1' && process.env.HELLODOG_BRIDGE_ACTIVE === '1') { window.dispatchEvent(new Event('hellodog-notification')); return; }\n",'');await writeFile(file,value);}
 await replace('ts/services/notifications.preload.ts', "    log.info('NotificationService: showing a notification', sentAt);", "    if (process.env.HELLODOG_EMBEDDED === '1' && process.env.HELLODOG_BRIDGE_ACTIVE === '1') { window.dispatchEvent(new CustomEvent('hellodog-notification', {detail:{silent}})); return; }\n    log.info('NotificationService: showing a notification', sentAt);");
+await copyFile(resolve(root,'integrations/hellodog-source/hellodog.send-status.std.ts'),resolve(upstream,'ts/hellodog/hellodog.send-status.std.ts'));
+for (const file of ['ts/state/ducks/conversations.preload.ts', 'ts/components/conversation/MessageMetadata.dom.tsx']) {
+  const path = resolve(upstream,file);
+  await writeFile(path,patchSignalSendStatus(file,await readFile(path,'utf8')));
+}
 console.log('Pinned Signal Desktop HelloDog patches applied');

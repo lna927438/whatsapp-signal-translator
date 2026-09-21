@@ -7,7 +7,7 @@ release.mkdir(exist_ok=True)
 version=json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
 target = release / f'HelloDog-{version}-corresponding-source.zip'
 tracked = subprocess.check_output(['git','ls-files','-z'],cwd=core).decode().split('\0')
-extra = ['app/hellodog.main.ts','app/hellodog.privacy.main.ts','images/hellodog-icon.png','ts/hellodog/hellodog.preload.ts','ts/hellodog/hellodog.privacy.preload.ts','ts/hellodog/hellodog.recovery.preload.ts','ts/hellodog/hellodog.focus.preload.ts','ts/hellodog/hellodog.quick-reply.dom.ts','ts/hellodog/fs-xattr.d.ts','patches/uuid@13.0.0.patch']
+extra = ['app/hellodog.main.ts','app/hellodog.privacy.main.ts','images/hellodog-icon.png','ts/hellodog/hellodog.preload.ts','ts/hellodog/hellodog.privacy.preload.ts','ts/hellodog/hellodog.recovery.preload.ts','ts/hellodog/hellodog.focus.preload.ts','ts/hellodog/hellodog.quick-reply.dom.ts','ts/hellodog/hellodog.send-status.std.ts','ts/hellodog/fs-xattr.d.ts','patches/uuid@13.0.0.patch']
 count = 0
 with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
     for name in sorted(set(tracked + extra)):

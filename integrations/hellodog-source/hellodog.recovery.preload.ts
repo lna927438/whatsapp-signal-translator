@@ -10,7 +10,11 @@ export async function prepareHelloDogSend(
 ): Promise<boolean> {
   try { await translate(); return !erased(); }
   catch (error) {
-    if (!erased()) await fail(error instanceof Error ? error : new Error('翻译未完成，消息未发送。'));
+    if (!erased()) {
+      const preparationError = new Error(error instanceof Error ? error.message : '翻译未完成，消息未发送。');
+      preparationError.name = 'HelloDogSendPreparationError';
+      await fail(preparationError);
+    }
     return false;
   }
 }

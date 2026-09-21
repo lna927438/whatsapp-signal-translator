@@ -110,6 +110,8 @@ export interface TranslationRequest {
   accountId?: string
   conversationId?: string
   messageId?: string
+  /** Local Signal revision binding; omitted for the original message. */
+  signalEditTimestamp?: number
   context?: TranslationContextItem[]
 }
 

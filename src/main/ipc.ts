@@ -266,16 +266,17 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     }
     if (raw.direction === 'display') return { enabled:runtime.translationsVisible, fontSize:runtime.fontSize, color:runtime.translationColor, uiLanguage:runtime.uiLanguage }
     if (raw.authorizationOnly) {
-      const original = await translator.existingOutgoing(raw.requestId!, accountId, conversationId, raw.text, raw.translated!)
-      if (hasBlockedChinese(raw.translated!, original.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
-      validateTranslation(original, raw.translated!)
+      const { request: original, text } = await translator.restoreSignalOutgoing(raw.requestId!, accountId, conversationId, raw.id, raw.text, raw.editTimestamp)
+      if (hasBlockedChinese(text, original.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
+      validateTranslation(original, text)
       await outgoingCredit.check(owner, original, true, true)
       if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
-      return { authorized: true }
+      return { authorized: true, text, requestId: original.requestId }
     }
     const outgoing = raw.direction === 'outgoing'
     const requestId = (outgoing ? 'send-sd-' : 'sd-') + createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,raw.direction,raw.text,runtime.localLanguage,runtime.targetLanguage,runtime.translationQuality,...(raw.editTimestamp?[raw.editTimestamp]:[])])).digest('hex')
     let request: import('./types').TranslationRequest = { text: raw.text, accountId, conversationId, messageId: raw.id, requestId, sourceLanguage: outgoing ? runtime.localLanguage : 'auto', targetLanguage: outgoing ? runtime.targetLanguage : runtime.localLanguage, quality: runtime.translationQuality }
+    if (outgoing && raw.editTimestamp !== undefined) request.signalEditTimestamp = raw.editTimestamp
     if(raw.text.includes('\ufffc')) request.quality={...request.quality,glossary:[{source:'\ufffc',target:'\ufffc'},...(request.quality?.glossary||[]).filter(item=>item.source!=='\ufffc')]}
     if (outgoing) request = await translator.preserveOutgoingRequest(request)
     else request = await translator.preserveIncomingRequest(request)

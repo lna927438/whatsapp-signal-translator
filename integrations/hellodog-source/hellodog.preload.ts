@@ -63,6 +63,40 @@ export async function translateHelloDogMessage(message: MessageModel, conversati
     if (approval?.authorized !== true) throw new Error('发送权限尚未确认，原消息已保留。');
     if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original
       || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during send authorization');
+    if (approval.requestId !== saved.requestId || typeof approval.text !== 'string' || !approval.text.trim()) throw new Error('发送权限尚未确认，原消息已保留。');
+    if (approval.text !== original) {
+      // A retry may adopt a free receipt correction only before any recipient
+      // received this revision. Never rewrite sent history under the same ID.
+      const states=editTimestamp?edit?.sendStateByConversationId:message.get('sendStateByConversationId');
+      if(Object.values(states||{}).some(state=>['Sent','Delivered','Read','Viewed'].includes(state.status))) throw new Error('此消息已发送或部分发送，不能替换正文。请核对原消息后单独发送修正。');
+      const bodyRanges=translatedBodyRanges((edit?edit.bodyRanges:message.get('bodyRanges'))||[],original,approval.text);
+      const extra:Translation={...saved,translated:approval.text};
+      const before={body:message.get('body'),bodyRanges:message.get('bodyRanges'),editHistory:message.get('editHistory'),helloDogTranslation:prior.helloDogTranslation,helloDogEditTranslations:prior.helloDogEditTranslations};
+      const mainEditTimestamp=message.get('editMessageTimestamp');
+      const currentEdit=!editTimestamp||!message.get('editMessageTimestamp')||message.get('editMessageTimestamp')===editTimestamp;
+      message.set({...(currentEdit?{body:approval.text,bodyRanges,helloDogTranslation:extra}:{}),...(editTimestamp?{editHistory:message.get('editHistory')?.map(item=>item.timestamp===editTimestamp?{...item,body:approval.text,bodyRanges}:item),helloDogEditTranslations:{...prior.helloDogEditTranslations,[editTimestamp]:extra}}:{})} as any);
+      const restoreOwnText=()=>{
+        const current=extensions(message),currentHistory=message.get('editHistory');
+        if(message.get('isErased')||message.get('deletedForEveryone')
+          ||(editTimestamp?currentHistory?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body'))!==approval.text
+          ||(editTimestamp?current.helloDogEditTranslations?.[editTimestamp]:current.helloDogTranslation)!==extra)return false;
+        // Restore only our text/annotation. A receipt or newer edit may have
+        // advanced other attributes while persistence was awaiting disk.
+        message.set({...(currentEdit&&message.get('editMessageTimestamp')===mainEditTimestamp&&message.get('body')===approval.text&&current.helloDogTranslation===extra
+          ?{body:before.body,bodyRanges:before.bodyRanges,helloDogTranslation:before.helloDogTranslation}:{}),
+          ...(editTimestamp?{editHistory:currentHistory?.map(item=>item.timestamp===editTimestamp?{...item,body:edit?.body,bodyRanges:edit?.bodyRanges}:item),helloDogEditTranslations:{...current.helloDogEditTranslations,[editTimestamp]:saved}}:{})} as any);
+        return true;
+      };
+      try { await window.MessageCache.saveMessage(message); }
+      catch(error) { restoreOwnText();throw error; }
+      const latestStates=editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.sendStateByConversationId:message.get('sendStateByConversationId');
+      if(Object.values(latestStates||{}).some(state=>['Sent','Delivered','Read','Viewed'].includes(state.status))){
+        if(restoreOwnText())await window.MessageCache.saveMessage(message);
+        throw new Error('此消息已发送或部分发送，不能替换正文。请核对原消息后单独发送修正。');
+      }
+      if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== approval.text
+        || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation persistence');
+    }
     return;
   }
   if (!original || !/\p{L}/u.test(original)) return;
@@ -74,10 +108,30 @@ export async function translateHelloDogMessage(message: MessageModel, conversati
   if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation');
   const extra: Translation = { original,translated:result.text,requestId:result.requestId };
   const bodyRanges=translatedBodyRanges(ranges,original,result.text), before={body:message.get('body'),bodyRanges:message.get('bodyRanges'),editHistory:message.get('editHistory'),helloDogTranslation:prior.helloDogTranslation,helloDogEditTranslations:prior.helloDogEditTranslations};
+  const mainEditTimestamp=message.get('editMessageTimestamp');
   const currentEdit=!editTimestamp||!message.get('editMessageTimestamp')||message.get('editMessageTimestamp')===editTimestamp;
   message.set({...(currentEdit?{body:result.text,bodyRanges,helloDogTranslation:extra}:{}),...(editTimestamp?{editHistory:message.get('editHistory')?.map(item=>item.timestamp===editTimestamp?{...item,body:result.text,bodyRanges}:item),helloDogEditTranslations:{...prior.helloDogEditTranslations,[editTimestamp]:extra}}:{})} as any);
   try { await window.MessageCache.saveMessage(message); }
-  catch(error) { message.set(before as any);throw error; }
+  catch(error) {
+    const current=extensions(message),currentHistory=message.get('editHistory');
+    if(!message.get('isErased')&&!message.get('deletedForEveryone')
+      &&(editTimestamp?currentHistory?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body'))===result.text
+      &&(editTimestamp?current.helloDogEditTranslations?.[editTimestamp]:current.helloDogTranslation)===extra){
+      // Undo only this save's text and marker, preserving newer edits and any
+      // delivery receipt that arrived while persistence was awaiting disk.
+      const editTranslations={...current.helloDogEditTranslations};
+      if(editTimestamp){
+        const previous=before.helloDogEditTranslations?.[editTimestamp];
+        if(previous)editTranslations[editTimestamp]=previous;else delete editTranslations[editTimestamp];
+      }
+      message.set({...(currentEdit&&message.get('editMessageTimestamp')===mainEditTimestamp&&message.get('body')===result.text&&current.helloDogTranslation===extra
+        ?{body:before.body,bodyRanges:before.bodyRanges,helloDogTranslation:before.helloDogTranslation}:{}),
+        ...(editTimestamp?{editHistory:currentHistory?.map(item=>item.timestamp===editTimestamp?{...item,body:edit?.body,bodyRanges:edit?.bodyRanges}:item),helloDogEditTranslations:editTranslations}:{})} as any);
+    }
+    throw error;
+  }
+  if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== result.text
+    || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation persistence');
 }
 
 export function startHelloDogMessages(): void {

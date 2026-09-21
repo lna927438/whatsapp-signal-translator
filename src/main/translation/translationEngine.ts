@@ -108,6 +108,22 @@ export class TranslationEngine {
     if (this.quarantined(receipt)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
     return receipt.request
   }
+  /** Restore only the completed result bound to this native message. The caller
+   * still checks current send policy and credit before authorizing transport.
+   * Never retranslate a corrected receipt under a new request ID. */
+  async restoreSignalOutgoing(requestId: string, accountId: string, conversationId: string, messageId: string, original: string, editTimestamp?: number): Promise<{ request: TranslationRequest; text: string }> {
+    const owner = this.onlineUserId, revision = this.sessionRevision
+    const receipt = await this.receipts.get(owner, requestId)
+    if (revision !== this.sessionRevision || !owner || !requestId.startsWith('send-') || !receipt || receipt.contentExpired
+      || !['charged','cached','free'].includes(receipt.state) || receipt.request.accountId !== accountId || receipt.request.conversationId !== conversationId
+      || receipt.request.messageId !== messageId || receipt.request.text !== original || receipt.request.signalEditTimestamp !== editTimestamp
+      || editTimestamp !== undefined && (!Number.isSafeInteger(editTimestamp) || editTimestamp <= 0)) throw new Error('原发送记录尚未核实，消息未发送。请在原消息上重试。')
+    await this.content.assertAvailable({ ...receipt.request, cacheUserId: owner })
+    if (revision !== this.sessionRevision || owner !== this.onlineUserId) throw new Error('登录状态已变化，消息未发送。')
+    const text = await this.completedTranslation(receipt, false)
+    if (revision !== this.sessionRevision || owner !== this.onlineUserId) throw new Error('登录状态已变化，消息未发送。')
+    return { request: receipt.request, text }
+  }
   private quarantined(receipt: TranslationReceipt) {
     return receipt.correction === undefined && receipt.translated !== undefined
       && isSemanticTranslationMismatch(receipt.request.text, receipt.translated)
@@ -262,7 +278,8 @@ export class TranslationEngine {
   }
   async preserveOutgoingRequest(request: TranslationRequest): Promise<TranslationRequest> {
     const previous = (await this.history()).find(item => item.requestId.startsWith('send-sd-') && item.request.accountId === request.accountId
-      && item.request.conversationId === request.conversationId && item.request.messageId === request.messageId && item.request.text === request.text)
+      && item.request.conversationId === request.conversationId && item.request.messageId === request.messageId && item.request.text === request.text
+      && item.request.signalEditTimestamp === request.signalEditTimestamp)
     return previous ? { ...previous.request } : request
   }
   async preserveIncomingRequest(request: TranslationRequest): Promise<TranslationRequest> {
