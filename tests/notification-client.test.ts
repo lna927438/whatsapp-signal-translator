@@ -5,7 +5,8 @@ import {randomUUID} from 'node:crypto'
 import {readFileSync} from 'node:fs'
 import {mainHarness} from './main-harness.ts'
 import {clientNotices,noticeWindowBounds,noticeActionUrl} from '../src/shared/clientNotices.ts'
-const notice=(patch={})=>({id:randomUUID(),revision:1,title:'Title',body:'Private body',level:'info',popup:true,action:'none',starts_at:new Date(Date.now()-1000).toISOString(),ends_at:null,displayed:false,dismissed:false,...patch})
+const notice=(patch={})=>({id:randomUUID(),revision:1,title:'Title',body:'Private body',level:'info',popup:true,releaseVersion:'0.5.16',action:'none',starts_at:new Date(Date.now()-1000).toISOString(),ends_at:null,displayed:false,dismissed:false,...patch})
+const update=(patch={})=>({currentVersion:'0.5.16',latestVersion:'0.5.16',notes:'Signed version notes',checkedAt:Date.now(),status:'current',verified:true,available:false,show:false,website:'https://hellodog.net/download',...patch})
 const delay=()=>new Promise(r=>setTimeout(r,25))
 function setup(){
  const handlers=new Map<string,Function>(),windows:any[]=[],opened:string[]=[];let nextId=1
@@ -30,7 +31,7 @@ test('toast stays above native content without taking focus and follows parent v
  const s=setup(),{NotificationWindow}=s.h.load('src/main/notificationWindow.ts');const seen:string[]=[];const win=new NotificationWindow(s.parent,{action:async()=>{},displayed:(k:string)=>seen.push(k),hidden:()=>{}})
  const data={key:'test',title:'Hello',body:'Message',category:'Notice',level:'info',brand:'HelloDog',actionLabel:'',closeLabel:'Close',detailsLabel:'Details',errorLabel:'Error'}
  try{await win.show(data);const popup=s.windows[1];assert.equal(popup.options.transparent,false);assert.equal(popup.options.backgroundColor,'#191e24');assert.equal(popup.options.focusable,false);assert.equal(popup.options.skipTaskbar,true);assert.equal(popup.options.parent,s.parent);assert.equal(popup.visible,true)
-  await s.invoke('notice-window:painted',popup,'test');assert.deepEqual(seen,['test']);assert.equal(s.parent.focused,true)
+  await s.invoke('notice-window:painted',popup,'test');await s.invoke('notice-window:painted',popup,'test');assert.deepEqual(seen,['test']);assert.equal(s.parent.focused,true)
   s.parent.focused=false;s.parent.emit('blur');assert.equal(popup.visible,false);await s.invoke('notice-window:painted',popup,'test');assert.equal(seen.length,1)
   s.parent.focused=true;s.parent.emit('focus');assert.equal(popup.visible,true);win.setBlocked(true);assert.equal(popup.visible,false);win.setBlocked(false);assert.equal(popup.visible,true)
   s.parent.bounds={x:1300,y:100,width:1000,height:700};s.parent.emit('move');assert.deepEqual(JSON.parse(JSON.stringify(popup.bounds)),noticeWindowBounds(s.parent.bounds))
@@ -39,7 +40,7 @@ test('toast stays above native content without taking focus and follows parent v
 })
 test('logout discards in-flight data and does not expose notices to the next user',async()=>{
  const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts');let user='A',resolve:(v:any)=>void=()=>{},calls=0
- const manager=new ClientNotifications(s.parent,{notice:async()=>({available:false,show:false})},()=>user,()=>++calls===1?new Promise(r=>resolve=r):Promise.resolve({notices:[]}),async()=>({accepted:true}))
+ const manager=new ClientNotifications(s.parent,{notice:async()=>update()},()=>user,()=>++calls===1?new Promise(r=>resolve=r):Promise.resolve({notices:[]}),async()=>({accepted:true}))
  try{manager.setIdentity();user='B';manager.setIdentity();resolve({notices:[notice()]});await delay();await delay();assert.equal(manager.snapshot().notices.length,0);assert.equal(s.windows.length,1);assert.equal(calls,2)
   user='';manager.setIdentity();assert.equal(manager.snapshot().unread,0);assert.throws(()=>s.invoke('notices:snapshot',s.parent),/登录/)
  }finally{s.parent.destroy()}
@@ -49,7 +50,7 @@ test('only actual paint acknowledges display; failed receipts persist, dismissal
  // IPC acknowledgement does not wait for the receipt journal's durable writes.
  const until=async(check:()=>void)=>{const deadline=Date.now()+3000;for(;;){try{check();return}catch(error){if(Date.now()>=deadline)throw error}await delay()}}
  const persisted=()=>JSON.parse(readFileSync(s.h.directory+'/notification-receipts.json','utf8')).owners.A[n.id+':1']
- const updates={notice:async()=>({available:false,show:false})}
+ const updates={notice:async()=>update()}
  const manager=new ClientNotifications(s.parent,updates,()=> 'A',async()=>({notices:[{...n}]}),async(v:any)=>{if(failed){offlineAttempts++;throw new Error('offline')}sent.push(v);return {accepted:true}})
  try{manager.setIdentity();await until(()=>assert.equal(s.windows[1]?.visible,true));await manager.refresh();const popup=s.windows[1];assert.ok(popup);assert.equal(sent.length,0);assert.equal(offlineAttempts,0)
   await s.invoke('notice-window:painted',popup,n.id+':1');await until(()=>{assert.equal(offlineAttempts,1);assert.equal(persisted().displayed,true);assert.equal(persisted().displayAck,false)});assert.equal(sent.length,0)
@@ -62,13 +63,14 @@ test('notification payload and action URLs remain bounded and fixed to the offic
  const n=notice({url:'javascript:alert(1)'});assert.equal((clientNotices({notices:[n]})[0] as any).url,undefined)
  assert.equal(noticeActionUrl('download'),'https://hellodog.net/download');assert.equal(noticeActionUrl('none'),null)
  assert.throws(()=>clientNotices({notices:[notice({title:'x'.repeat(121)})]}));assert.throws(()=>clientNotices({notices:[notice({action:'javascript:'})]}))
+ for(const releaseVersion of ['0.5.17\n',' 0.5.17','0.5.17 ','01.5.17','latest',42])assert.throws(()=>clientNotices({notices:[notice({releaseVersion})]}))
  for(const b of [{x:0,y:0,width:980,height:700},{x:-1400,y:40,width:1200,height:800}]){const r=noticeWindowBounds(b);assert.ok(r.x>=b.x&&r.x+r.width<=b.x+b.width);assert.ok(r.y>=b.y&&r.y+r.height<=b.y+b.height-76)}
 })
 
 test('manual refresh bypasses passive backoff, details routes locally, open uses the fixed official URL',async()=>{
  const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),n=notice({action:'download'}),sent:any[]=[];let reads=0
  s.parent.webContents.send=(...args:any[])=>sent.push(args)
- const manager=new ClientNotifications(s.parent,{notice:async()=>({available:false,show:false})},()=> 'A',async()=>{reads++;return {notices:[{...n}]}},async()=>({accepted:true}))
+ const manager=new ClientNotifications(s.parent,{notice:async()=>update({status:'available',currentVersion:'0.5.15',available:true})},()=> 'A',async()=>{reads++;return {notices:[{...n}]}},async()=>({accepted:true}))
  try{
   manager.setIdentity();await delay();const before=reads
   await manager.refresh();assert.equal(reads,before)
@@ -82,7 +84,67 @@ test('manual refresh bypasses passive backoff, details routes locally, open uses
 
 test('acknowledging an update clears the unread badge while its download stays available',async()=>{
  const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts')
- const update={available:true,show:true,latestVersion:'99.0.0',currentVersion:'0.0.0'}
+ const update={available:true,show:true,status:'available',verified:true,latestVersion:'99.0.0',currentVersion:'0.0.0'}
  const manager=new ClientNotifications(s.parent,{notice:async()=>update,snooze:async()=>({...update,show:false})},()=> 'A',async()=>({notices:[]}),async()=>({accepted:true}))
  try{manager.setIdentity();await delay();assert.equal(manager.snapshot().unread,1);await s.invoke('notices:action',s.parent,'update:99.0.0','dismiss');assert.equal(manager.snapshot().unread,0);assert.equal(manager.snapshot().update.available,true)}finally{s.parent.destroy()}
+})
+
+test('only notices scoped to the signed latest version are visible and filtering never records display',async()=>{
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),sent:any[]=[]
+ const current=notice(),old=notice({releaseVersion:'0.5.15'}),legacy=notice({releaseVersion:null}),future=notice({releaseVersion:'0.5.17'})
+ let latest=update(),remote=[old,legacy,current,future]
+ const manager=new ClientNotifications(s.parent,{notice:async()=>latest},()=> 'A',async()=>({notices:remote}),async(value:any)=>{sent.push(value)})
+ try{
+  manager.setIdentity();await manager.refresh();await delay()
+  assert.deepEqual(Array.from(manager.snapshot().notices,(n:any)=>n.id),[current.id]);assert.equal(manager.snapshot().unread,1);assert.equal(sent.length,0)
+  assert.equal((await s.invoke('notice-window:state',s.windows[1])).key,current.id+':1')
+  latest=update({status:'available',available:true,currentVersion:'0.5.16',latestVersion:'0.5.17'})
+  await manager.refresh(true);await delay();assert.deepEqual(Array.from(manager.snapshot().notices,(n:any)=>n.id),[future.id])
+  assert.equal((await s.invoke('notice-window:state',s.windows[1])).key,future.id+':1');assert.equal(sent.length,0)
+  await s.invoke('notice-window:painted',s.windows[1],current.id+':1');await delay();assert.equal(sent.length,0)
+  remote=[];await manager.refresh(true);assert.equal(s.windows[1].visible,false);assert.equal(manager.snapshot().notices.length,0)
+ }finally{s.parent.destroy()}
+})
+
+test('current and ahead releases never expose or execute download actions; unknown verification hides stale notices',async()=>{
+ for(const status of ['current','ahead','unknown']){
+  const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),n=notice({action:'download'})
+  const latest=update({status,verified:status!=='unknown',available:false,show:false,currentVersion:status==='ahead'?'0.5.17':'0.5.16'})
+  const manager=new ClientNotifications(s.parent,{notice:async()=>latest},()=> 'A',async()=>({notices:[n]}),async()=>({accepted:true}))
+  try{
+   manager.setIdentity();await manager.refresh();await delay()
+   assert.equal(manager.snapshot().update.status,status)
+   if(status==='unknown'){assert.equal(manager.snapshot().notices.length,0);assert.equal(s.windows.length,1)}
+   else{assert.equal(manager.snapshot().notices.length,1);assert.equal((await s.invoke('notice-window:state',s.windows[1])).actionLabel,'')}
+   await s.invoke('notices:action',s.parent,n.id+':1','open');await s.invoke('notices:action',s.parent,'update:0.5.16','open');assert.equal(s.opened.length,0)
+  }finally{s.parent.destroy()}
+ }
+})
+
+test('expiry hides an unpainted popup immediately and a late paint cannot fabricate a receipt',async()=>{
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),sent:any[]=[],n=notice({ends_at:new Date(Date.now()+550).toISOString()})
+ const manager=new ClientNotifications(s.parent,{notice:async()=>update()},()=> 'A',async()=>({notices:[n]}),async(value:any)=>{sent.push(value)})
+ try{
+  manager.setIdentity();await manager.refresh();await delay();assert.equal(s.windows[1].visible,true)
+  await new Promise(resolve=>setTimeout(resolve,600));assert.equal(s.windows[1].visible,false);assert.equal(manager.snapshot().notices.length,0)
+  await s.invoke('notice-window:painted',s.windows[1],n.id+':1');await delay();assert.equal(sent.length,0)
+ }finally{s.parent.destroy()}
+})
+
+test('a failed version refresh invalidates existing popup data without reporting current',async()=>{
+ const s=setup(),{ClientNotifications}=s.h.load('src/main/clientNotifications.ts'),n=notice();let fail=false
+ const manager=new ClientNotifications(s.parent,{notice:async()=>{if(fail)throw Error('unavailable');return update()}},()=> 'A',async()=>({notices:[n]}),async()=>({accepted:true}))
+ try{
+  manager.setIdentity();await manager.refresh();await delay();assert.equal(s.windows[1].visible,true)
+  fail=true;await manager.refresh(true);assert.equal(manager.snapshot().update.status,'unknown');assert.equal(manager.snapshot().update.verified,false)
+  assert.equal(manager.snapshot().notices.length,0);assert.equal(s.windows[1].visible,false)
+ }finally{s.parent.destroy()}
+})
+
+test('closing the owner while notification content loads does not touch a destroyed window',async()=>{
+ const s=setup(),{NotificationWindow}=s.h.load('src/main/notificationWindow.ts');let finish!:()=>void
+ Object.getPrototypeOf(s.parent).loadFile=()=>new Promise<void>(resolve=>{finish=resolve})
+ const win=new NotificationWindow(s.parent,{action:async()=>{},displayed:()=>{},hidden:()=>{}})
+ const work=win.show({key:'pending',title:'Title',body:'Body',category:'Notice',level:'info',brand:'HelloDog',actionLabel:'',closeLabel:'Close',detailsLabel:'Details',errorLabel:'Error'})
+ assert.equal(s.windows.length,2);s.parent.destroy();finish();await work;win.hide();assert.equal(s.handlers.size,0)
 })

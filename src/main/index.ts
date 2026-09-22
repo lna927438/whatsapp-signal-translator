@@ -1,5 +1,6 @@
 import { t, onUiLanguageChanged } from './uiLocale'
 import { SettingsStore } from './storage/settingsStore'
+import { retireLegacyNotes } from './storage/retireLegacyNotes'
 import { installWebSecurity } from './webSecurity'
 import { applyDesktopOptions, attachDesktopRuntime, shouldStartMinimized, restartDesktop } from './desktopRuntime'
 import { app, BrowserWindow, Menu, shell } from 'electron'
@@ -118,6 +119,7 @@ app.on('second-instance', () => {
 })
 app.whenReady().then(async () => {
   installSignalMediaProtocol()
+  try { await retireLegacyNotes() } catch { /* Unreadable user data must not prevent recovery or login. */ }
   try { const settings = new SettingsStore(); await settings.migrateLegacySecrets(); applyDesktopOptions(await settings.get()) } catch { /* Preserve original records and allow the recovery UI to open. */ }
   installApplicationMenu()
   createWindow()

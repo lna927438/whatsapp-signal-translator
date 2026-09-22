@@ -3,7 +3,7 @@ export const whatsappSidebarScript = String.raw`
   if (window.__RT_SIDEBAR_INSTALLED__) return;
   window.__RT_SIDEBAR_INSTALLED__ = true;
   const doc = document, key = 'hellodog:whatsapp-chat-list-width';
-  let layout, handle, scheduled = false, dragging = false, dragWidth;
+  let layout, handle, scheduled = false, dragging = false, dragWidth, dragStartWidth, pointerId, dragOffset = 0, disposed = false;
   const owned = new Map(), drawerStyles = new Map(), drawerRoots = new Set(), writtenStyles = new WeakMap();
   const rect = node => node.getBoundingClientRect();
   const css = node => getComputedStyle(node);
@@ -17,9 +17,14 @@ export const whatsappSidebarScript = String.raw`
     const current = node.style.getPropertyValue(name), priority = node.style.getPropertyPriority(name);
     // React can replace inline styles while a drawer is open. Restore the most
     // recent native value, and never undo a later change made by the platform.
-    if (!old || current !== old.applied || priority !== 'important') props.set(name, { value: current, priority, applied: value });
-    else old.applied = value;
-    if (current !== value || priority !== 'important') { node.style.setProperty(name, value, 'important'); writtenStyles.set(node, node.style.cssText); }
+    if (old && current === old.applied && priority === 'important' && old.requested === value) return;
+    if (!old || current !== old.applied || priority !== 'important') props.set(name, { value: current, priority, requested: value });
+    else old.requested = value;
+    node.style.setProperty(name, value, 'important');
+    // CSSOM normalizes values (for example minmax(0,1fr) becomes
+    // minmax(0px,1fr)). Track the actual applied value so cleanup is reversible.
+    props.get(name).applied = node.style.getPropertyValue(name);
+    writtenStyles.set(node, node.style.cssText);
   };
   const restore = (ledger, keep = new Set()) => {
     for (const [node, props] of ledger) {
@@ -55,9 +60,10 @@ export const whatsappSidebarScript = String.raw`
     let result = null;
     for (let node = side, depth = 0; node && node !== doc.body && depth < 12; node = node.parentElement, depth++) {
       const root = node.parentElement;
-      if (!root || !['flex', 'inline-flex'].includes(css(root).display) || !['row', 'row-reverse'].includes(css(root).flexDirection)) continue;
+      if (!root || !(gridRow(root) || ['flex', 'inline-flex'].includes(css(root).display) && css(root).flexDirection === 'row')) continue;
       const r = rect(node);
-      const content = Array.from(root.children).find(other => other !== node && !other.hasAttribute('data-rt-ui') && visible(other) && rect(other).left >= r.right - 2 && Math.abs(rect(other).top - r.top) < 100 && (!floating(other) || css(other).position === 'absolute' && other.offsetParent === root));
+      const children = Array.from(root.children);
+      const content = children.find(other => other !== node && !other.hasAttribute('data-rt-ui') && visible(other) && (rect(other).left >= r.right - 2 || gridRow(root) && children.indexOf(other) > children.indexOf(node)) && Math.abs(rect(other).top - r.top) < 100 && (!floating(other) || css(other).position === 'absolute' && other.offsetParent === root));
       if (content && visible(node)) result = { side, column: node, content, root };
     }
     return result;
@@ -66,7 +72,8 @@ export const whatsappSidebarScript = String.raw`
   // panes. Support the latter only when its containing block is the same row;
   // never move a portal or infer an offset from a different coordinate system.
   const anchored = value => css(value.content).position === 'absolute' && value.content.offsetParent === value.root && css(value.content).transform === 'none';
-  const resizable = value => value && ['flex', 'inline-flex'].includes(css(value.root).display) && css(value.root).flexDirection === 'row' && !floating(value.column) && (!floating(value.content) || anchored(value)) && (!value.main || !floating(value.main) || value.main === value.content || value.main.offsetParent && value.content.contains(value.main.offsetParent));
+  const gridRow = root => ['grid', 'inline-grid'].includes(css(root).display) && Array.from(root.children).filter(node => !node.hasAttribute('data-rt-ui') && !floating(node) && css(node).display !== 'none').length === 2;
+  const resizable = value => value && (gridRow(value.root) || ['flex', 'inline-flex'].includes(css(value.root).display) && css(value.root).flexDirection === 'row') && !floating(value.column) && (!floating(value.content) || anchored(value)) && (!value.main || !floating(value.main) || value.main === value.content || value.main.offsetParent && value.content.contains(value.main.offsetParent));
   const limits = () => ({ min: 240, max: Math.max(240, Math.min(660, rect(layout.root).width - 320)) });
   const aligned = () => {
     const s = rect(layout.side), c = rect(layout.column), m = rect(layout.main || layout.content), root = rect(layout.root);
@@ -75,12 +82,18 @@ export const whatsappSidebarScript = String.raw`
   const apply = value => {
     if (!resizable(layout)) { restore(owned); return null; }
     const bounds = limits(), width = Math.max(bounds.min, Math.min(bounds.max, value));
+    if (gridRow(layout.root)) {
+      set(owned, layout.root, 'grid-template-columns', width + 'px minmax(0, 1fr)');
+      set(owned, layout.root, 'column-gap', '0px');
+    }
     for (const [name, item] of Object.entries({ width: width + 'px', 'flex-basis': width + 'px', 'flex-grow': '0', 'flex-shrink': '0', 'min-width': bounds.min + 'px', 'max-width': bounds.max + 'px', 'box-sizing': 'border-box' })) set(owned, layout.column, name, item);
     for (let node = layout.side; node && node !== layout.column; node = node.parentElement) fill(node, width);
     set(owned, layout.content, 'min-width', '0px');
     set(owned, layout.content, 'flex-basis', '0px');
     set(owned, layout.content, 'flex-grow', '1');
     set(owned, layout.content, 'flex-shrink', '1');
+    set(owned, layout.content, 'width', 'auto');
+    set(owned, layout.content, 'max-width', 'none');
     if (anchored(layout)) {
       set(owned, layout.content, 'left', (rect(layout.column).right - rect(layout.root).left - layout.root.clientLeft) + 'px');
       set(owned, layout.content, 'right', '0px');
@@ -135,7 +148,29 @@ export const whatsappSidebarScript = String.raw`
     handle.setAttribute('aria-valuenow', String(Math.round(s.width)));
     handle.setAttribute('aria-valuemax', String(limits().max));
   };
-  const removeHandle = () => { handle?.remove(); handle = null; dragging = false; };
+  const finishDrag = (commit = true) => {
+    if (!dragging) return;
+    dragging = false;
+    const id = pointerId; pointerId = undefined;
+    doc.removeEventListener('pointermove', moveDrag, true); doc.removeEventListener('pointerup', releaseDrag, true); doc.removeEventListener('pointercancel', cancelDrag, true);
+    try { if (id !== undefined && handle?.hasPointerCapture?.(id)) handle.releasePointerCapture(id); } catch {}
+    if (commit && Number.isFinite(dragWidth)) persist(dragWidth);
+    else if (layout?.side.isConnected) apply(dragStartWidth);
+    if (handle) { handle.style.background = 'transparent'; handle.firstElementChild.style.opacity = '0'; }
+    schedule();
+  };
+  const ownsPointer = event => pointerId === undefined || event.pointerId === undefined || event.pointerId === pointerId;
+  const moveDrag = event => {
+    if (!dragging || !ownsPointer(event)) return;
+    if (!layout?.side.isConnected || !layout.content.isConnected || !handle?.isConnected) { finishDrag(); return; }
+    event.preventDefault();
+    const width = apply(event.clientX - rect(layout.side).left - dragOffset);
+    if (width !== null) dragWidth = width;
+    syncDrawers(); syncHandle();
+  };
+  const releaseDrag = event => { if (ownsPointer(event)) finishDrag(); };
+  const cancelDrag = event => { if (ownsPointer(event)) finishDrag(false); };
+  const removeHandle = () => { finishDrag(); handle?.remove(); handle = null; };
   const createHandle = () => {
     handle = doc.createElement('div');
     handle.setAttribute('data-rt-ui', 'sidebar-resize'); handle.setAttribute('role', 'separator'); handle.setAttribute('aria-label', '调整 WhatsApp 聊天列表宽度'); handle.setAttribute('aria-orientation', 'vertical'); handle.setAttribute('aria-valuemin', '240'); handle.tabIndex = 0;
@@ -145,22 +180,17 @@ export const whatsappSidebarScript = String.raw`
     handle.appendChild(focusMark);
     handle.onfocus = () => { focusMark.style.opacity = handle.matches(':focus-visible') ? '1' : '0'; };
     handle.onblur = () => { focusMark.style.opacity = '0'; };
-    handle.onpointerenter = () => { handle.style.background = '#7ba7b340'; };
-    handle.onpointerleave = () => { if (!dragging) handle.style.background = 'transparent'; };
     handle.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || dragging) return;
       focusMark.style.opacity = '0';
-      event.preventDefault(); event.stopPropagation(); dragging = true; dragWidth = rect(layout.side).width;
-      try { handle.setPointerCapture?.(event.pointerId); } catch { dragging = false; }
+      event.preventDefault(); event.stopPropagation(); dragging = true; dragStartWidth = dragWidth = rect(layout.side).width; pointerId = event.pointerId;
+      dragOffset = Math.abs(event.clientX - rect(layout.side).right) <= 8 ? event.clientX - rect(layout.side).right : 0;
+      doc.addEventListener('pointermove', moveDrag, true); doc.addEventListener('pointerup', releaseDrag, true); doc.addEventListener('pointercancel', cancelDrag, true);
+      // A capture failure must not disable dragging: native page replacement
+      // can release capture mid-gesture. Document listeners provide recovery.
+      try { handle.setPointerCapture?.(event.pointerId); } catch {}
     });
-    handle.addEventListener('pointermove', event => {
-      if (!dragging) return;
-      const width = apply(event.clientX - rect(layout.side).left);
-      if (width !== null) dragWidth = width;
-      syncDrawers(); syncHandle();
-    });
-    const stop = () => { if (!dragging) return; dragging = false; if (Number.isFinite(dragWidth)) persist(dragWidth); if (handle) handle.style.background = 'transparent'; schedule(); };
-    handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop); handle.addEventListener('lostpointercapture', stop);
+    handle.addEventListener('lostpointercapture', releaseDrag);
     handle.onkeydown = event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
       event.preventDefault(); event.stopPropagation();
@@ -181,8 +211,9 @@ export const whatsappSidebarScript = String.raw`
   };
   const install = () => {
     scheduled = false;
+    if (disposed) return;
     if (dragging && layout?.side.isConnected && layout?.content.isConnected && handle?.isConnected) return;
-    dragging = false;
+    if (dragging) finishDrag();
     if (handle && !handle.isConnected) handle = null;
     const next = locate();
     if (!next || !layout || next.side !== layout.side || next.column !== layout.column || next.content !== layout.content || next.main !== layout.main) {
@@ -202,17 +233,39 @@ export const whatsappSidebarScript = String.raw`
     syncDrawers(); syncHandle(); watch();
   };
   const schedule = () => {
-    if (!doc.defaultView || doc.defaultView.document !== doc || !doc.documentElement?.isConnected || scheduled) return;
+    if (disposed || !doc.defaultView || doc.defaultView.document !== doc || !doc.documentElement?.isConnected || scheduled) return;
     scheduled = true;
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(install); else setTimeout(install, 16);
   };
-  new MutationObserver(records => {
+  const observer = new MutationObserver(records => {
     // Ignore our own styles and ordinary message attribute changes. Sidebar
     // visibility can change via class/style without mounting any new elements.
-    if (records.some(record => record.type === 'childList' || record.target !== handle && !(record.attributeName === 'style' && writtenStyles.get(record.target) === record.target.style.cssText) && (watched.has(record.target) || record.target.contains(layout?.side || doc.querySelector('#side')) || record.target.contains(layout?.main || doc.querySelector('#main')) || Array.from(drawerRoots).some(node => node.contains(record.target))))) schedule();
-  }).observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
+    if (records.some(record => {
+      const target = record.target;
+      if (target === handle || target.closest?.('[data-rt-ui]')) return false;
+      if (record.type === 'childList') {
+        if (Array.from(record.addedNodes).concat(Array.from(record.removedNodes)).some(node => node.nodeType === 1 && (node.matches('#side, #main, [data-rt-ui="sidebar-resize"]') || node.querySelector('#side, #main')))) return true;
+        // A new message does not change the columns. ResizeObserver tracks
+        // genuine geometry changes; avoid rescanning drawers on every bubble.
+        if (target.closest?.('#main, #pane-side')) return false;
+        return watched.has(target) || target === layout?.root || target.contains(layout?.side || doc.querySelector('#side')) || Array.from(drawerRoots).some(node => node.contains(target));
+      }
+      return !(record.attributeName === 'style' && writtenStyles.get(target) === target.style.cssText) && (watched.has(target) || target.contains(layout?.side || doc.querySelector('#side')) || target.contains(layout?.main || doc.querySelector('#main')) || Array.from(drawerRoots).some(node => node.contains(target)));
+    })) schedule();
+  });
+  observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
   doc.addEventListener('transitionend', schedule, true);
   addEventListener('resize', schedule);
+  const blur = () => { finishDrag(); if (handle) handle.firstElementChild.style.opacity = '0'; };
+  const visibility = () => { if (doc.visibilityState === 'hidden') blur(); else schedule(); };
+  addEventListener('blur', blur); doc.addEventListener('visibilitychange', visibility);
+  addEventListener('pagehide', () => {
+    disposed = true; finishDrag(); observer.disconnect(); resizeObserver?.disconnect();
+    restore(owned); restore(drawerStyles); removeHandle();
+    doc.removeEventListener('transitionend', schedule, true); removeEventListener('resize', schedule);
+    removeEventListener('blur', blur); doc.removeEventListener('visibilitychange', visibility);
+    delete window.__RT_SIDEBAR_INSTALLED__;
+  }, { once: true });
   install();
 })();
 `;

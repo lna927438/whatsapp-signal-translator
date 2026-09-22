@@ -1,7 +1,9 @@
 import { authenticatedClaims, mfaRequired, type AdminIdentity } from './adminSecurity'
+import { validNoticeVersion } from '../../../src/shared/clientNotices'
 import { billingSyncStatusWithHistory, syncOfficialCostsWithStatus, enabledBillingProviders, BillingSyncError, type BillingSyncEnv } from './billingSync'
 import {refreshDeepSeekBalance,deepSeekCredentialDigest} from './deepseekBalance'
-import {currentOfficialBillScopes,officialReportingBasis} from './officialBillScopes'
+import {currentOfficialBillScopes,officialReportingBasis,currentMonthOfficialReportingBasis} from './officialBillScopes'
+import {providerCapabilities,type ProviderEnv} from './providerConfig'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
@@ -74,9 +76,9 @@ export function validateMutation(body: unknown) {
     'user.update':['status','plan_code'], 'user.note':['note','expectedRevision'], 'order.create':['plan_code'], 'order.settle':['reference'], 'order.cancel':[],
     'plan.save':['name','characters','price','currency','active'], 'role.set':['role'],
     'version.save':['channel','url','sha256','notes','active'], 'announcement.save':['title','body','level','active','starts_at','ends_at'],
-    'notice.save':['title','body','level','active','starts_at','ends_at','popup','audience','recipient','action','expectedRevision']
+    'notice.save':['title','body','level','active','starts_at','ends_at','popup','audience','recipient','action','expectedRevision','releaseVersion']
   }
-  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&['timezone','provisional'].includes(k)))) fail()
+  if (!keys[action] || Object.keys(d).some(k=>!keys[action].includes(k)) || keys[action].some(k=>!(k in d)&&!(action==='cost.reconcile'&&['timezone','provisional'].includes(k))&&!(action==='notice.save'&&k==='releaseVersion'))) fail()
   if (!['plan.save','version.save','cost.reconcile','provider.funding.confirm'].includes(action) && !uuid.test(target)) fail()
   if ('active' in d && typeof d.active !== 'boolean') fail()
   if ('plan_code' in d && !/^[a-z][a-z0-9_-]{0,39}$/.test(string(d.plan_code,1,40))) fail()
@@ -114,6 +116,7 @@ export function validateMutation(body: unknown) {
       if(d.active && (!d.url || !d.sha256))throw new AdminError('invalid_release');break
     }
     case 'notice.save':
+      if(d.releaseVersion!==undefined&&(typeof d.releaseVersion!=='string'||d.releaseVersion.trim()!==d.releaseVersion||!validNoticeVersion(d.releaseVersion)))fail()
       choice(d.popup,[true,false]);choice(d.audience,['all','user']);choice(d.action,['none','website','download']);integer(d.expectedRevision,0,999999999)
       string(d.recipient,0,254);string(d.body,1,3000)
       if(d.audience==='user'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(d.recipient)))fail()
@@ -181,7 +184,8 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
     }
     if(request.method==='GET' && kinds.includes(kind)) {
       const filter:Record<string,string>={}
-      for(const [key,value] of url.searchParams){if(!['q','status','offset','userId','operationId','from','to','provider','timezone'].includes(key) || value.length>160)fail();filter[key]=value}
+      for(const [key,value] of url.searchParams){if(!['q','status','offset','userId','operationId','from','to','provider','timezone','officialCurrentMonth'].includes(key) || value.length>160)fail();filter[key]=value}
+      if(filter.officialCurrentMonth!==undefined&&(kind!=='costs'||filter.officialCurrentMonth!=='true'||filter.timezone!=='UTC'||filter.userId||filter.provider))fail()
       if(filter.timezone&&!['UTC','Asia/Shanghai'].includes(filter.timezone))fail()
       for(const k of ['from','to'])if(filter[k]&&(!/^\d{4}-\d{2}-\d{2}$/.test(filter[k])||!Number.isFinite(Date.parse(filter[k]))))fail()
       if(filter.provider&&!['deepseek','openai'].includes(filter.provider))fail()
@@ -208,7 +212,7 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
   }
 }
 
-export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_KEY:string;DEEPSEEK_API_KEY?:string}):AdminServices {
+export function supabaseAdminServices(env:BillingSyncEnv&ProviderEnv&{SUPABASE_PUBLISHABLE_KEY:string}):AdminServices {
   async function call(name:string,args:JsonObject){
     const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify(args),redirect:'manual',signal:AbortSignal.timeout(15000)})
     if(!result.ok){
@@ -220,7 +224,7 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
   }
   return {
     origins:['https://admin.hellodog.net','https://hellodog.net','https://www.hellodog.net'],
-    billingStatus(){return billingSyncStatusWithHistory(env)},
+    async billingStatus(){return {...await billingSyncStatusWithHistory(env),...providerCapabilities(env)}},
     syncBilling(range){return syncOfficialCostsWithStatus(env,range)},
     async securityEvent(actor,code){
       await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_security_event`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_actor:actor,p_code:code}),signal:AbortSignal.timeout(5000)})
@@ -261,15 +265,29 @@ export function supabaseAdminServices(env:BillingSyncEnv&{SUPABASE_PUBLISHABLE_K
         if(!object(statement)||(statement.timezone!==undefined&&statement.timezone!==timezone))throw new AdminError('invalid_request')
         return call('record_scoped_official_statement',{p_actor:args.p_actor,p_operation:args.p_operation,p_provider:provider,p_reason:args.p_reason,p_data:{...statement,timezone},p_scope:scopes[provider]})
       }
-      const data=await call(name,args)
-      if(name==='admin_read'&&args.p_kind==='costs'&&object(data)&&'officialBills' in data){
-        const filter=object(args.p_filter)?args.p_filter:{},basis=officialReportingBasis(filter),scopes=await currentOfficialBillScopes(env)
+      const costFilter=name==='admin_read'&&args.p_kind==='costs'&&object(args.p_filter)?args.p_filter:null
+      const nativeCurrentMonth=costFilter?.officialCurrentMonth==='true'
+      // This is a presentation-only official-bill scope, not a new database
+      // statistics filter. Receipts retain the requested UTC reporting range.
+      const databaseArgs=nativeCurrentMonth?{...args,p_filter:Object.fromEntries(Object.entries(costFilter!).filter(([key])=>key!=='officialCurrentMonth'))}:args
+      const data=await call(name,databaseArgs)
+      if(name==='admin_read'&&args.p_kind==='costs'&&object(data)){
+        // Read current routing metadata without another database/provider call.
+        // Non-owner reports must not gain access to official account statements.
+        const capabilities=providerCapabilities(env)
+        if(!('officialBills' in data))return {...data,...capabilities}
+        const filter=object(args.p_filter)?args.p_filter:{}
+        const snapshotTime=typeof data.snapshotAt==='string'?Date.parse(data.snapshotAt):NaN
+        const basis=nativeCurrentMonth?currentMonthOfficialReportingBasis(Number.isFinite(snapshotTime)?snapshotTime:Date.now()):officialReportingBasis(filter),scopes=await currentOfficialBillScopes(env)
         // Provider statements use their native reporting day boundaries. This
         // is an explicitly labelled calendar-period sum, not one UTC interval.
         const selected=(['openai','deepseek'] as const).filter(provider=>!filter.userId&&(!filter.provider||filter.provider===provider)&&scopes[provider])
-        const bills=await Promise.all(selected.map(provider=>call('read_current_official_bills',{p_actor:args.p_actor,
-          p_filter:{from:basis.from,to:basis.to,provider,timezone:basis.timezones[provider]},p_scopes:scopes})))
-        return {...data,officialBills:bills.flat(),officialBillingBasis:basis,enabledProviders:enabledBillingProviders(env)}
+        const bills=await Promise.all(selected.map(provider=>{
+          const period=basis.kind==='provider_current_month'?basis.periods[provider]:basis
+          return call('read_current_official_bills',{p_actor:args.p_actor,
+            p_filter:{from:period.from,to:period.to,provider,timezone:basis.timezones[provider]},p_scopes:scopes})
+        }))
+        return {...data,officialBills:bills.flat(),officialBillingBasis:basis,enabledProviders:enabledBillingProviders(env),...capabilities}
       }
       return data
     }

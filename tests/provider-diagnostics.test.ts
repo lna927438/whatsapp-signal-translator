@@ -42,6 +42,8 @@ test('public readiness never probes privileged provider APIs and returns no cred
   globalThis.fetch = async () => { assert.fail('public health must not trigger upstream work') }
   const response = await worker.fetch(new Request('https://worker.invalid/health/translation'), settings)
   const body = await response.json()
+  const general = await (await worker.fetch(new Request('https://worker.invalid/health'), settings)).json()
+  assert.equal(body.release,'hellodog-channels-20260922');assert.equal(general.release,body.release)
   assert.equal(body.provider.configured, true); assert.equal(body.provider.liveProbe, false)
   assert.ok(!JSON.stringify(body).includes(settings.OPENAI_API_KEY!))
   globalThis.fetch = async () => { assert.fail('missing key must not call upstream') }

@@ -1,17 +1,14 @@
 import { createHash, randomUUID } from 'crypto'
 import type { AppSettings, TranslationMetrics, TranslationRequest } from '../types'
 import { SettingsStore } from '../storage/settingsStore'
-import { ProfileStore } from '../storage/profileStore'
-import { ChargeRegistry } from '../storage/chargeRegistry'
 import { MessageRequests } from './messageRequests'
 import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
 import { CloudflareProvider, TranslationOutcomeError, validateCloudReceipt, translationFailureMessage, quarantinedTranslationMessage } from './providers/cloudflare'
 import { TranslationReceipts, type TranslationReceipt } from './receipts'
-import { normalizeQuality, qualityKey, protectLiterals } from '../../shared/translationPolicy'
+import { normalizeQuality, qualityKey } from '../../shared/translationPolicy'
+import {assertCloudChannelTransport} from '../../shared/translationChannels'
 import { isSemanticTranslationMismatch } from '../../shared/translationSemantics'
-import { DeepLProvider } from './providers/deepl'
-import { GoogleProvider } from './providers/google'
 import type { TranslationProvider } from './providers/provider'
 import { detectLanguageEvidence } from './languageDetection'
 import { TranslationContentPolicy, type ContentExpiry } from './contentPolicy'
@@ -26,8 +23,6 @@ interface QueueJob {
 
 export class TranslationEngine {
   private readonly settings = new SettingsStore()
-  private readonly profile = new ProfileStore()
-  private readonly charges = new ChargeRegistry()
   private readonly messageRequests = new MessageRequests()
   private readonly receipts = new TranslationReceipts()
   private readonly content = new TranslationContentPolicy()
@@ -53,7 +48,6 @@ export class TranslationEngine {
   private readonly maxConcurrent = 4
   private activeBackground = 0
   private activeRequests = 0
-  private reservedCharacters = 0
   private latencyTotal = 0
   private latencySamples = 0
   private onlineAccessToken = ''
@@ -377,14 +371,11 @@ export class TranslationEngine {
     return { ...this.metricsState, activeRequests: this.activeRequests, queueDepth: this.queue.length }
   }
 
-  private normalizeText(text: string): string {
-    return String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim()
-  }
-
   private requestKey(provider: string, request: TranslationRequest): string {
     const context = (request.context || []).slice(-4).map((item) => `${item.role}:${item.text}`).join('\u241e')
     return createHash('sha256').update([
       provider,
+      request.providerPreference || '',
       this.onlineUserId,
       request.sourceLanguage || 'auto',
       request.targetLanguage,
@@ -398,20 +389,12 @@ export class TranslationEngine {
     ].join('\u241f')).digest('hex')
   }
 
-  private chargeFingerprint(request: TranslationRequest): string {
-    return createHash('sha256').update([
-      'translation-charge-v2', this.onlineUserId, request.accountId || '', request.messageId || request.requestId || '', qualityKey(request.quality),
-      request.sourceLanguage || 'auto',
-      request.targetLanguage,
-      this.normalizeText(request.text)
-    ].join('\u241f')).digest('hex')
-  }
-
   private characterCount(text: string): number {
     return Array.from(text).length
   }
 
   private async translateWithSettings(request: TranslationRequest, settings: AppSettings, useCache: boolean, historyRecovery?: { manual: boolean }): Promise<string> {
+    assertCloudChannelTransport(settings.provider)
     const revision = this.sessionRevision
     const owner = this.onlineUserId
     const text = request.text.trim()
@@ -426,6 +409,7 @@ export class TranslationEngine {
     await this.sweepContent()
     await this.content.assertAvailable(normalized)
     if (useCache) normalized = await this.messageRequests.prepare(normalized)
+    if(normalized.providerPreference!==undefined)assertCloudChannelTransport(settings.provider)
     if (!normalized.requestId) normalized.requestId = `manual-${randomUUID()}`
     if (normalized.requestId.startsWith('send-')) {
       const previous = await this.receipts.get(owner, normalized.requestId)
@@ -437,6 +421,7 @@ export class TranslationEngine {
     if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
     let stored = await this.receipts.prepare(owner, settings.provider, normalized)
     normalized = stored.request
+    if(normalized.providerPreference!==undefined)assertCloudChannelTransport(settings.provider)
     await this.content.assertAvailable(normalized)
     const concurrent = this.inFlight.get(this.requestKey(settings.provider, normalized))
     if (concurrent) { this.metricsState.dedupHits += 1; return concurrent }
@@ -515,9 +500,6 @@ export class TranslationEngine {
     const promise = this.enqueue(async () => {
       const started = Date.now()
       await this.receipts.update(owner, normalized.requestId!, { queueWaitMs: started - queuedAt })
-      const charge = this.characterCount(text)
-      const cloudManaged = settings.provider === 'openai'
-      let reserved = false
       try {
         if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
         await this.content.assertAvailable(normalized)
@@ -531,24 +513,17 @@ export class TranslationEngine {
             this.metricsState.cacheHits += 1; return cached
           }
         }
-        if (!cloudManaged) {
-          await this.profile.ensureAvailable(charge, this.reservedCharacters)
-          this.reservedCharacters += charge
-          reserved = true
-        }
-
         this.metricsState.providerCalls += 1
         const provider = this.createProvider(settings, revision, owner)
-        if (cloudManaged) this.notifyBilling()
+        this.notifyBilling()
         let translated: string
         await this.receipts.update(owner, normalized.requestId!, { state: 'pending' })
         try {
-          if (cloudManaged) translated = await provider.translate(normalized)
-          else { const literals = protectLiterals(normalized.text, normalized.quality); translated = literals.restore(await provider.translate({ ...normalized, text: literals.input })) }
+          translated = await provider.translate(normalized)
         }
-        finally { if (cloudManaged && revision === this.sessionRevision) this.notifyBilling() }
+        finally { if (revision === this.sessionRevision) this.notifyBilling() }
         if (isSemanticTranslationMismatch(normalized.text, translated)) throw new TranslationOutcomeError(
-          cloudManaged ? quarantinedTranslationMessage : translationFailureMessage('provider_not_translation'), !cloudManaged)
+          quarantinedTranslationMessage)
         const latency = Date.now() - started
         await this.receipts.update(owner, normalized.requestId!, { providerMs: latency })
         this.recordLatency(latency)
@@ -559,29 +534,7 @@ export class TranslationEngine {
           catch { this.metricsState.lastError = '译文已完成，但本机缓存写入失败；重试将沿用原请求。' }
         }
 
-        // OpenAI billing is now authoritative on the Cloudflare + Supabase server.
-        // DeepL/Google remain local legacy providers for now and keep the old local quota path.
-        if (!cloudManaged) {
-          if (useCache) {
-            await this.charges.runOnce(this.chargeFingerprint(normalized), async () => {
-              await this.profile.consumeCharacters(charge, {
-                provider: settings.provider,
-                accountId: normalized.accountId,
-                conversationId: normalized.conversationId,
-                note: normalized.accountId ? '实时翻译' : 'API 翻译测试'
-              })
-            })
-          } else {
-            await this.profile.consumeCharacters(charge, {
-              provider: settings.provider,
-              accountId: normalized.accountId,
-              conversationId: normalized.conversationId,
-              note: 'API 翻译测试'
-            })
-          }
-          await this.receipts.update(owner, normalized.requestId!, { state: 'charged', translated, chargedCharacters: charge })
-        }
-
+        // Both channels settle exclusively on the authenticated cloud ledger.
         await this.sweepContent()
         await this.content.assertAvailable(normalized)
         return translated
@@ -592,7 +545,6 @@ export class TranslationEngine {
         if (error instanceof TranslationOutcomeError && error.confirmedFailure) await this.receipts.update(owner, normalized.requestId!, { state: 'failed', chargedCharacters: 0, error: error.message })
         throw error
       } finally {
-        if (reserved) this.reservedCharacters = Math.max(0, this.reservedCharacters - charge)
         this.metricsState.lastUpdatedAt = Date.now()
       }
     }, normalized.requestId?.startsWith('send-') === true)
@@ -651,22 +603,12 @@ export class TranslationEngine {
       const token = this.freshSession ? await this.freshSession(owner, force, rejectedToken) : this.onlineAccessToken
       if (revision !== this.sessionRevision) throw new Error('登录状态已变化，已取消旧账号的翻译任务。')
       return token
-    }, undefined, async receipt => { await this.receipts.update(owner, receipt.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined }) })
+    }, undefined, async receipt => { await this.receipts.update(owner, receipt.requestId, { state: 'charged', translated: receipt.translation, chargedCharacters: receipt.sourceCharacters, balanceAfter: receipt.balanceAfter, error: undefined }) },
+    {owner,authorized:()=>revision===this.sessionRevision && owner===this.onlineUserId})
   }
   private createProvider(settings: AppSettings, revision = this.sessionRevision, owner = this.onlineUserId): TranslationProvider {
-    if (settings.provider === 'openai') {
-      if (!this.onlineAccessToken) throw new Error('在线登录令牌缺失，请重新登录。')
-      return this.cloudProvider(revision, owner)
-    }
-
-    if (settings.provider === 'deepl') {
-      const apiKey = settings.deeplApiKey?.trim()
-      if (!apiKey) throw new Error('缺少 DeepL API Key。')
-      return new DeepLProvider(apiKey)
-    }
-
-    const apiKey = settings.googleApiKey?.trim()
-    if (!apiKey) throw new Error('缺少 Google Cloud Translation API Key。')
-    return new GoogleProvider(apiKey)
+    assertCloudChannelTransport(settings.provider)
+    if (!this.onlineAccessToken) throw new Error('在线登录令牌缺失，请重新登录。')
+    return this.cloudProvider(revision, owner)
   }
 }

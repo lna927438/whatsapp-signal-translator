@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import UiIcon from './UiIcon.vue'
 import { t } from '../lib/uiLocale'
-defineProps<{selected:boolean;collapsed?:boolean;line:string;offline?:boolean}>()
-const emit=defineEmits(['settings','toggle','menu','help'])
+defineProps<{selected:boolean;collapsed?:boolean;line:string;offline?:boolean;refreshing?:boolean}>()
+const emit=defineEmits(['settings','toggle','menu','refresh'])
 </script>
 <template><div class="workspace-tools">
  <button class="connection-tool" :class="{offline}" :title="offline?t('离线，草稿已保留'):line" :aria-label="t('连接诊断')" @click="emit('settings')"><UiIcon name="signal" /><span>{{offline?t('离线'):line.match(/\d+ ms/)?.[0]||t('连接')}}</span></button>
- <button @click="emit('help')" :title="t('快捷操作')" :aria-label="t('快捷操作')"><UiIcon name="chat" /></button>
+ <button v-if="selected" :disabled="refreshing" @click="emit('refresh')" :title="t('刷新当前聊天 (F5)')" :aria-label="t('刷新当前聊天')"><UiIcon name="refresh" /></button>
  <button v-if="selected" class="toolbar-collapse" :aria-expanded="!collapsed" :title="collapsed?t('展开翻译面板'):t('收起面板')" :aria-label="collapsed?t('展开翻译面板'):t('收起面板')" @click="emit('toggle')"><UiIcon name="panel" /></button>
  <button v-if="selected" @click="emit('menu')" :title="t('账号操作')" :aria-label="t('账号操作')"><UiIcon name="more" /></button>
 </div></template>

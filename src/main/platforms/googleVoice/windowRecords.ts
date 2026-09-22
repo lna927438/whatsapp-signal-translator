@@ -4,11 +4,13 @@ import { safeStorage } from 'electron'
 import type { AccountProxy } from '../../network/accountProxy'
 import { normalizeGoogleVoiceProxy } from './network'
 import type { GoogleVoiceBrowser } from './officialWindow'
+import { translationChannel, type TranslationChannel } from '../../../shared/translationChannels'
 
 export interface GoogleVoiceRecord {
   id: string; owner: string; label: string; tabOrder: number; createdAt: number
   browser?: GoogleVoiceBrowser; closed?: boolean; notificationsEnabled?: boolean
   proxy?: AccountProxy; proxySecret?: string
+  translationProvider?: TranslationChannel
 }
 export type GoogleVoicePublicRecord = Omit<GoogleVoiceRecord, 'proxySecret'>
 export type GoogleVoiceData = { windows: GoogleVoiceRecord[] }
@@ -96,22 +98,24 @@ export class GoogleVoiceRecords {
     if (!row || !validId(id)) throw new Error('Google Voice 窗口不存在。')
     return this.decryptProxySecret(row.proxySecret)
   }
-  add(owner: string, options: { label?: string; proxy?: any } = {}) {
+  add(owner: string, options: { label?: string; proxy?: any; translationProvider?: TranslationChannel } = {}) {
     if (!owner) return Promise.reject(new Error('请先登录 HelloDog。'))
     if (!options || typeof options !== 'object' || Array.isArray(options)) return Promise.reject(new Error('Google Voice 窗口设置无效。'))
     return this.transact(data => {
       const rows = data.windows.filter(row => row.owner === owner && !row.closed)
       if (rows.length >= 20) throw new Error('最多可添加 20 个 Google Voice 窗口。')
       const row: GoogleVoiceRecord = { id:'gv-'+randomUUID(),owner,label:options.label === undefined ? 'Google Voice '+(rows.length+1) : this.label(options.label),tabOrder:rows.length,createdAt:Date.now() }
+      if (options.translationProvider !== undefined) row.translationProvider=translationChannel(options.translationProvider)
       if (options.proxy !== undefined) Object.assign(row, this.proxyPatch(options.proxy))
       data.windows.push(row); return this.publicRecord(row)
     })
   }
-  update(owner: string, id: string, patch: {label?: string; browser?: GoogleVoiceBrowser; closed?: boolean; proxy?: any; notificationsEnabled?: boolean}) {
+  update(owner: string, id: string, patch: {label?: string; browser?: GoogleVoiceBrowser; closed?: boolean; proxy?: any; notificationsEnabled?: boolean; translationProvider?: TranslationChannel}) {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return Promise.reject(new Error('Google Voice 窗口设置无效。'))
     return this.transact(data => {
       const row = data.windows.find(row => row.owner === owner && row.id === id && !row.closed)
       if (!row || !validId(id)) throw new Error('Google Voice 窗口不存在。')
+      if(patch.translationProvider!==undefined)row.translationProvider=translationChannel(patch.translationProvider)
       if (patch.notificationsEnabled !== undefined) {
         if (typeof patch.notificationsEnabled !== 'boolean') throw new Error('通知设置无效。')
         row.notificationsEnabled = patch.notificationsEnabled

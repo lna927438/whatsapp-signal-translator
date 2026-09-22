@@ -59,13 +59,29 @@ test('account polling keeps the existing public fields while reducing five calls
   assert.equal(response.headers.get('cache-control'), 'no-store')
   const body = await response.json() as any
   assert.deepEqual(body.user, { id: USER, email: 'verified@example.invalid' })
-  assert.deepEqual(Object.keys(body).sort(), ['profile', 'user', 'wallet'])
+  assert.deepEqual(Object.keys(body).sort(), ['defaultTranslationProvider', 'profile', 'translationModels', 'translationProviders', 'user', 'wallet'])
+  assert.deepEqual(body.translationProviders, [])
+  assert.equal(body.defaultTranslationProvider, null)
   assert.deepEqual(Object.keys(body.profile).sort(), ['created_at','email','id','plan_code','status','username'])
   assert.equal(body.profile.id, USER)
   assert.deepEqual(Object.keys(body.wallet).sort(), ['balance','lifetime_adjusted_down','lifetime_credited','lifetime_debited','reserved_characters','updated_at'])
   assert.equal(body.wallet.balance, 100)
+  assert.equal(body.wallet.lifetime_credited, 100)
+  assert.equal(body.wallet.lifetime_debited, 0)
   assert.deepEqual(calls, ['/auth/v1/user','/rest/v1/rpc/client_me'])
   assert.doesNotMatch(JSON.stringify(body), /fixture-service|user_metadata|last_seen_at/)
+})
+
+test('provider choices add no polling round trips and never alter the combined customer totals', async () => {
+  const configured: Env = {...env,TRANSLATION_PROVIDER:'deepseek',TRANSLATION_SELECTABLE_PROVIDERS:'deepseek,openai',DEEPSEEK_API_KEY:'synthetic-deepseek-secret',OPENAI_API_KEY:'synthetic-openai-secret'}
+  await db.query('update public.wallets set balance=73,reserved_characters=8,lifetime_debited=22,lifetime_adjusted_down=5 where user_id=$1',[USER])
+  const response=await worker.fetch(new Request('https://worker.invalid/api/me',{headers:{Authorization:'Bearer fixture-user'}}),configured)
+  assert.equal(response.status,200)
+  const body=await response.json() as any
+  assert.deepEqual(body.translationProviders,['deepseek','openai']);assert.equal(body.defaultTranslationProvider,'deepseek')
+  assert.deepEqual(body.translationModels,{deepseek:{model:'deepseek-v4-pro',displayName:'deepseek-v4-pro'},openai:{model:'gpt-5.6-luna',displayName:'gpt-5.6-luna'}})
+  assert.deepEqual({balance:body.wallet.balance,credited:body.wallet.lifetime_credited,used:body.wallet.lifetime_debited,removed:body.wallet.lifetime_adjusted_down,reserved:body.wallet.reserved_characters},{balance:73,credited:100,used:22,removed:5,reserved:8})
+  assert.deepEqual(calls,['/auth/v1/user','/rest/v1/rpc/client_me']);assert.doesNotMatch(JSON.stringify(body),/synthetic-.*-secret|usage|request_id/)
 })
 
 test('every poll verifies authentication and reads current balances, adjustments, and reservations', async () => {

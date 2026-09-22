@@ -3,6 +3,7 @@ import {createRequire} from 'node:module'
 import {dirname,basename} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {parse,compileScript,compileStyle} from '@vue/compiler-sfc'
+import {currentBillPeriod} from '../website/src/admin/officialBills.ts'
 
 export async function adminCostsBundle():Promise<string> {
   const websiteRequire=createRequire(new URL('../website/package.json',import.meta.url)),runtimeRequire=createRequire(websiteRequire.resolve('wrangler'))
@@ -46,6 +47,12 @@ export function costsFixture(period?:{from:string;to:string;timezone:string}){
   return {from:new Date(Date.parse(selected.from+'T00:00:00Z')-offset).toISOString(),toExclusive:new Date(Date.parse(selected.to+'T00:00:00Z')+86400000-offset).toISOString(),timezone:selected.timezone,snapshotAt:new Date().toISOString(),officialBillingBasis:{kind:'provider_reporting_period',from:selected.from,to:selected.to,timezones:{openai:'UTC',deepseek:'Asia/Shanghai'}},totals:{charged_characters:23541,refunded_characters:0,known_cost_usd_exact:'0.123456789012',unpriced_requests:0},users:[],days:[],providers:[{provider:'openai',known_cost_usd_exact:'0.123456789011'},{provider:'deepseek',known_cost_usd_exact:'0.000000000001'}],officialBills:[] as Record<string,unknown>[],providerBalance:{balances:[{currency:'USD',total:'999999999999'}],fetched_at:'2020-01-01T00:00:00Z'}}
 }
 export function officialBillFixture(provider:'openai'|'deepseek',amount:string,period=costsFixture()){
-  const offset=provider==='deepseek'?28800000:0,basis=period.officialBillingBasis
+  const offset=provider==='deepseek'?28800000:0,metadata=period.officialBillingBasis as Record<string,any>,basis=metadata.kind==='provider_current_month'?metadata.periods[provider]:metadata
   return {id:provider+'-fixture',provider,official_usd_exact:amount,official_usd:987654321,period_from:new Date(Date.parse(basis.from+'T00:00:00Z')-offset).toISOString(),period_to:new Date(Date.parse(basis.to+'T00:00:00Z')+86400000-offset).toISOString(),timezone:provider==='openai'?'UTC':'Asia/Shanghai',source:provider==='openai'?'openai_costs_api':'manual_statement',fetched_at:new Date().toISOString(),provisional:true,currentAccount:true,periodComplete:true,currency:'USD'}
+}
+
+export function nativeMonthFixture(data:ReturnType<typeof costsFixture>,now:number){
+ const period=(timezone:string)=>({...currentBillPeriod(timezone,now),timezone})
+ data.officialBillingBasis={kind:'provider_current_month',timezones:{openai:'UTC',deepseek:'Asia/Shanghai'},periods:{openai:period('UTC'),deepseek:period('Asia/Shanghai')}} as any
+ return data
 }

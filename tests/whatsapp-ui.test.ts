@@ -97,24 +97,6 @@ for (const receiptStyle of ['tail','wds','author'] as const) test('WhatsApp curr
   }finally{h.dom.window.close();}
 });
 
-test('an atomic chat send lock does not block local contact note typing, Enter, paste or save',async()=>{
- const h=harness(),w=h.win;let locked=false,finish!:(value:unknown)=>void,writes=0
- w.realtimeTranslator.getContactNote=async()=>({text:'Existing note',revision:1})
- w.realtimeTranslator.saveContactNote=async(_peer:string,text:string)=>{writes++;return{text,revision:2}}
- w.realtimeTranslator.submitSend=async()=>{locked=Boolean(w.__RT_SEND_SELECT__({...h.task,original:h.task.request.text}));return new Promise(resolve=>{finish=resolve})}
- try{
-  w.__HD_SYNC_CONTACT_DETAILS__();await until(()=>!w.document.querySelector('[data-rt-ui="contact-details"] button').disabled)
-  h.enter();await until(()=>locked)
-  w.document.querySelector('[data-rt-ui="contact-details"] button').click()
-  const area=w.document.querySelector('textarea');assert.ok(area)
-  for(const event of [new w.KeyboardEvent('keydown',{key:'中',bubbles:true,cancelable:true}),new w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}),new w.Event('paste',{bubbles:true,cancelable:true})])assert.equal(area.dispatchEvent(event),true)
-  area.value='中文备注';area.dispatchEvent(new w.Event('input',{bubbles:true}))
-  w.document.querySelector('dialog button[type=submit]').click();await until(()=>writes===1)
-  assert.equal(h.prepared.length,1);assert.equal(h.nativeClicks,0);assert.equal(w.document.querySelector('[data-rt-ui="contact-details"] button').textContent,'中文备注')
-  await w.__RT_SEND_RELEASE__(h.task.id,false);finish({state:'uncertain'});await tick()
- }finally{h.dom.window.close()}
-})
-
 test('a pending native bubble is not reverse-translated before its outgoing marker appears',async()=>{
  const h=harness({modernReceipt:true,receiptStyle:'wds',delayedMarker:true,historyMode:'new',incomingResult:'unwanted reverse translation'});
  try{

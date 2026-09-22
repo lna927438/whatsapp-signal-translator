@@ -3,6 +3,7 @@ import { installWebSecurity } from '../../webSecurity'
 import { app, net, session, Menu, BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { performance } from 'node:perf_hooks'
 import { whatsappInjectionScript } from './inject/script'
 import { SendNotStartedError, SendPendingError, type SendTask } from '../../translation/sendTasks'
 import { clampViewBounds, type ViewBounds } from './viewBounds'
@@ -64,7 +65,11 @@ export class WhatsAppAdapter {
   private activeId?: string
   private mainWindow?: BrowserWindow
   private overlayOpen = false
-  private focusRevision = 0
+  private readonly pageStates = new Map<string, 'loading' | 'ready' | 'failed'>()
+  private readonly networkReady = new WeakSet<WebContentsView>()
+  private readonly failedDocuments = new WeakSet<WebContentsView>()
+  private readonly proxySetups = new Map<string, Promise<void>>()
+  private readonly pageLoads = new Map<string, { view: WebContentsView; work: Promise<void>; cancel: () => void }>()
   private bounds: ViewBounds = { x: 248, y: 180, width: 1032, height: 640 }
   private menuHandler?: (accountId: string) => void
   private readonly preferences = new Map<string, any>()
@@ -85,7 +90,10 @@ export class WhatsAppAdapter {
     const contents = this.contents(accountId)
     if (!contents) return
     contents.setZoomFactor(Math.max(0.5, Math.min(1.5, Number(value.zoomFactor) || 1)))
-    await contents.executeJavaScript(`window.__RT_APPLY_SETTINGS__?.(${JSON.stringify({ fontSize: value.fontSize, translationColor: value.translationColor, translationsVisible: value.translationsVisible !== false })})`).catch(() => {})
+    // A page which is loading or has crashed cannot acknowledge injected settings.
+    // The latest stored settings are applied again on dom-ready.
+    if (this.pageStates.get(accountId) !== 'ready' || contents.isCrashed()) return
+    await boundedOperation(contents.executeJavaScript(`window.__RT_APPLY_SETTINGS__?.(${JSON.stringify({ fontSize: value.fontSize, translationColor: value.translationColor, translationsVisible: value.translationsVisible !== false })})`), 1000, '页面设置稍后应用。').catch(() => {})
   }
 
   attachMainWindow(window: BrowserWindow): void {
@@ -93,42 +101,33 @@ export class WhatsAppAdapter {
     window.on('resize', () => this.layout())
   }
 
-  async focus(accountId: string): Promise<void> {
+  async focus(accountId: string): Promise<{ state: 'loading' | 'ready' | 'cancelled' }> {
     if (this.preferences.get(accountId)?.runtimeMode === 'paused') throw new Error('此账号已暂停，请先恢复收消息。')
     const started = performance.now()
-    if (!this.mainWindow) throw new Error('Main window is not attached')
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return { state: 'cancelled' }
     this.hideAll()
-    const revision = this.focusRevision
     let view = this.views.get(accountId)
     if (!view || view.webContents.isDestroyed()) {
+      if (view) this.remove(accountId)
       view = this.createView(accountId)
+      view.setVisible(false)
       this.views.set(accountId, view)
       this.mainWindow.contentView.addChildView(view)
-
-      const userAgent = chromeUserAgent()
-      view.webContents.setUserAgent(userAgent)
-      view.webContents.session.setUserAgent(userAgent, 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7')
-      try {
-        const proxy = this.preferences.get(accountId)?.proxy
-        await configureProxySession(view.webContents.session, proxy)
-        view.webContents.setWebRTCIPHandlingPolicy(proxy?.enabled ? 'disable_non_proxied_udp' : 'default')
-        await view.webContents.loadURL('https://web.whatsapp.com/', { userAgent })
-      } catch {
-        const obsolete = revision !== this.focusRevision
-        if (this.views.get(accountId) === view) this.remove(accountId)
-        if (obsolete) return
-        throw new Error('WhatsApp 加载失败，请检查账号代理或网络后重新打开。')
-      }
     }
-    if (revision !== this.focusRevision || view.webContents.isDestroyed()) return
+    // Commit selection and dimensions before any proxy, navigation or page script.
+    // Background completion may update this view, but may never change selection.
     this.activeId = accountId
-    view.setVisible(!this.overlayOpen)
     this.layout()
+    if (this.pageStates.get(accountId) !== 'ready' || view.webContents.isCrashed()) {
+      void this.loadPage(accountId, view).catch(() => {})
+    }
+    const state = this.pageStates.get(accountId) === 'ready' ? 'ready' : 'loading'
+    this.setPageState(accountId, view, state)
     markSwitch(performance.now() - started)
+    return { state }
   }
 
   hideAll(): void {
-    this.focusRevision += 1
     for (const view of this.views.values()) {
       if (!view.webContents.isDestroyed()) view.setVisible(false)
     }
@@ -140,7 +139,7 @@ export class WhatsAppAdapter {
     if (!this.activeId) return
     const view = this.views.get(this.activeId)
     if (!view || view.webContents.isDestroyed()) return
-    view.setVisible(!open)
+    view.setVisible(!open && this.pageStates.get(this.activeId) === 'ready')
     if (!open) this.layout()
   }
 
@@ -165,14 +164,16 @@ export class WhatsAppAdapter {
   }
 
   async prepareRestart(): Promise<void> {
-    for (const view of this.views.values()) {
+    for (const [accountId, view] of this.views) {
       const contents = view.webContents
       if (contents.isDestroyed()) continue
-      const result = await contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()')
-      if (result?.editing) throw new Error('正在写入消息，请稍后重启。')
-      if (result?.media || result?.capturing) throw new Error('请先结束通话、录音或处理附件预览，再重启。')
       // WebRTC and recording are owned by the platform; never interrupt them.
       if (contents.isCurrentlyAudible()) throw new Error('聊天窗口正在使用音频，请先结束通话、录音或播放，再重启。')
+      if (this.pageStates.get(accountId) === 'ready' && !contents.isCrashed()) {
+        const result = await boundedOperation(contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()'), 1500, '聊天页面暂未响应，草稿尚未确认保存，请稍后重启。')
+        if (result?.busy || result?.editing) throw new Error('正在写入消息，请稍后重启。')
+        if (result?.media || result?.capturing) throw new Error('请先结束通话、录音或处理附件预览，再重启。')
+      }
       await contents.session.flushStorageData()
     }
   }
@@ -181,19 +182,27 @@ export class WhatsAppAdapter {
     const existing = this.reloads.get(accountId)
     if (existing) return existing
     const work = boundedOperation((async () => {
-      const contents = this.contents(accountId)
-      if (!contents) { await this.focus(accountId); return }
-      const state = await contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()')
-      if (state?.busy || contents.isCurrentlyAudible()) { this.resumeTranslations(); return }
-      await new Promise<void>((resolve, reject) => {
-        const finish = () => { cleanup(); resolve() }
-        const fail = () => { cleanup(); reject(new Error('页面刷新未完成，账号与草稿已保留。')) }
-        const cleanup = () => { contents.removeListener('did-finish-load', finish); contents.removeListener('did-fail-load', fail); clearTimeout(timer) }
-        const timer = setTimeout(fail, 18000)
-        contents.once('did-finish-load', finish); contents.once('did-fail-load', fail)
-        contents.reload()
-      })
-    })(), 20000, '页面刷新超时，账号和草稿已保留。').finally(() => this.reloads.delete(accountId))
+      let view = this.views.get(accountId)
+      if (!view || view.webContents.isDestroyed()) {
+        await this.focus(accountId)
+        view = this.views.get(accountId)
+        if (!view) throw new Error('页面尚未准备好，请重新打开账号。')
+        await this.pageLoads.get(accountId)?.work
+        return
+      }
+      const contents = view.webContents
+      if (contents.isCurrentlyAudible()) throw new Error('聊天窗口正在使用音频，请先结束通话、录音或播放，再刷新页面。')
+      const ready = this.pageStates.get(accountId) === 'ready' && !contents.isCrashed()
+      if (ready) {
+        // Never reload a healthy page until its draft and media guards respond.
+        // A crashed/unloaded renderer has no live editing session to interrogate.
+        const state = await boundedOperation(contents.executeJavaScript('window.__RT_SAVE_WORKSPACE__?.()'), 1500, '聊天页面暂未响应，已保留草稿，请稍后重试刷新。')
+        if (state?.busy || state?.editing) throw new Error('正在处理消息，未刷新页面，请稍后重试；草稿已保留。')
+        if (state?.media || state?.capturing || contents.isCurrentlyAudible()) throw new Error('请先结束通话、录音或处理附件预览，再刷新页面。')
+      }
+      if (this.views.get(accountId) !== view || contents.isDestroyed()) return
+      await this.loadPage(accountId, view, ready)
+    })(), 32000, '页面刷新超时，账号和草稿已保留。').finally(() => this.reloads.delete(accountId))
     this.reloads.set(accountId, work)
     return work
   }
@@ -276,12 +285,83 @@ export class WhatsAppAdapter {
   remove(accountId: string): void {
     setAccountState(accountId, 'closed')
     const view = this.views.get(accountId)
-    if (view && !view.webContents.isDestroyed()) {
-      this.mainWindow?.contentView.removeChildView(view)
-      view.webContents.close()
-    }
+    this.pageLoads.get(accountId)?.cancel()
     this.views.delete(accountId)
+    this.pageStates.delete(accountId)
+    if (view) {
+      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+        try { this.mainWindow.contentView.removeChildView(view) } catch { /* Native parent may already have detached a destroyed view. */ }
+      }
+      if (!view.webContents.isDestroyed()) view.webContents.close()
+    }
     if (this.activeId === accountId) this.activeId = undefined
+  }
+
+  private setPageState(accountId: string, view: WebContentsView, state: 'loading' | 'ready' | 'failed'): void {
+    if (this.views.get(accountId) !== view || view.webContents.isDestroyed()) return
+    this.pageStates.set(accountId, state)
+    view.setVisible(this.activeId === accountId && !this.overlayOpen && state === 'ready')
+    if (this.activeId === accountId) this.layout()
+    if (state !== 'ready') setAccountState(accountId, state === 'loading' ? 'loading' : 'disconnected')
+    const host = this.mainWindow
+    if (host && !host.isDestroyed() && !host.webContents.isDestroyed()) {
+      host.webContents.send('ui:account-action', { action: `page-${state}`, accountId })
+    }
+  }
+
+  private loadPage(accountId: string, view: WebContentsView, reload = false): Promise<void> {
+    const existing = this.pageLoads.get(accountId)
+    if (existing?.view === view && this.pageStates.get(accountId) === 'loading') return existing.work
+    existing?.cancel()
+    const contents = view.webContents
+    let settled = false, cancel!: () => void
+    this.failedDocuments.delete(view)
+    this.setPageState(accountId, view, 'loading')
+    const work = new Promise<void>((resolve, reject) => {
+      const current = () => !settled && this.views.get(accountId) === view && !contents.isDestroyed()
+      const cleanup = () => {
+        clearTimeout(timer)
+        contents.removeListener('dom-ready', ready); contents.removeListener('did-finish-load', ready)
+        contents.removeListener('did-fail-load', failed); contents.removeListener('render-process-gone', gone); contents.removeListener('destroyed', gone)
+      }
+      const finish = (ok: boolean) => {
+        if (settled) return
+        settled = true; cleanup()
+        this.setPageState(accountId, view, ok ? 'ready' : 'failed')
+        if (ok) resolve()
+        else reject(new Error('WhatsApp 页面加载未完成，请检查代理或网络后刷新；账号资料已保留。'))
+      }
+      const ready = () => { if (!this.failedDocuments.has(view)) finish(true) }
+      const failed = (_event: unknown, code: number, _description: string, _url: string, isMain: boolean) => { if (isMain && code !== -3) finish(false) }
+      const gone = () => finish(false)
+      cancel = () => { if (!settled) { settled = true; cleanup(); resolve() } }
+      const timer = setTimeout(() => finish(false), 30000)
+      contents.once('dom-ready', ready); contents.once('did-finish-load', ready)
+      contents.on('did-fail-load', failed); contents.once('render-process-gone', gone); contents.once('destroyed', gone)
+      void (async () => {
+        if (!this.networkReady.has(view)) {
+          const proxy = this.preferences.get(accountId)?.proxy
+          // Native setProxy cannot be cancelled. Serialize only this account's
+          // session setup so a timed-out old operation cannot overwrite a retry.
+          const setup = (this.proxySetups.get(accountId) || Promise.resolve()).catch(() => {}).then(async () => {
+            if (current()) await configureProxySession(contents.session, proxy)
+          })
+          this.proxySetups.set(accountId, setup)
+          void setup.finally(() => { if (this.proxySetups.get(accountId) === setup) this.proxySetups.delete(accountId) }).catch(() => {})
+          await boundedOperation(setup, 8000, '代理配置未完成。')
+          if (!current()) return
+          contents.setWebRTCIPHandlingPolicy(proxy?.enabled ? 'disable_non_proxied_udp' : 'default')
+          this.networkReady.add(view)
+        }
+        if (!current()) return
+        if (reload) contents.reload()
+        else await contents.loadURL('https://web.whatsapp.com/', { userAgent: chromeUserAgent() })
+      })().catch(() => { if (current()) finish(false) })
+    })
+    const entry = { view, work, cancel }
+    this.pageLoads.set(accountId, entry)
+    void work.finally(() => { if (this.pageLoads.get(accountId) === entry) this.pageLoads.delete(accountId) }).catch(() => {})
+    return work
   }
 
   private createView(accountId: string): WebContentsView {
@@ -300,8 +380,11 @@ export class WhatsAppAdapter {
 
     const userAgent = chromeUserAgent()
     setAccountState(accountId, 'loading')
-    view.webContents.on('did-fail-load', (_event, _code, _description, _url, isMain) => { if (isMain) setAccountState(accountId, 'disconnected') })
-    view.webContents.on('render-process-gone', () => setAccountState(accountId, 'disconnected'))
+    view.webContents.on('did-fail-load', (_event, code, _description, _url, isMain) => {
+      if (isMain && code !== -3) { this.failedDocuments.add(view); this.setPageState(accountId, view, 'failed') }
+    })
+    view.webContents.on('render-process-gone', () => { this.failedDocuments.add(view); this.setPageState(accountId, view, 'failed') })
+    view.webContents.on('dom-ready', () => { if (!this.failedDocuments.has(view)) this.setPageState(accountId, view, 'ready') })
     view.webContents.on('before-input-event', (event, input) => {
       if (input.type === 'keyDown' && (input.key === 'F5' || input.control && input.key.toLowerCase() === 'r')) {
         event.preventDefault(); void this.reload(accountId).catch(() => this.mainWindow?.webContents.send('translator:error', '刷新未完成，草稿已保留。')); return
@@ -328,9 +411,11 @@ export class WhatsAppAdapter {
     installWebSecurity(view.webContents, 'whatsapp')
     const installTranslation = async () => {
       try {
-        await view.webContents.executeJavaScript(whatsappInjectionScript, true)
+        if (this.views.get(accountId) !== view || view.webContents.isDestroyed()) return
+        await boundedOperation(view.webContents.executeJavaScript(whatsappInjectionScript, true), 5000, '翻译组件仍在加载。')
+        if (this.views.get(accountId) !== view || view.webContents.isDestroyed()) return
         await this.applyPreferences(accountId, this.preferences.get(accountId) || {})
-        const ready = await view.webContents.executeJavaScript('typeof window.__RT_SEND_COMMIT__ === "function" && typeof window.__RT_SEND_SELECT__ === "function"')
+        const ready = await boundedOperation(view.webContents.executeJavaScript('typeof window.__RT_SEND_COMMIT__ === "function" && typeof window.__RT_SEND_SELECT__ === "function"'), 1000, '翻译组件仍在加载。')
         if (ready) view.webContents.send('translator:send-guard-ready')
       } catch (error) {
         console.error('WhatsApp injection failed')
@@ -346,7 +431,7 @@ export class WhatsAppAdapter {
   }
 
   private layout(): void {
-    if (!this.mainWindow || !this.activeId) return
+    if (!this.mainWindow || this.mainWindow.isDestroyed() || !this.activeId) return
     const view = this.views.get(this.activeId)
     if (!view || view.webContents.isDestroyed()) return
     const [width, height] = this.mainWindow.getContentSize()

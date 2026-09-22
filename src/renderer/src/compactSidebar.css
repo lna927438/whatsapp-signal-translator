@@ -35,3 +35,26 @@
 .app-shell.compact-shell .account-navigation .tab-app-icon .unread-badge{right:-4px;top:-3px;border-width:1px;font-size:8px;height:12px;line-height:12px}
 .app-shell.compact-shell .account-navigation .account-add{height:28px;width:28px;padding:5px}
 .app-shell.compact-shell .workspace-status{min-height:27px;height:auto;padding:3px 10px;gap:9px;font-size:11px;flex-wrap:nowrap}
+
+/* A fixed, labelled rail keeps all supported applications discoverable. */
+.compact-shell .platform-rail{flex-basis:88px;width:88px;padding:10px 6px;gap:5px}
+.app-shell.compact-shell .platform-rail .compact-tool{display:flex;flex-direction:column;justify-content:center;gap:5px;width:74px!important;height:58px!important;padding:6px!important;border-radius:10px}
+.app-shell.compact-shell .platform-rail .brand{margin-bottom:8px;height:62px!important}
+.compact-shell .platform-rail .rail-label{display:block;font-size:10px;line-height:14px;font-weight:500;white-space:nowrap}
+.compact-shell .platform-rail .compact-tool>svg{width:20px;height:20px}
+.compact-shell .platform-rail .platform-entry img{width:27px;height:27px}
+.compact-shell .platform-rail .unread-badge{right:8px!important;top:2px!important}
+.compact-shell .app-home{display:block;padding:clamp(22px,5vw,64px);overflow:auto;background:var(--bg,#11171c)}
+.compact-shell .app-home .app-center{max-width:980px;margin:0 auto;width:100%;padding:0;border:0;background:transparent}
+.app-home .app-center>header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:30px;padding:0;border:0}
+.app-home .eyebrow{font-size:10px;letter-spacing:3px;color:var(--muted)}
+.app-home .app-center h2{font-size:28px;margin:10px 0}
+.app-home .app-center p,.app-home .home-balance{color:var(--muted);font-size:13px;line-height:1.7}
+.app-home .home-balance{font-variant-numeric:tabular-nums;white-space:nowrap}
+.app-home .platform-cards{display:grid;grid-template-columns:repeat(3,minmax(160px,1fr));gap:18px;margin:0}
+.app-home .platform-cards button{display:flex;align-items:flex-start;flex-direction:column;gap:12px;min-height:210px;border:1px solid var(--border);border-radius:16px;padding:25px;background:var(--surface);color:var(--text);text-align:left;cursor:pointer;transition:background .15s,border-color .15s}
+.app-home .platform-cards button:hover{border-color:var(--accent);background:var(--raised)}
+.app-home .platform-cards img{height:42px;width:42px}.app-home .platform-cards b{font-size:17px}.app-home .platform-cards small{font-size:12px;color:var(--muted)}.app-home .platform-cards button>span{margin-top:auto;font-size:12px;color:var(--accent)}
+.app-home .home-hint{margin-top:25px}
+@media(max-width:850px){.app-home .platform-cards{grid-template-columns:repeat(2,minmax(160px,1fr))}.app-home .app-center>header{align-items:flex-start;flex-direction:column;gap:3px}}
+@media(max-height:720px){.app-shell.compact-shell .platform-rail .compact-tool{height:49px!important;gap:3px}.compact-shell .platform-rail .utility-spacer{min-height:4px}}

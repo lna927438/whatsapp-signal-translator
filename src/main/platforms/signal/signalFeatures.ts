@@ -101,7 +101,6 @@ export function registerSignalFeatures(window: BrowserWindow, signal: SignalAdap
   handle('signal:contact-save', async (event, id: string, value: string, patch: any) => {
     const c = await context(event, id), peer = directPeer(value), params: Record<string, unknown> = { recipient: peer }
     if (patch.nickName !== undefined) { params.nickGivenName = text(patch.nickName, 80); params.nickFamilyName = '' }
-    if (patch.note !== undefined) params.note = text(patch.note, 2000)
     if (patch.expiration !== undefined) params.expiration = expiry(patch.expiration)
     await request(c, 'updateContact', params); changed(id); return true
   })

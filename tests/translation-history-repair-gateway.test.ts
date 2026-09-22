@@ -20,9 +20,9 @@ before(async () => {
   db = await database()
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input))
-    if (url.origin === 'https://api.deepseek.com' && url.pathname === '/responses') {
+    if (url.origin === 'https://api.deepseek.com' && url.pathname === '/responses' || url.origin === 'https://api.openai.com' && url.pathname === '/v1/responses') {
       calls++
-      return reply({ id: 'test-provider-response', status: 'completed', model, output_text: resultText, usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 0 }, output_tokens: 20, total_tokens: 120 } })
+      return reply({ id: 'test-provider-response', status: 'completed', model:JSON.parse(String(init?.body)).model, output_text: resultText, usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 0,cache_write_tokens:0 }, output_tokens: 20, total_tokens: 120 } })
     }
     assert.equal(url.origin, env.SUPABASE_URL, 'tests must not use the real network')
     if (url.pathname === '/auth/v1/user') return reply({ id: new Headers(init?.headers).get('Authorization') === 'Bearer other' ? OTHER : USER })
@@ -39,16 +39,46 @@ before(async () => {
   }
 })
 after(async () => { globalThis.fetch = originalFetch; await db?.close() })
-beforeEach(async () => { await reset(db); await db.exec('delete from translator_private.provider_circuits'); calls = 0; resultText = corrected; loseCommitReply = false })
-async function seed(translation = invalid) {
+beforeEach(async () => { await reset(db); await db.exec('delete from translator_private.provider_circuits'); calls = 0; resultText = corrected; loseCommitReply = false;delete env.TRANSLATION_SELECTABLE_PROVIDERS;delete env.OPENAI_API_KEY;delete env.OPENAI_TRIAL_USER_IDS })
+async function seed(translation = invalid,providerPreference?:'openai'|'deepseek') {
+  const provider=providerPreference||'deepseek',seedModel=provider==='openai'?'gpt-5.6-luna':model
   const args = { p_user_id: USER, p_request_id: body.requestId, p_claim_token: randomUUID() }
-  const hash = createHash('sha256').update(JSON.stringify(['translation-v1', 'routing-v2', body.text, body.sourceLanguage, body.targetLanguage, body.accountId, body.conversationId, body.context])).digest('hex')
-  await rpc(db, 'begin_translation', { ...args, p_payload_hash: hash, p_characters: Array.from(source).length, p_metadata: { metering_version: '2', provider: 'deepseek', requested_model: model, provider_plan: [{ provider: 'deepseek', model }], provider_correction: { provider: 'deepseek', model, maxAttempts: 1 }, account_id: body.accountId, conversation_id: body.conversationId, source_language: 'auto', target_language: 'zh-CN', security_input_token_bound: 10000, security_output_token_bound: 1024 } })
+  const hash = createHash('sha256').update(JSON.stringify(['translation-v1', 'routing-v2', body.text, body.sourceLanguage, body.targetLanguage, body.accountId, body.conversationId, body.context,...(providerPreference?[{providerPreference}]:[])])).digest('hex')
+  await rpc(db, 'begin_translation', { ...args, p_payload_hash: hash, p_characters: Array.from(source).length, p_metadata: { metering_version: '2', provider, requested_model: seedModel, provider_plan: [{ provider, model:seedModel }],...(provider==='deepseek'?{provider_correction: { provider: 'deepseek', model, maxAttempts: 1 }}:{}), account_id: body.accountId, conversation_id: body.conversationId, source_language: 'auto', target_language: 'zh-CN', security_input_token_bound: 10000, security_output_token_bound: 1024 } })
   const at = new Date().toISOString()
-  await rpc(db, 'complete_translation_metered', { ...args, p_translation: translation, p_model: model, p_latency_ms: 10, p_receipt: { version: 2, selectedProvider: 'deepseek', attempts: [{ provider: 'deepseek', model, startedAt: at, finishedAt: at, errorCode: null, receipt: { model, httpStatus: 200, inputTokens: 100, cachedTokens: 0, outputTokens: 20, totalTokens: 120, createdAt: at } }] } })
+  await rpc(db, 'complete_translation_metered', { ...args, p_translation: translation, p_model: seedModel, p_latency_ms: 10, p_receipt: { version: 2, selectedProvider: provider, attempts: [{ provider, model:seedModel, startedAt: at, finishedAt: at, errorCode: null, receipt: { model:seedModel, httpStatus: 200, inputTokens: 100, cachedTokens: 0,cacheWriteTokens:0,serviceTier:'default', outputTokens: 20, totalTokens: 120, createdAt: at } }] } })
 }
 const request = (patch: Record<string, unknown> = {}, token = 'owner') => worker.fetch(new Request('https://worker.invalid/api/translation-repair', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, ...patch }) }), env)
 const status = () => worker.fetch(new Request('https://worker.invalid/api/translation-repair-status?requestId=' + body.requestId, { headers: { Authorization: 'Bearer owner' } }), env)
+
+test('explicit OpenAI repair stays on the original provider and never changes its paid debit',async()=>{
+ env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai';env.OPENAI_API_KEY='isolated-repair-test'
+ await seed(invalid,'openai');const before=await wallet(db)
+ assert.equal((await request({providerPreference:'deepseek'})).status,409)
+ assert.equal(calls,0)
+ const first=await request({providerPreference:'openai'}),value=await first.json() as any
+ assert.equal(first.status,200);assert.equal(value.model,'gpt-5.6-luna');assert.equal(value.translation,corrected);assert.equal(value.chargedCharacters,0)
+ assert.deepEqual(await (await request({providerPreference:'openai'})).json(),value)
+ assert.equal(calls,1);assert.deepEqual(await wallet(db),before)
+ const rows=(await db.query<any>('select provider from translator_private.provider_attempt_usage')).rows
+ assert.ok(rows.every(row=>row.provider==='openai'))
+})
+
+test('trial repair requires the current verified account and preserves its original debit',async()=>{
+ env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai';env.OPENAI_API_KEY='isolated-repair-test';env.OPENAI_TRIAL_USER_IDS=OTHER
+ await seed(invalid,'openai');const before=await wallet(db)
+ const denied=await request({providerPreference:'openai',userId:OTHER,accountId:OTHER})
+ assert.equal(denied.status,503);assert.equal((await denied.json()).error,'provider_not_available')
+ assert.equal(calls,0);assert.deepEqual(await wallet(db),before)
+ env.OPENAI_TRIAL_USER_IDS=USER
+ const fixed=await request({providerPreference:'openai'}),value=await fixed.json() as any
+ assert.equal(fixed.status,200);assert.equal(value.translation,corrected);assert.equal(value.chargedCharacters,0)
+ assert.equal(calls,1);assert.deepEqual(await wallet(db),before)
+ env.OPENAI_TRIAL_USER_IDS=''
+ assert.equal((await request({providerPreference:'openai'})).status,503)
+ const existing=await status();assert.equal(existing.status,200);assert.deepEqual((await existing.json() as any).response,value)
+ assert.equal(calls,1);assert.deepEqual(await wallet(db),before)
+})
 
 test('a paid legacy answer is repaired under one durable job with no new character debit, including a lost commit response', async () => {
   await seed(); const before = await wallet(db); loseCommitReply = true

@@ -1,7 +1,7 @@
 export type BillProvider='openai'|'deepseek'
-export type BillPeriod={from:string;to:string;timezone:string;provider:string}
+export type BillPeriod={from:string;to:string;timezone:string;provider:string;officialCurrentMonth?:string}
 type Row=Record<string,unknown>
-export type OfficialBill={provider:BillProvider;amount:string;fetchedAt:string;source:string;provisional:boolean;timezone:'UTC'|'Asia/Shanghai'}
+export type OfficialBill={provider:BillProvider;amount:string;fetchedAt:string;source:string;provisional:boolean;timezone:'UTC'|'Asia/Shanghai';from:string;to:string}
 export type OfficialBillSummary={complete:boolean;total:string|null;partial:string|null;missing:BillProvider[];items:OfficialBill[]}
 const scale=1000000000000n
 
@@ -18,10 +18,17 @@ export function selectedBillProviders(data:Row,period:BillPeriod):BillProvider[]
   return period.provider?enabled.filter(provider=>provider===period.provider):enabled
 }
 
-/** Only automatically collected current-period bills have a freshness deadline.
- * A manual DeepSeek statement must never be described as an automatic sync. */
+/** Current-period imported statements age too: repeatedly reading one does not
+ * make its amount current. The UI separately explains how each source updates. */
 export function officialBillDelayed(summary:OfficialBillSummary,period:BillPeriod,now=Date.now()):boolean {
-  return summary.items.some(item=>item.source==='openai_costs_api'&&period.to>=currentBillPeriod(item.timezone,now).to&&now-Date.parse(item.fetchedAt)>10*60000)
+  return summary.items.some(item=>{const range=period.officialCurrentMonth==='true'?item:period,today=currentBillPeriod(item.timezone,now).to;return range.to>=today&&range.from<=today&&now-Date.parse(item.fetchedAt)>10*60000})
+}
+
+export function officialBillNotice(item:OfficialBill|undefined,period:BillPeriod,now=Date.now()):string {
+  if(!item)return ''
+  if(item.source==='manual_statement')return '手动账单不会自动更新，新增费用需重新导入。'
+  return officialBillDelayed({items:[item],complete:true,total:item.amount,partial:item.amount,missing:[]},period,now)
+    ?'官方同步有延迟，保留上次金额。':'官方账单可能延迟补记。'
 }
 
 export function currentBillPeriod(timezone:string,now=Date.now()):{from:string;to:string}{
@@ -61,8 +68,11 @@ export function officialBillSummary(data:Row,period:BillPeriod,now=Date.now()):O
   // Business statistics retain their selected timezone; official bills cover
   // the same calendar dates in each provider's own reporting timezone.
   if(data.timezone!==period.timezone||instant(data.from)!==from||instant(data.toExclusive)!==to||!Array.isArray(data.officialBills))return empty()
-  const basis=data.officialBillingBasis as Row|undefined,zones=basis?.timezones as Row|undefined
-  if(basis?.kind!=='provider_reporting_period'||basis.from!==period.from||basis.to!==period.to||zones?.openai!=='UTC'||zones?.deepseek!=='Asia/Shanghai')return empty()
+  const basis=data.officialBillingBasis as Row|undefined,zones=basis?.timezones as Row|undefined,nativeMonth=period.officialCurrentMonth==='true'
+  if(zones?.openai!=='UTC'||zones?.deepseek!=='Asia/Shanghai')return empty()
+  if(nativeMonth){
+    if(basis?.kind!=='provider_current_month'||instant(data.snapshotAt)===null)return empty()
+  }else if(basis?.kind!=='provider_reporting_period'||basis.from!==period.from||basis.to!==period.to)return empty()
   const items:OfficialBill[]=[]
   for(const provider of selected){
     const candidates=data.officialBills.filter((value):value is Row=>Boolean(value)&&typeof value==='object'&&(value as Row).provider===provider)
@@ -70,11 +80,17 @@ export function officialBillSummary(data:Row,period:BillPeriod,now=Date.now()):O
     const bill=candidates[0]
     if(bill.currentAccount!==true||bill.periodComplete!==true||bill.currency!=='USD')continue
     const billTimezone=provider==='openai'?'UTC':'Asia/Shanghai',billOffset=provider==='deepseek'?28800000:0
+    const providerPeriod=nativeMonth?currentBillPeriod(billTimezone,referenceNow):period
+    if(nativeMonth){
+      const periods=basis?.periods as Row|undefined,reported=periods?.[provider] as Row|undefined
+      if(reported?.from!==providerPeriod.from||reported?.to!==providerPeriod.to||reported?.timezone!==billTimezone)continue
+    }
+    const billFrom=Date.parse(providerPeriod.from+'T00:00:00Z')-billOffset,billTo=Date.parse(providerPeriod.to+'T00:00:00Z')+86400000-billOffset
     const fetchedAt=instant(bill.fetched_at)
-    if(bill.timezone!==billTimezone||instant(bill.period_from)!==start-billOffset||instant(bill.period_to)!==end+86400000-billOffset||fetchedAt===null||fetchedAt>referenceNow+60000)continue
+    if(bill.timezone!==billTimezone||instant(bill.period_from)!==billFrom||instant(bill.period_to)!==billTo||fetchedAt===null||fetchedAt>referenceNow+60000)continue
     const amount=sumOfficialAmounts([bill.official_usd_exact])
     if(amount===null||!['openai_costs_api','manual_statement'].includes(String(bill.source))||(bill.source==='openai_costs_api'&&provider!=='openai'))continue
-    items.push({provider,amount,fetchedAt:String(bill.fetched_at),source:String(bill.source),provisional:bill.provisional!==false,timezone:billTimezone})
+    items.push({provider,amount,fetchedAt:String(bill.fetched_at),source:String(bill.source),provisional:bill.provisional!==false,timezone:billTimezone,from:providerPeriod.from,to:providerPeriod.to})
   }
   const missing=selected.filter(provider=>!items.some(item=>item.provider===provider)),partial=sumOfficialAmounts(items.map(item=>item.amount))
   return {complete:missing.length===0,total:missing.length===0?partial:null,partial,missing,items}

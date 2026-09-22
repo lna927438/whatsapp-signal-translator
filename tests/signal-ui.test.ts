@@ -297,16 +297,16 @@ test('Signal accepts a second message while the first translates and sends both 
   } finally { h.close() }
 })
 
-test('Signal contact details perform nickname and archive operations and archived chats stay accessible', async () => {
+test('Signal contact details remove custom notes without changing the official name or archive actions', async () => {
   const h = mount()
   try {
     const edits:any[] = []; h.api.signalSaveContact = async (...args:any[]) => edits.push(args)
     await settle(); (h.root.querySelector('.signal-contact') as HTMLButtonElement).click(); await settle()
     ;(h.root.querySelector('[aria-label="查看 Signal 联系人资料"]') as HTMLButtonElement).click(); await settle()
     assert.equal(h.root.querySelector('.sd-identity h2')?.textContent,'Alex')
-    input(h.root.querySelector('.sd-edit input') as HTMLInputElement,'Alex Work')
-    ;(h.root.querySelector('.sd-edit button') as HTMLButtonElement).click(); await settle()
-    assert.equal(edits[0][1],peer); assert.equal(edits[0][2].nickName,'Alex Work')
+    assert.equal(h.root.querySelector('.sd-edit'),null)
+    assert.doesNotMatch(h.root.querySelector('.signal-details')?.textContent||'',/昵称与备注|保存昵称与备注/)
+    assert.deepEqual(edits,[])
     const archive = [...h.root.querySelectorAll('.sd-actions button')].find(button => button.textContent?.includes('存档')) as HTMLButtonElement
     archive.click(); await settle()
     assert.equal(h.root.querySelectorAll('.signal-contact').length,1)

@@ -4,6 +4,7 @@ import {refreshDeepSeekBalance} from './deepseekBalance'
 export interface BillingSyncEnv {
   TRANSLATION_PROVIDER?: string
   TRANSLATION_FALLBACK_PROVIDER?: string
+  TRANSLATION_SELECTABLE_PROVIDERS?: string
   DEEPSEEK_API_KEY?: string
   OPENAI_BILLING_ADMIN_KEY?: string
   OPENAI_BILLING_PROJECT_ID?: string
@@ -20,7 +21,8 @@ const keyPattern=/^key_[A-Za-z0-9_-]{1,160}$/
 export function enabledBillingProviders(env:BillingSyncEnv):Array<'openai'|'deepseek'>{
  const explicit=String(env.TRANSLATION_PROVIDER||'').trim()
  if(!explicit)return ['openai','deepseek'] // Backward compatibility for older configurations.
- const configured=[explicit,String(env.TRANSLATION_FALLBACK_PROVIDER||'').trim()]
+ const configured=[explicit,String(env.TRANSLATION_FALLBACK_PROVIDER||'').trim(),
+   ...String(env.TRANSLATION_SELECTABLE_PROVIDERS||'').split(',').map(item=>item.trim())]
  return (['openai','deepseek'] as const).filter(provider=>configured.includes(provider))
 }
 function configured(env:BillingSyncEnv){
@@ -78,9 +80,13 @@ export function billingRange(value:unknown,now=Date.now()){
 // with binary floating point or round missing billing precision into zero.
 export function usdUnits(value:unknown):bigint {
   if(typeof value!=='string'||value.length>80)return invalid()
-  const m=/^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d{1,2}))?$/.exec(value)
+  const m=/^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d{1,6}))?$/.exec(value)
   if(!m)return invalid()
-  const fraction=m[3]||'',power=12-fraction.length+Number(m[4]||0),digits=BigInt(m[2]+fraction)*(m[1]? -1n:1n)
+  const fraction=m[3]||'',digits=BigInt(m[2]+fraction)*(m[1]? -1n:1n)
+  // Official decimal amounts can encode exact zero as 0E-6176. It has no
+  // fractional remainder and needs no exponentiation or precision rounding.
+  if(digits===0n)return 0n
+  const power=12-fraction.length+Number(m[4]||0)
   if(Math.abs(power)>40)return invalid()
   if(power>=0)return digits*10n**BigInt(power)
   const divisor=10n**BigInt(-power);if(digits%divisor!==0n)return invalid();return digits/divisor
@@ -93,6 +99,9 @@ export function unitsUsd(value:bigint){
 export async function syncOfficialCosts(env:BillingSyncEnv,rangeValue:unknown,now=Date.now()){
   const scope=configured(env),range=billingRange(rangeValue,now)
   if(scope.reason)throw new BillingSyncError('billing_not_configured')
+  // Order immutable snapshots by when retrieval began. A slow earlier query
+  // must not replace a later query merely because its last page arrived late.
+  const fetchedAt=new Date().toISOString()
   const bucketTotals=new Map<number,bigint>(),seenPages=new Set<string>();let page:string|undefined,totalRows=0
   for(let index=0;index<10;index++){
     const url=new URL('https://api.openai.com/v1/organization/costs')
@@ -131,12 +140,12 @@ export async function syncOfficialCosts(env:BillingSyncEnv,rangeValue:unknown,no
   }
   // A missing bucket or truncated page is incomplete, never a zero-cost day.
   for(let day=range.start;day<range.end;day+=86400)if(!bucketTotals.has(day))return invalid()
-  const officialUsd=unitsUsd([...bucketTotals.values()].reduce((n,v)=>n+v,0n)),fetchedAt=new Date().toISOString(),id=crypto.randomUUID()
+  const officialUsd=unitsUsd([...bucketTotals.values()].reduce((n,v)=>n+v,0n)),id=crypto.randomUUID()
   const body={p_id:id,p_from:new Date(range.start*1000).toISOString(),p_to:new Date(range.end*1000).toISOString(),
     p_scope:{projectId:scope.projectId,apiKeyIds:scope.apiKeyIds},p_usd:officialUsd,p_fetched_at:fetchedAt}
   let saved=false
   for(let retry=0;retry<2;retry++){
-    try{const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_official_bill`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});if(result.ok){saved=true;break}}catch{/* Repeat only identical snapshot storage, never invent a new operation. */}
+    try{const result=await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_official_bill`,{method:'POST',headers:{apikey:env.SUPABASE_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify(body),redirect:'manual',signal:AbortSignal.timeout(5000)});if(result.ok){saved=true;break}}catch{/* Repeat only identical snapshot storage, never invent a new operation. */}
   }
   if(!saved)throw new BillingSyncError('billing_unavailable')
   return {id,provider:'openai',from:range.from,to:range.to,timezone:'UTC',officialUsd,fetchedAt,provisional:true,
@@ -146,6 +155,14 @@ export async function syncRecentOfficialCosts(env:BillingSyncEnv,now=Date.now())
   if(!billingSyncStatus(env).configured)return {skipped:true,reason:'not_configured'}
   const to=new Date(now).toISOString().slice(0,10)
   return syncOfficialCostsWithStatus(env,{from:to.slice(0,8)+'01',to},now)
+}
+
+/** Revisit the preceding UTC month for late provider charges and adjustments.
+ * Historical refreshes do not overwrite the current-month sync-health state. */
+export async function syncPreviousOfficialCosts(env:BillingSyncEnv,now=Date.now()){
+  if(!billingSyncStatus(env).configured)return {skipped:true,reason:'not_configured'}
+  const current=new Date(now),lastDay=new Date(Date.UTC(current.getUTCFullYear(),current.getUTCMonth(),1)-86400000).toISOString().slice(0,10)
+  return syncOfficialCosts(env,{from:lastDay.slice(0,8)+'01',to:lastDay},now)
 }
 
 /** Both manual and scheduled production entrypoints persist only safe health

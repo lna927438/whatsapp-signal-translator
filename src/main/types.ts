@@ -1,7 +1,9 @@
 import type { AccountProxy } from './network/accountProxy'
 import type { TranslationQuality } from '../shared/translationPolicy'
+import type { TranslationChannel } from '../shared/translationChannels'
 export type Platform = 'whatsapp' | 'signal'
 
+// Historical receipt identifiers remain readable; new work always uses the cloud transport.
 export type TranslationProviderName = 'openai' | 'deepl' | 'google'
 
 export interface ContactLanguagePreference {
@@ -16,8 +18,7 @@ export interface AccountRecord {
   id: string
   platform: Platform
   label: string
-  note?: string
-  caption?: string
+  translationProvider?: TranslationChannel
   signalAccount?: string
   signalEngine?: 'cli' | 'desktop'
   proxy?: AccountProxy
@@ -43,6 +44,9 @@ export interface AccountRecord {
 }
 
 export interface RuntimeSettings {
+  translationProvider?: TranslationChannel
+  /** Undefined retains the pre-selection protocol for existing servers. */
+  providerPreference?: TranslationChannel
   uiLanguage?: 'system' | 'en' | 'zh-CN'
   translationQuality?: TranslationQuality
   localLanguage: string
@@ -63,14 +67,7 @@ export interface RuntimeSettings {
   contactLanguageSource?: 'manual' | 'auto' | 'default'
 }
 
-export interface ProviderSettings {
-  openaiApiKey?: string
-  openaiModel?: string
-  deeplApiKey?: string
-  googleApiKey?: string
-}
-
-export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor' | 'conversationId' | 'conversationName' | 'contactLanguageSource'>, ProviderSettings {
+export interface AppSettings extends Omit<RuntimeSettings, 'groupTranslate' | 'fontSize' | 'translationColor' | 'conversationId' | 'conversationName' | 'contactLanguageSource'> {
   workspaceTheme?: 'charcoal' | 'soft'
   accountNavigationPosition?: 'top' | 'side'
   uiLanguage?: 'system' | 'en' | 'zh-CN'
@@ -95,6 +92,8 @@ export interface TranslationContextItem {
 }
 
 export interface TranslationRequest {
+  /** Immutable selection captured when this logical request is created. */
+  providerPreference?: TranslationChannel
   quality?: TranslationQuality
   /** Keep this ID when retrying one logical translation. */
   requestId?: string

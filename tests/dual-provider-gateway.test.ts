@@ -94,6 +94,8 @@ beforeEach(async () => {
   await db.exec('delete from translator_private.provider_circuits; update translator_private.security_policy set enabled=true,user_daily_usd=100000,global_daily_usd=1000000,user_requests_per_minute=600,user_concurrency=32')
   calls = []; settlements = []; loseCompletionResponse = false; loseFailureResponse = false; beforeClaim = undefined
   env.TRANSLATION_PROVIDER = 'openai'; env.TRANSLATION_FALLBACK_PROVIDER = 'deepseek'
+  delete env.TRANSLATION_SELECTABLE_PROVIDERS
+  delete env.OPENAI_TRIAL_USER_IDS
   env.OPENAI_MODEL = 'gpt-5.6-luna'; env.DEEPSEEK_MODEL = 'deepseek-v4-pro'
   env.OPENAI_API_KEY = 'isolated-openai-secret'; env.DEEPSEEK_API_KEY = 'isolated-deepseek-secret'
   handler = async call => success(call)
@@ -114,6 +116,168 @@ async function attempts(id = 'dual-one') {
   return (await db.query<{ provider: Provider; error_code: string | null; http_status: number | null }>(
     'select provider,error_code,http_status from translator_private.provider_attempt_usage where request_id=$1 order by attempt_index',[id])).rows
 }
+
+test('explicit channel selection ignores the default and never permits fallback', async () => {
+  handler = async call => call.provider === 'openai' ? reply({error:{}},503) : success(call)
+  assert.equal((await request('selected-openai',{providerPreference:'openai'})).status,502)
+  assert.deepEqual(calls.map(call=>call.provider),['openai'])
+  assert.equal((await wallet(db)).lifetime_debited,0)
+  assert.equal((await request('selected-deepseek',{providerPreference:'deepseek'})).status,200)
+  assert.deepEqual(calls.map(call=>call.provider),['openai','deepseek'])
+  assert.equal((await wallet(db)).lifetime_debited,5)
+  const plans=(await db.query<any>('select metadata from translator_private.translation_requests order by request_id')).rows.map(row=>row.metadata.provider_plan)
+  assert.deepEqual(plans,[[{provider:'deepseek',model:'deepseek-v4-pro'}],[{provider:'openai',model:'gpt-5.6-luna'}]])
+})
+
+test('legacy clients stay on DeepSeek and retain original request hashes when choices are opened',async()=>{
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER
+  const first=await request('legacy-before-choice'),original=await first.json()
+  assert.equal(first.status,200);assert.deepEqual(calls.map(call=>call.provider),['deepseek'])
+  env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai'
+  const replay=await request('legacy-before-choice')
+  assert.equal(replay.status,200);assert.deepEqual(await replay.json(),original)
+  assert.equal(calls.length,1);assert.deepEqual(await ledger(),{debits:1,usage:1})
+  assert.equal((await request('legacy-new-after-choice')).status,200)
+  assert.deepEqual(calls.map(call=>call.provider),['deepseek','deepseek'])
+  assert.deepEqual(await ledger(),{debits:2,usage:2})
+  const saved=(await db.query<any>('select metadata from translator_private.translation_requests where request_id=$1',['legacy-before-choice'])).rows[0].metadata
+  assert.equal(Object.hasOwn(saved,'provider_preference'),false)
+})
+
+test('selected provider is immutable for replay and retries preserve one debit even after default routing changes', async () => {
+  const first=await request('selected-replay',{providerPreference:'openai'}),value=await first.json()
+  assert.equal(first.status,200)
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER;env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai'
+  assert.deepEqual(await (await request('selected-replay',{providerPreference:'openai'})).json(),value)
+  const changed=await request('selected-replay',{providerPreference:'deepseek'})
+  assert.equal(changed.status,409);assert.equal((await changed.json()).error,'request_id_conflict')
+  assert.equal((await request('selected-replay')).status,409,'omitting the pinned choice cannot change a saved request')
+  assert.equal(calls.length,1);assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
+
+test('unconfigured and retired channels reject before reserving characters or sending chat content', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER
+  // A forgotten secret is not permission to enable a retired provider.
+  const retired=await request('retired-key',{providerPreference:'openai'})
+  assert.equal(retired.status,503);assert.equal((await retired.json()).error,'provider_not_available')
+  env.TRANSLATION_SELECTABLE_PROVIDERS='openai,deepseek';delete env.OPENAI_API_KEY
+  assert.equal((await request('missing-key',{providerPreference:'openai'})).status,503)
+  for(const preference of ['auto','https://evil.invalid',{},null])assert.equal((await request('invalid-pref',{providerPreference:preference})).status,400)
+  assert.equal(calls.length,0);assert.deepEqual(await ledger(),{debits:0,usage:0})
+  assert.equal((await wallet(db)).reserved_characters,0)
+})
+
+test('health and authenticated wallet capabilities list only enabled channels without secrets', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER;env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai'
+  const health=await (await worker.fetch(new Request('https://worker.invalid/health'),env)).json()
+  assert.deepEqual(health.translationProviders,['deepseek','openai']);assert.equal(health.defaultTranslationProvider,'deepseek');assert.equal(health.features.providerSelection,true)
+  assert.equal(JSON.stringify(health).includes('isolated-'),false)
+  delete env.OPENAI_API_KEY
+  const me=await (await worker.fetch(new Request('https://worker.invalid/api/me',{headers:{Authorization:'Bearer test-user'}}),env)).json()
+  assert.deepEqual(me.translationProviders,['deepseek']);assert.equal(me.defaultTranslationProvider,'deepseek')
+  assert.equal(JSON.stringify(me).includes('isolated-'),false)
+})
+
+test('trial channels are private to the verified account in both capability endpoints', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER
+  env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai';env.OPENAI_TRIAL_USER_IDS=USER
+  const publicHealth=await (await worker.fetch(new Request('https://worker.invalid/health'),env)).json()
+  assert.deepEqual(publicHealth.translationProviders,['deepseek'])
+  for (const path of ['/api/translation-channels','/api/me']) {
+    const allowed=await worker.fetch(new Request('https://worker.invalid'+path,{headers:{Authorization:'Bearer test-user'}}),env)
+    assert.equal(allowed.status,200);assert.equal(allowed.headers.get('Cache-Control'),'no-store')
+    const value=await allowed.json();assert.deepEqual(value.translationProviders,['deepseek','openai'])
+    assert.ok(!JSON.stringify(value).includes('isolated-'))
+    const denied=await worker.fetch(new Request('https://worker.invalid'+path+'?user_id='+USER,{headers:{Authorization:'Bearer test-other','x-user-id':USER}}),env)
+    assert.deepEqual((await denied.json()).translationProviders,['deepseek'])
+  }
+  const unauthorized=await worker.fetch(new Request('https://worker.invalid/api/translation-channels'),env)
+  assert.equal(unauthorized.status,401)
+  await db.query("update public.profiles set status='disabled' where id=$1",[USER])
+  assert.equal((await worker.fetch(new Request('https://worker.invalid/api/translation-channels',{headers:{Authorization:'Bearer test-user'}}),env)).status,403)
+  assert.equal(calls.length,0);assert.deepEqual(await ledger(),{debits:0,usage:0})
+})
+
+test('a trial restriction blocks forged OpenAI sends and repairs before any claim or debit', async () => {
+  env.TRANSLATION_PROVIDER='deepseek';delete env.TRANSLATION_FALLBACK_PROVIDER
+  env.TRANSLATION_SELECTABLE_PROVIDERS='deepseek,openai';env.OPENAI_TRIAL_USER_IDS=USER
+  const patch={providerPreference:'openai',userId:USER,accountId:USER}
+  const denied=await request('trial-denied-send',patch,'test-other')
+  assert.equal(denied.status,503);assert.equal((await denied.json()).error,'provider_not_available')
+  const repair=await worker.fetch(new Request('https://worker.invalid/api/translation-repair',{method:'POST',
+    headers:{Authorization:'Bearer test-other','Content-Type':'application/json'},
+    body:JSON.stringify({requestId:'trial-denied-repair',text:'hello',targetLanguage:'zh-CN',...patch})}),env)
+  assert.equal(repair.status,503);assert.equal((await repair.json()).error,'provider_not_available')
+  assert.equal(calls.length,0);assert.deepEqual(await ledger(),{debits:0,usage:0})
+  assert.equal((await db.query<{n:number}>('select count(*)::int n from translator_private.translation_requests')).rows[0].n,0)
+  assert.equal((await wallet(db,OTHER)).reserved_characters,0)
+  const allowed=await request('trial-allowed',{providerPreference:'openai'}),receipt=await allowed.json()
+  assert.equal(allowed.status,200);assert.deepEqual(calls.map(call=>call.provider),['openai'])
+  assert.deepEqual(await (await request('trial-allowed',{providerPreference:'openai'})).json(),receipt)
+  assert.equal(calls.length,1);assert.deepEqual(await ledger(),{debits:1,usage:1})
+  assert.deepEqual(await attempts('trial-allowed'),[{provider:'openai',error_code:null,http_status:200}])
+})
+
+test('trial restrictions also filter implicit default and fallback routes', async () => {
+  env.OPENAI_TRIAL_USER_IDS=USER
+  // Even a mistaken OpenAI default cannot send another account to the trial.
+  assert.equal((await request('trial-default-filter',{},'test-other')).status,200)
+  assert.deepEqual(calls.map(call=>call.provider),['deepseek'])
+  env.TRANSLATION_PROVIDER='deepseek';env.TRANSLATION_FALLBACK_PROVIDER='openai'
+  handler=async()=>reply({error:{}},503)
+  assert.equal((await request('trial-fallback-filter',{},'test-other')).status,502)
+  assert.deepEqual(calls.map(call=>call.provider),['deepseek','deepseek'])
+  env.TRANSLATION_PROVIDER='openai';delete env.TRANSLATION_FALLBACK_PROVIDER
+  const empty=await request('trial-empty-plan',{},'test-other')
+  assert.equal(empty.status,503);assert.equal((await empty.json()).error,'provider_not_available')
+  assert.equal(calls.length,2)
+  const health=await (await worker.fetch(new Request('https://worker.invalid/health'),env)).json()
+  assert.deepEqual(health.routing,[]);assert.equal(health.model,'');assert.equal(health.defaultTranslationProvider,null)
+})
+
+test('a filtered legacy single-provider route uses its authorized config instead of the original default',async()=>{
+  env.OPENAI_TRIAL_USER_IDS=USER;env.DEEPSEEK_MODEL='deepseek-flash'
+  assert.equal((await request('trial-legacy-filter',{},'test-other')).status,200)
+  assert.deepEqual(calls.map(call=>[call.provider,call.body.model]),[['deepseek','deepseek-flash']])
+  assert.deepEqual((await db.query('select provider,model from public.translation_usage')).rows,[{provider:'deepseek',model:'deepseek-flash'}])
+  assert.equal((await wallet(db,OTHER)).lifetime_debited,5)
+})
+
+test('explicit selections contribute separate provider costs and one shared character total', async () => {
+  await request('cost-openai',{providerPreference:'openai'})
+  await request('cost-deepseek',{providerPreference:'deepseek'})
+  await request('cost-openai',{providerPreference:'openai'})
+  await db.query("insert into public.admin_roles(user_id,role) values($1,'owner')",[USER])
+  const day=new Date().toISOString().slice(0,10)
+  const result=(await asRole<any>(db,'service_role',"select public.admin_read($1,'costs',$2) result",[USER,{from:day,to:day,timezone:'UTC'}])).rows[0].result
+  assert.equal(Number(result.totals.charged_characters),10)
+  assert.equal(Number(result.totals.provider_requests),2)
+  assert.equal(result.providers.length,2)
+  assert.equal(result.providers.reduce((sum:number,row:any)=>sum+Number(row.requests),0),2)
+  assert.ok(Math.abs(result.providers.reduce((sum:number,row:any)=>sum+Number(row.known_cost_usd_exact??row.known_cost_usd),0)-Number(result.totals.known_cost_usd_exact??result.totals.known_cost_usd))<1e-12)
+  assert.deepEqual(await ledger(),{debits:2,usage:2})
+})
+
+test('selected OpenAI preserves quantity and per-item placeholders with the complete prompt inside its cost reservation', async () => {
+  const source='Can you confirm 3 tickets for 25 dollars each?'
+  handler=async call=>success(call,'你能确认 __HDPROTECTED_0__ 张票，每张 __HDPROTECTED_1__ 美元吗？')
+  const patch={providerPreference:'openai',text:source,sourceLanguage:'en-US',targetLanguage:'zh-CN'}
+  const first=await request('numeric-roles',patch),result=await first.json()
+  assert.equal(first.status,200);assert.equal(result.translation,'你能确认 3 张票，每张 25 美元吗？')
+  const {instructions,input,max_output_tokens}=calls[0].body
+  assert.match(instructions,/quantity of objects and the price per object are different facts/)
+  assert.match(instructions,/quantity \+ classifier \+ noun/)
+  assert.match(instructions,/do not replace a unit price with a total/)
+  assert.match(instructions,/Never answer a question/)
+  assert.ok(!instructions.includes('3 tickets')&&!instructions.includes('25美元'))
+  assert.equal(JSON.parse(input).current_message,'Can you confirm __HDPROTECTED_0__ tickets for __HDPROTECTED_1__ dollars each?')
+  const metadata=(await db.query<any>("select metadata from translator_private.translation_requests where request_id='numeric-roles'")).rows[0].metadata
+  assert.ok(metadata.security_input_token_bound>=new TextEncoder().encode(source+instructions+input).length+4096)
+  assert.ok(metadata.security_output_token_bound>=max_output_tokens)
+  assert.deepEqual(await (await request('numeric-roles',patch)).json(),result)
+  assert.equal(calls.length,1);assert.equal((await wallet(db)).lifetime_debited,Array.from(source).length)
+  assert.deepEqual(await ledger(),{debits:1,usage:1})
+})
 
 test('OpenAI is primary: one call, one character debit and the winning provider is recorded', async () => {
   const response = await request()

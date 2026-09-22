@@ -12,6 +12,7 @@ import { SettingsStore } from '../../storage/settingsStore'
 import { AccountManager } from '../../accounts/accountManager'
 import { JsonStore } from '../../storage/jsonStore'
 import { setAccountState } from '../../runtimeHealth'
+import { requestChannelPreference } from '../../network/translationChannels'
 import { mergeQuality } from '../../../shared/translationPolicy'
 import { isSemanticTranslationMismatch } from '../../../shared/translationSemantics'
 import { quarantinedTranslationMessage, TranslationOutcomeError } from '../../translation/providers/cloudflare'
@@ -418,6 +419,8 @@ export class SignalAdapter {
     return {
       ...base,
       translationQuality: mergeQuality(mergeQuality(base.translationQuality, record.translationQuality),contact?.translationQuality),
+      translationProvider: record.translationProvider || 'deepseek',
+      providerPreference: record.translationProvider ? await requestChannelPreference(record.translationProvider) : undefined,
       historyMode: record.historyMode || base.historyMode,
       translationsVisible: record.translationsVisible !== false,
       localLanguage: record.localLanguage || base.localLanguage,
@@ -442,32 +445,40 @@ export class SignalAdapter {
   /** Resolve a persisted message, not text supplied by the renderer. Display
    * translations are independent of the native send and never resend it. */
   async translateMessage(recordId:string, identity:{account:string;peer:string;timestamp:number;fromMe:boolean}, manual=false):Promise<string|undefined> {
-    const owner=this.onlineUser, record=await this.recordForSignalAccount(identity.account)
-    if(!owner||record?.id!==recordId||owner!==this.onlineUser)throw new Error('Signal 消息与账号不匹配。')
+    const owner=this.onlineUser,revision=this.identityRevision
+    const authorized=()=>Boolean(owner)&&owner===this.onlineUser&&revision===this.identityRevision
+    const requireIdentity=()=>{if(!authorized())throw new Error('登录状态已变化。')}
+    const record=await this.recordForSignalAccount(identity.account)
+    requireIdentity()
+    if(record?.id!==recordId)throw new Error('Signal 消息与账号不匹配。')
     await this.historyWrites.catch(() => undefined)
     const message=(await this.historyStore.read()).find(item=>item.owner===owner&&item.account===identity.account&&item.peer===identity.peer&&item.timestamp===identity.timestamp&&item.fromMe===Boolean(identity.fromMe))
+    requireIdentity()
     if(!message||message.expired||message.system||(message.expiresAt||Infinity)<=Date.now())return
     if(message.fromMe&&message.taskId&&message.translated&&message.translated!==message.original){
       const receipt=(await this.translator.history()).find(item=>item.request.accountId===recordId&&item.requestId===message.taskId&&item.request.text===message.original)
-      if(owner!==this.onlineUser)throw new Error('登录状态已变化。')
+      requireIdentity()
       const translated=receipt?.correction??receipt?.translated??message.translated
       if(receipt?.correction===undefined&&isSemanticTranslationMismatch(message.original,translated)){
-        if(receipt)return this.translator.translate(receipt.request)
+        if(receipt){const repaired=await this.translator.translate(receipt.request);requireIdentity();return repaired}
         throw new TranslationOutcomeError(quarantinedTranslationMessage)
       }
       return translated
     }
     const runtime=await this.runtimeForRecord(recordId,'signal:'+message.peer)
+    requireIdentity()
     if(!manual&&runtime.translationsVisible===false)return
     if(!message.original||!/\p{L}/u.test(message.original))return
-    const request={text:message.original,sourceLanguage:'auto',targetLanguage:runtime.localLanguage,accountId:recordId,conversationId:'signal:'+message.peer,messageId:message.taskId||`${message.peer}:${message.timestamp}`,context:this.context(recordId,message.peer),quality:runtime.translationQuality}
+    const request={text:message.original,sourceLanguage:'auto',targetLanguage:runtime.localLanguage,accountId:recordId,conversationId:'signal:'+message.peer,messageId:message.taskId||`${message.peer}:${message.timestamp}`,context:this.context(recordId,message.peer),quality:runtime.translationQuality,providerPreference:runtime.providerPreference}
     if(alreadyInTargetLanguage({...request,quality:undefined}))return
     let translated=await this.translator.cached(request)
+    requireIdentity()
     if(translated===undefined&&(manual||runtime.receiveAutoTranslate&&runtime.historyMode!=='manual'&&(runtime.historyMode==='visible'||message.timestamp>=this.startedAt)&&(!message.peer.startsWith('group:')||runtime.groupTranslate)))translated=await this.translator.translateIncoming(request,manual)
-    if(owner!==this.onlineUser)throw new Error('登录状态已变化。')
+    requireIdentity()
     if(translated!==undefined && (message.expiresAt||Infinity)>Date.now()){
       const saved=await this.rememberMessage(owner,{...message,...(message.fromMe?{displayTranslated:translated}:{translated})})
-      if(!saved.expired&&owner===this.onlineUser)this.mainWindow?.webContents.send('signal:message',{...saved,update:true})
+      requireIdentity()
+      if(!saved.expired)this.mainWindow?.webContents.send('signal:message',{...saved,update:true})
       return saved.expired?undefined:translated
     }
   }
@@ -579,6 +590,7 @@ export class SignalAdapter {
     await this.announceUnread(account)
     if (!saved.fromMe && preferences.notifications !== 'off' && !(peerPreference?.mutedUntil && peerPreference.mutedUntil > Date.now())) notifyAccount(recordId, record.label, { always: preferences.notifications === 'always', silent: !preferences.sound, hideNames: preferences.hideNames })
     if (recordId) this.remember(recordId, source, {role:saved.fromMe?'outgoing':'incoming',text})
+    if (!stillCurrent()) return
     await this.translateMessage(recordId,saved).catch(()=>undefined)
     if (this.receivedIds.size > 20000) this.receivedIds.delete(this.receivedIds.values().next().value!)
 

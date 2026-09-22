@@ -55,7 +55,7 @@ export class GoogleVoiceWorkspace {
     if (!this.available(identity, lifecycle)) throw new Error('窗口或登录状态已变化，请重新打开。')
   }
 
-  private safe(record: GoogleVoiceRecord) { return { id: record.id, label: record.label, tabOrder: record.tabOrder, browser: record.browser, proxy: record.proxy ? { ...record.proxy } : undefined } }
+  private safe(record: GoogleVoiceRecord) { return { id: record.id, label: record.label, tabOrder: record.tabOrder, browser: record.browser, translationProvider: record.translationProvider, proxy: record.proxy ? { ...record.proxy } : undefined } }
 
   private ensureViews(): GoogleVoiceEmbeddedViews {
     if (!this.views) {
@@ -109,21 +109,21 @@ export class GoogleVoiceWorkspace {
     return rows.map(row => this.safe(row))
   }
 
-  async add(options?: { label?: string; proxy?: unknown }) {
+  async add(options?: { label?: string; proxy?: unknown; translationProvider?: 'deepseek' | 'openai' }) {
     const identity = this.identity(), lifecycle = this.lifecycle
     this.requireAvailable(identity, lifecycle)
     const row = await this.records.add(identity.owner, options); this.requireAvailable(identity, lifecycle)
     return this.safe(row)
   }
 
-  async update(id: string, patch: { label?: string; proxy?: unknown }) {
+  async update(id: string, patch: { label?: string; proxy?: unknown; translationProvider?: 'deepseek'|'openai' }) {
     const identity = this.identity(), lifecycle = this.lifecycle
     this.requireAvailable(identity, lifecycle)
-    if (!patch || typeof patch !== 'object' || (patch.label === undefined && patch.proxy === undefined)) throw new Error('窗口设置无效。')
+    if (!patch || typeof patch !== 'object' || (patch.label === undefined && patch.proxy === undefined && patch.translationProvider === undefined)) throw new Error('窗口设置无效。')
     if (this.changing.has(id)) throw new Error('此窗口正在调整，请稍后重试。')
     this.changing.add(id)
     try {
-      const row = await this.records.update(identity.owner, id, { label: patch.label, proxy: patch.proxy }); this.requireAvailable(identity, lifecycle)
+      const row = await this.records.update(identity.owner, id, { label: patch.label, proxy: patch.proxy, translationProvider:patch.translationProvider }); this.requireAvailable(identity, lifecycle)
       if (patch.proxy !== undefined) {
         this.windowRevisions.set(id, (this.windowRevisions.get(id) || 0) + 1)
         if (this.active === id) this.hide()

@@ -5,8 +5,8 @@ import { googleVoicePages, type GoogleVoicePage } from '../../../shared/googleVo
 
 export type GoogleVoiceProxy = { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: number; username?: string; hasPassword?: boolean }
 export type GoogleVoiceNetwork = { mode: 'proxy' | 'system'; status: 'unchecked' | 'checking' | 'checked' | 'error'; ip?: string; latencyMs?: number; checkedAt?: number; message?: string }
-export type GoogleVoiceWindow = { id: string; label: string; tabOrder?: number; proxy?: GoogleVoiceProxy }
-export type GoogleVoiceWindowOptions = { label?: string; proxy?: GoogleVoiceProxy & { password?: string; clearPassword?: boolean } }
+export type GoogleVoiceWindow = { id: string; label: string; tabOrder?: number; translationProvider?: 'deepseek' | 'openai'; proxy?: GoogleVoiceProxy }
+export type GoogleVoiceWindowOptions = { label?: string; translationProvider?: 'deepseek' | 'openai'; proxy?: GoogleVoiceProxy & { password?: string; clearPassword?: boolean } }
 export interface GoogleVoiceWorkspaceApi {
   listGoogleVoiceWindows(): Promise<GoogleVoiceWindow[]>
   addGoogleVoiceWindow(options?: GoogleVoiceWindowOptions): Promise<GoogleVoiceWindow>
@@ -51,6 +51,7 @@ export function useGoogleVoiceWorkspace(options: {
   const selected = computed(() => windows.value.find(window => window.id === selectedId.value))
   let focusRevision = 0, disposed = false
   let eventRevision = 0
+  let mutationRevision = 0
   let pendingWrite: Promise<unknown> | undefined
   const current = (revision: number) => !disposed && active.value && focusRevision === revision
   function failure(error: unknown): string {
@@ -110,6 +111,12 @@ export function useGoogleVoiceWorkspace(options: {
       else { selectedId.value = ''; state.value = 'idle' }
     } catch (error) { if (current(revision)) showFailure(error) }
   }
+  async function listForHome() {
+    if (disposed || active.value || busy.value) return
+    const revision = focusRevision, observedMutation = mutationRevision
+    try { const records = await options.api().listGoogleVoiceWindows(); if (!disposed && !active.value && revision === focusRevision && observedMutation === mutationRevision) windows.value = orderedAccounts(records) }
+    catch { /* Home remains usable; opening Voice reports connection errors. */ }
+  }
   async function focusNotification(id: string) {
     if (disposed || !/^gv-[a-f0-9-]{36}$/.test(id)) return
     const revision = ++focusRevision
@@ -128,6 +135,7 @@ export function useGoogleVoiceWorkspace(options: {
   }
   async function write<T>(action: () => Promise<T>): Promise<T | undefined> {
     if (busy.value || disposed) return
+    mutationRevision++
     writing.value = true
     const operation = action()
     pendingWrite = operation
@@ -167,6 +175,17 @@ export function useGoogleVoiceWorkspace(options: {
       if (!disposed && existing) existing.label = saved.label
       return saved
     })
+    return !!result
+  }
+  async function setTranslationProvider(id: string, translationProvider: 'deepseek' | 'openai'): Promise<boolean> {
+    if (!windows.value.some(window => window.id === id)) return false
+    const result = await write(async () => {
+      const saved = await options.api().updateGoogleVoiceWindow(id, { translationProvider })
+      const existing = windows.value.find(window => window.id === id)
+      if (!disposed && existing) existing.translationProvider = saved.translationProvider
+      return saved
+    })
+    // Changing the translation provider never reloads a live page or its draft.
     return !!result
   }
   async function close(id: string) {
@@ -234,5 +253,5 @@ export function useGoogleVoiceWorkspace(options: {
   }
   async function flush() { await pendingWrite }
   function dispose() { disposed = true; leave() }
-  return { active, windows, selectedId, selected, state, page, translationNotice, message, canGoBack, network, busy, enter, leave, focus, focusNotification, add, configure, rename, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
+  return { active, windows, selectedId, selected, state, page, translationNotice, message, canGoBack, network, busy, enter, listForHome, leave, focus, focusNotification, add, configure, rename, setTranslationProvider, close, reorder, retry, refresh, external, back, acceptState, flush, dispose }
 }

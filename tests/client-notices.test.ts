@@ -5,6 +5,7 @@ import {database,reset,asRole,rpc,USER,OTHER} from './fixture.ts'
 import {validateMutation} from '../server/worker/src/admin.ts'
 import {noticeReceiptBody} from '../server/worker/src/clientNotices.ts'
 import worker,{type Env} from '../server/worker/src/index.ts'
+import {noticeVersionForSave} from '../website/src/admin/noticeVersion.ts'
 let db:Awaited<ReturnType<typeof database>>
 before(async()=>{db=await database()});after(async()=>{await db.close()})
 beforeEach(async()=>{await db.exec('delete from public.admin_audit;delete from public.announcements');await reset(db);await db.query("insert into public.admin_roles(user_id,role) values($1,'owner')",[USER])})
@@ -13,6 +14,47 @@ const save=async(d:any,id=randomUUID(),op=randomUUID(),actor=USER)=>(await asRol
 const feed=async(user=USER)=> (await rpc(db,'client_notices',{p_user_id:user})).notices as any[]
 const receipt=async(id:string,state='displayed',revision=1,user=USER)=>rpc(db,'client_notice_receipt',{p_user_id:user,p_notice_id:id,p_revision:revision,p_state:state})
 const list=async()=> (await asRole<{r:any}>(db,'service_role',"select public.admin_read($1,'announcements','{}') r",[USER])).rows[0].r.rows as any[]
+
+test('the admin can retire an unversioned notice without relabelling it, while enabling requires a version',async()=>{
+ const legacy=await save(data()),scoped=await save(data({releaseVersion:'0.5.17'}))
+ assert.throws(()=>noticeVersionForSave('',true),/invalid_notice_version/)
+ assert.equal(noticeVersionForSave('0.5.17',true),'0.5.17')
+ for(const id of [legacy.announcement,scoped.announcement]){
+  const draft:Record<string,unknown>=data({active:false,expectedRevision:1,releaseVersion:''})
+  assert.equal(noticeVersionForSave(draft.releaseVersion,draft.active),undefined)
+  delete draft.releaseVersion
+  validateMutation({operationId:randomUUID(),action:'notice.save',target:id,reason:'停用旧通知',data:draft})
+  await save(draft,id)
+ }
+ assert.deepEqual(await feed(),[])
+ const rows=await list()
+ assert.equal(rows.find(row=>row.id===legacy.announcement).release_version,null)
+ assert.equal(rows.find(row=>row.id===scoped.announcement).release_version,'0.5.17')
+})
+
+test('version scope is saved, audited and returned without rewriting legacy notices',async()=>{
+ const legacy=await save(data()),id=randomUUID(),operation=randomUUID(),content=data({releaseVersion:'0.5.17-beta.1'})
+ const saved=await save(content,id,operation);assert.equal(saved.releaseVersion,'0.5.17-beta.1')
+ assert.equal((await save(content,id,operation)).replayed,true)
+ const rows=await feed();assert.equal(rows.find(row=>row.id===id).releaseVersion,'0.5.17-beta.1');assert.equal(rows.find(row=>row.id===legacy.announcement).releaseVersion,null)
+ assert.equal((await list()).find(row=>row.id===id).release_version,'0.5.17-beta.1')
+ await receipt(id)
+ await save(data({releaseVersion:'0.5.17',expectedRevision:1}),id)
+ assert.equal((await feed()).find(row=>row.id===id).revision,2);assert.equal((await feed()).find(row=>row.id===id).displayed,false)
+ await save(data({expectedRevision:2}),id)
+ assert.equal((await feed()).find(row=>row.id===id).releaseVersion,'0.5.17','older admin clients do not erase an existing version scope')
+ await assert.rejects(save({...content,releaseVersion:'0.5.18'},id,operation),/operation_conflict/)
+ const audit=(await db.query<any>('select input from public.admin_audit where id=$1',[operation])).rows[0]
+ assert.equal(audit.input.data.releaseVersion,'0.5.17-beta.1')
+})
+
+test('invalid version metadata is rejected by both the API and database',async()=>{
+ for(const releaseVersion of ['',null,5,'latest','01.2.3','0.5','0.5.17\n','0.5.17-preview','0.5.17-beta.01','0.5.17<script>','x'.repeat(81)]){
+  const content=data({releaseVersion})
+  assert.throws(()=>validateMutation({operationId:randomUUID(),action:'notice.save',target:randomUUID(),reason:'版本验证',data:content}))
+  await assert.rejects(save(content),/invalid_request/)
+ }
+})
 
 test('recipient targeting applies to feeds, direct RLS reads and receipt writes',async()=>{
  const all=await save(data()),own=await save(data({audience:'user',recipient:' FIRST@EXAMPLE.INVALID '}))

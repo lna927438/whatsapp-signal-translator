@@ -92,7 +92,7 @@ export class SignalDesktopHost {
     child.on('message',(raw:any)=>{
       if(!current()||raw?.channel!=='hellodog')return
       if(raw.type==='unread'&&Number.isSafeInteger(raw.count)&&raw.count>=0&&raw.count<=99999){updateAccountUnread(record.id,raw.count);this.window.webContents.send('accounts:unread',{accountId:record.id,count:raw.count})}
-      if(raw.type==='notification')notifyAccount(record.id,record.note||record.label,{silent:raw.silent===true?true:undefined})
+      if(raw.type==='notification')notifyAccount(record.id,record.label,{silent:raw.silent===true?true:undefined})
       if(raw.type==='privacy' && this.contentLifecycle && Array.isArray(raw.updates) && raw.updates.length <= 100 && raw.updates.every((value:any)=>value && /^[\w-]{1,100}$/.test(value.id) && /^[\w-]{1,100}$/.test(value.conversationId) && Number.isSafeInteger(value.expiresAt) && value.expiresAt >= 0)) {
         void this.contentLifecycle(owner, record.id, raw.updates).then(()=>reply({type:'privacy-applied',updates:raw.updates}),()=>{
           item.error='本机译文清理未完成，正在保留原清理记录以便重试。';publish()

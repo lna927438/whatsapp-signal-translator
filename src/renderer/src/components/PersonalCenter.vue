@@ -9,18 +9,14 @@ import { cloudApi } from '../lib/cloudApi'
 const emit = defineEmits(['close', 'updated'])
 const localProfile = ref<any>(null)
 const cloudState = ref<any>(null)
-const cloudUsage = ref<any[]>([])
 const editing = ref(false)
 const username = ref('')
 const email = ref('')
 const busy = ref(false)
 const message = ref('')
 const cloudError = ref('')
-const usageError = ref('')
 const syncing = ref(false)
 const lastSyncedAt = ref('')
-const atomicSnapshot = ref(false)
-const reconciliation = ref<any>(null)
 let refreshAgain = false
 let disposed = false
 let revision = 0
@@ -51,25 +47,10 @@ async function reload() {
   cloudError.value = ''
   try {
     localProfile.value = (await window.desktopAPI.authStatus())?.user || localProfile.value
-    let nextState: any
-    let atomic = true
-    try { nextState = await cloudApi.snapshot() }
-    catch (error: any) {
-      if (!/API route not found|404/.test(error.message || '')) throw error
-      nextState = await cloudApi.me(); atomic = false
-    }
+    const nextState = await cloudApi.me()
     if (disposed || current !== revision) return
     cloudState.value = nextState
-    atomicSnapshot.value = atomic
-    reconciliation.value = atomic ? nextState.reconciliation : null
-    try {
-      const usageResult = atomic ? nextState : await cloudApi.usage()
-      if (disposed || current !== revision) return
-      if (!Array.isArray(usageResult?.usage)) throw new Error(t('使用记录响应无效'))
-      cloudUsage.value = usageResult.usage
-      usageError.value = ''
-      lastSyncedAt.value = atomic ? new Date(nextState.snapshotAt).toLocaleString(uiLanguage.value) : new Date().toLocaleTimeString()
-    } catch { usageError.value = t('使用记录暂未同步，请重新同步后查看。') }
+    lastSyncedAt.value = new Date().toLocaleTimeString()
     if (!editing.value) {
       username.value = profile.value?.username || localProfile.value?.username || ''
       email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
@@ -122,7 +103,7 @@ async function logout() {
   }
 }
 
-onMounted(() => { void reload(); unsubscribe = window.desktopAPI.onBillingChanged(invalidate); window.addEventListener('focus', invalidate); window.addEventListener('online', invalidate); poll = setInterval(() => { if (!busy.value) void reload() }, 5000) })
+onMounted(() => { void reload(); unsubscribe = window.desktopAPI.onBillingChanged(invalidate); window.addEventListener('focus', invalidate); window.addEventListener('online', invalidate); poll = setInterval(() => { if (!busy.value && document.visibilityState !== 'hidden') void reload() }, 30000) })
 onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(poll); window.removeEventListener('focus', invalidate); window.removeEventListener('online', invalidate) })
 </script>
 
@@ -130,7 +111,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(po
   <div class="modal-backdrop personal-center-backdrop" @click.self="emit('close')">
     <section class="personal-center-card">
       <header class="personal-center-header">
-        <div><span class="personal-center-kicker">HELLODOG ACCOUNT</span><h2>{{ t('个人中心') }}</h2><p>{{ t('你的 HelloDog 账号、字符余额和翻译使用记录。') }}</p></div>
+        <div><span class="personal-center-kicker">HELLODOG ACCOUNT</span><h2>{{ t('个人中心') }}</h2><p>{{ t('你的账号、剩余字符与累计用量。') }}</p></div>
         <div style="display:flex;gap:8px;align-items:center"><button class="personal-logout" :disabled="busy" @click="logout">{{ t('退出登录') }}</button><button class="personal-close" @click="emit('close')">×</button></div>
       </header>
 
@@ -153,7 +134,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(po
           <div class="profile-row"><span>{{ t('云端服务') }}</span><b>{{ cloudError ? t('等待重新连接') : syncing ? t('同步中') : cloudState ? t('已同步') : t('同步中') }}</b></div>
         </div>
 
-        <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">{{ t('账号中心') }}</button><button class="personal-secondary" disabled :title="t('支付系统接入后开放')">{{ t('充值即将开放') }}</button></div>
+        <div class="personal-actions"><button class="personal-primary" @click="editing = !editing">{{ t('账号中心') }}</button></div>
 
         <div v-if="editing" class="account-editor">
           <label>{{ t('用户名') }}<input v-model="username" :placeholder="t('请输入用户名')" maxlength="80" /></label>
@@ -162,21 +143,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(po
           <small>{{ t('修改邮箱后，请根据验证邮件完成确认。') }}</small>
         </div>
 
-        <div class="usage-history">
-          <p>{{ syncing ? t('正在同步云端余额与使用记录…') : lastSyncedAt ? t('上次同步：') + lastSyncedAt : t('等待云端同步') }}</p>
-          <p v-if="usageError" class="api-message error">{{ usageError }}</p>
-          <p v-if="!atomicSnapshot">{{ t('服务端尚未提供统一对账快照。余额与记录为分别读取，暂未确认账本一致。') }}</p>
-          <p v-else>{{ reconciliation.duplicateDebits === 0 && reconciliation.mismatchedRequests === 0 && reconciliation.translationDebit === reconciliation.usageCharacters && cloudState.wallet.balance === cloudState.wallet.lifetime_credited - cloudState.wallet.lifetime_debited - (cloudState.wallet.lifetime_adjusted_down || 0) ? t('此快照的翻译账本与使用记录一致，逐笔字符数相符，未发现重复扣费编号。') : t('账本与使用记录存在差异，请保留请求编号核对。') }}{{ t(' 翻译扣费 ') }}{{ reconciliation.translationDebit }}{{ t('，使用记录 ') }}{{ reconciliation.usageCharacters }}{{ t(' 字符。') }}</p>
-          <p v-if="cloudState.wallet.lifetime_adjusted_down">{{ t('管理员累计减少：{0} 字符', formatChars(cloudState.wallet.lifetime_adjusted_down)) }}</p><div class="section-title"><div><strong>{{ t('最近云端翻译消耗') }}</strong><small>{{ t('最近 ') }}{{ cloudUsage.length }}{{ t(' 条') }}</small></div></div>
-          <div v-if="cloudUsage.length" class="usage-list">
-            <div v-for="item in cloudUsage" :key="item.request_id" class="usage-row">
-              <div><b>{{ item.model || item.provider || t('云端翻译') }}</b><small>{{ formatDate(item.created_at) }}{{ t(' · 原文 ') }}{{ item.source_characters }}{{ t(' 字符') }}</small><code style="overflow-wrap:anywhere">{{ item.request_id }}</code></div>
-              <strong class="minus">-{{ formatChars(item.source_characters || 0) }}</strong>
-            </div>
-          </div>
-          <div v-else-if="!usageError" class="usage-empty">{{ t('暂时没有云端翻译使用记录。') }}</div>
-        </div>
-
+        <p class="personal-sync-status" role="status">{{ syncing ? t('正在同步余额…') : lastSyncedAt ? t('上次同步：') + lastSyncedAt : t('等待云端同步') }}</p>
         <button class="personal-logout" :disabled="busy" @click="logout">{{ t('退出当前账号') }}</button>
         <p class="personal-logout-note">{{ t('退出账号不会清除 WhatsApp / Signal 登录状态，也不会删除本地历史翻译缓存。字符余额保存在云端。') }}</p>
         <p v-if="message" class="personal-message">{{ uiError(message) }}</p>

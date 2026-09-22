@@ -11,11 +11,11 @@ import { googleVoiceMessageMedia, googleVoiceMediaKey, googleVoiceRecipientConte
 import { isVerifiedGoogleVoiceIncoming } from './incomingHistory'
 
 type Translator=Pick<TranslationEngine,'history'|'existingOutgoing'|'preserveOutgoingRequest'|'prepareOutgoingRequest'|'preserveIncomingRequest'|'translate'|'cached'|'translateIncoming'>
-export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:()=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger) {
+export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:(accountId:string)=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger) {
   return async(owner:string,accountId:string,operation:string,payload:unknown,authorized:()=>boolean):Promise<unknown>=>{
     const requireIdentity=()=>{if(!authorized())throw new Error('登录状态已变化。')}
-    requireIdentity();const preferences=await runtime();requireIdentity()
-    if(operation==='status')return {connected:true,localLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,
+    requireIdentity();const preferences=await runtime(accountId);requireIdentity()
+    if(operation==='status')return {connected:true,translationProvider:preferences.translationProvider||'deepseek',localLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,
       receiveAutoTranslate:preferences.receiveAutoTranslate,sendAutoTranslate:preferences.sendAutoTranslate,blockChineseSend:true,historyMode:preferences.historyMode,translationsVisible:preferences.translationsVisible!==false}
     const raw=payload as {id?:unknown;conversationId?:unknown;text?:unknown;direction?:unknown;manual?:unknown;translated?:unknown;requestId?:unknown;recoveryRequestId?:unknown;outcome?:unknown;confirmed?:unknown;attempt?:unknown;media?:unknown;context?:unknown}
     if(!raw || typeof raw.conversationId!=='string' || !/^[\w-]{1,160}$/.test(raw.conversationId))throw new Error('对话无效。')
@@ -51,7 +51,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
       || !validSource(raw.text) || !['translate','authorize'].includes(operation))throw new Error('翻译请求无效。')
     const fingerprint=createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,'outgoing',raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality])).digest('hex')
     const plainRequest:TranslationRequest={text:raw.text,accountId,conversationId,messageId:raw.id,requestId:'send-gv-plain-'+fingerprint,
-      sourceLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,quality:preferences.translationQuality}
+      sourceLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,quality:preferences.translationQuality,providerPreference:preferences.providerPreference}
     const plainAllowed=!!media && !raw.text.trim() || !preferences.sendAutoTranslate || alreadyInTargetLanguage(plainRequest)
     if(operation==='authorize'){
       if(typeof raw.requestId!=='string' || !/^send-[\w-]{1,150}$/.test(raw.requestId) || typeof raw.translated!=='string' || raw.translated.length>20000)throw new Error('发送记录无效。')
@@ -87,7 +87,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     }
     const requestId=(outgoing?'send-gv-':'gv-')+createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,raw.direction,raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality])).digest('hex')
     let request:TranslationRequest={text:raw.text,accountId,conversationId,messageId:raw.id,requestId,
-      sourceLanguage:outgoing?preferences.localLanguage:'auto',targetLanguage:outgoing?preferences.targetLanguage:preferences.localLanguage,quality:preferences.translationQuality}
+      sourceLanguage:outgoing?preferences.localLanguage:'auto',targetLanguage:outgoing?preferences.targetLanguage:preferences.localLanguage,quality:preferences.translationQuality,providerPreference:preferences.providerPreference}
     request=restored || (outgoing?await translator.preserveOutgoingRequest(request):await translator.preserveIncomingRequest(request))
     requireIdentity()
     if(outgoing){

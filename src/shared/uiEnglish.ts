@@ -536,8 +536,6 @@ export const uiEnglish: Readonly<Record<string, string>> = {
   "对方语言 ": "Their language ",
   "翻译引擎 ": "Translation service ",
   "登录 HelloDog 账号即可使用。翻译成功后按字符扣费，失败不扣费。": "Sign in to HelloDog to use cloud translation. Successful translations use characters; failed translations are not charged.",
-  "填写 DeepL API Free 或 Pro 的认证 Key。": "Enter a DeepL API Free or Pro authentication key.",
-  "需要已启用 Cloud Translation API 的 Google Cloud 项目。": "Requires a Google Cloud project with Cloud Translation API enabled.",
   "云端连接测试": "Cloud connection test",
   "API 连接测试": "API connection test",
   "发起一次真实翻译。成功按字符计费，失败不扣费。": "Runs an actual translation. Successful translations use characters; failures are not charged.",

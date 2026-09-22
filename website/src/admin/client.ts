@@ -21,7 +21,7 @@ export const sections=[
   {id:'overview',name:'总览',icon:'◫',hint:'用户与翻译运行概况'},
   {id:'users',name:'用户与余额',icon:'♙',hint:'查找用户、增减字符和管理账号状态'},
   {id:'translations',name:'翻译对账',icon:'⇄',hint:'每个请求的用量、扣费与补偿'},
-  {id:'costs',name:'用量与费用',icon:'▥',hint:'实际字符用量、DeepSeek 资金与账单'},
+  {id:'costs',name:'用量与费用',icon:'▥',hint:'字符用量、OpenAI 与 DeepSeek 费用和总计'},
   {id:'account',name:'管理员账号',icon:'♧',hint:'唯一的主管理员与登录密码'},
   {id:'security',name:'安全与保护',icon:'◇',hint:'管理员安全、费用保护和异常记录'},
   {id:'orders',name:'订单',icon:'▤',hint:'人工充值订单及收款记录'},

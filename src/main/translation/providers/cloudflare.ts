@@ -5,6 +5,7 @@ import { cloudBases } from '../../network/cloudConnection'
 import { qualityKey } from '../../../shared/translationPolicy'
 import { authenticatedFetch, SessionUnavailableError, type TokenSource } from '../../network/sessionRefresh'
 import { isSemanticTranslationMismatch } from '../../../shared/translationSemantics'
+import { readTranslationChannels, clearTranslationChannels } from '../../network/translationChannels'
 
 export interface CloudReceipt { requestId: string; translation: string; sourceCharacters: number; balanceAfter: number }
 export interface TranslationRepairReceipt extends CloudReceipt { chargedCharacters: 0; repairRequestId: string; repairOf: string }
@@ -44,14 +45,24 @@ export function validateCloudReceipt(payload: any, id: string, characters?: numb
 
 export class CloudflareProvider implements TranslationProvider {
   constructor(private readonly accessToken: TokenSource, private readonly apiBase?: string,
-    private readonly onReceipt?: (value: CloudReceipt) => Promise<void>) {}
+    private readonly onReceipt?: (value: CloudReceipt) => Promise<void>,
+    private readonly identity:{owner:string;authorized?:()=>boolean}={owner:'provider-'+randomUUID()}) {}
+  private async verifySelectedChannel(request:TranslationRequest,base:string) {
+    if(request.providerPreference===undefined)return
+    const channels=await readTranslationChannels(base,false,{...this.identity,token:this.accessToken}),selected=request.providerPreference
+    if(!['deepseek','openai'].includes(selected)||!channels.selectionSupported||!channels[selected]?.available)
+      throw new TranslationOutcomeError('所选翻译通道尚未启用或暂时无法连接，本次未发起翻译。请保留原消息并稍后重试。',true)
+  }
   async repair(request: TranslationRequest): Promise<TranslationRepairReceipt> {
     const requestId = request.requestId
     if (!requestId) throw new TranslationOutcomeError(quarantinedTranslationMessage)
     const deadline = Date.now() + 42000, base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
+    // Repairs only annotate an existing debit. Capability failures leave that
+    // original debit intact and never route the correction to another provider.
+    await this.verifySelectedChannel(request,base)
     const body = { text: request.text.trim(), sourceLanguage: request.sourceLanguage || 'auto', targetLanguage: request.targetLanguage,
       accountId: request.accountId || '', conversationId: request.conversationId || '', context: request.context || [],
-      ...(request.quality ? { quality: request.quality } : {}), requestId }
+      ...(request.quality ? { quality: request.quality } : {}), ...(request.providerPreference ? {providerPreference:request.providerPreference}:{}), requestId }
     const finish = (payload: any): TranslationRepairReceipt => {
       const receipt = validateCloudReceipt(payload, requestId, Array.from(body.text).length)
       const expectedRepairId = 'repair-' + createHash('sha256').update('semantic-repair-v1:' + requestId).digest('hex')
@@ -107,10 +118,25 @@ export class CloudflareProvider implements TranslationProvider {
     const deadline = Date.now() + 42000
     const body = { text: request.text.trim(), sourceLanguage: request.sourceLanguage || 'auto', targetLanguage: request.targetLanguage,
       accountId: request.accountId || '', conversationId: request.conversationId || '', context: request.context || [],
-      ...(request.quality ? { quality: request.quality } : {}) }
+      ...(request.quality ? { quality: request.quality } : {}), ...(request.providerPreference ? {providerPreference:request.providerPreference}:{}) }
     const requestId = request.requestId || (request.messageId
       ? `message-${createHash('sha256').update(JSON.stringify([request.messageId, body])).digest('hex')}` : randomUUID())
     const base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
+    const finish = async (value: any) => {
+      const receipt = validateCloudReceipt(value, requestId, Array.from(body.text).length)
+      await this.onReceipt?.(receipt)
+      if (isSemanticTranslationMismatch(body.text, receipt.translation)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
+      return receipt.translation
+    }
+    try { await this.verifySelectedChannel(request,base) }
+    catch(error) {
+      if(!(error instanceof TranslationOutcomeError))throw error
+      // A disabled channel must not hide an earlier settled response. Never
+      // send another translation or switch providers while resolving this ID.
+      const result=await this.status(requestId,deadline)
+      if(result.state==='completed')return finish(result.response)
+      throw new TranslationOutcomeError(error.message,result.state==='not_found'||result.state==='failed')
+    }
     if (qualityKey(request.quality)) {
       let supported: boolean
       try { supported = await supportsQuality(base) }
@@ -125,20 +151,18 @@ export class CloudflareProvider implements TranslationProvider {
         body: JSON.stringify({ ...body, requestId }) }, Math.min(30000, deadline - Date.now()))
       payload = await response.json()
     } catch (error) { if (error instanceof SessionUnavailableError) throw new TranslationOutcomeError(error.message); /* Response lost: only query this ID. */ }
-    const finish = async (value: any) => {
-      const receipt = validateCloudReceipt(value, requestId, Array.from(body.text).length)
-      await this.onReceipt?.(receipt)
-      // A valid settlement may predate semantic validation. Keep its real debit,
-      // but never expose an assistant answer as a translation or retry a new ID.
-      if (isSemanticTranslationMismatch(body.text, receipt.translation)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
-      return receipt.translation
-    }
     if (response?.ok && response.status !== 202 && payload?.translation) return finish(payload)
     // Authentication or wallet rejection does not prove that an earlier attempt
     // with this immutable ID was never settled. Retain the record for a lookup.
     if (response?.status === 401) throw new TranslationOutcomeError('在线登录状态已过期，请重新登录后核对原请求。')
     if (response?.status === 403) throw new TranslationOutcomeError('账号已停用，无法使用在线翻译。原请求仍需核对。')
     if (response?.status === 402) throw new TranslationOutcomeError('可用字符余额不足。原请求已保留，结算以查询结果为准。')
+    if(payload?.error==='provider_not_available') {
+      clearTranslationChannels()
+      const result=await this.status(requestId,deadline)
+      if(result.state==='completed')return finish(result.response)
+      throw new TranslationOutcomeError('所选翻译通道暂未启用。原消息已保留，请稍后重试，或为新消息选择其他通道。',result.state==='not_found'||result.state==='failed')
+    }
     if (response?.status === 429 || payload?.error === 'security_paused') {
       const status = await this.status(requestId, deadline)
       if (status.state === 'completed') return finish(status.response)

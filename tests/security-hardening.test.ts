@@ -80,10 +80,10 @@ test('settings migrate secrets away from preferences, redact them, and fail clos
   writeFileSync(h.directory+'/settings.sec','plain:'+Buffer.from(JSON.stringify({provider:'deepl',deeplApiKey:'local-fixture-key',closeBehaviorVersion:1})).toString('base64'))
   await store.migrateLegacySecrets()
   const settings=readFileSync(h.directory+'/settings.sec','utf8');assert.ok(settings.startsWith('enc:'));assert.ok(!Buffer.from(settings.slice(4),'base64').toString().includes('local-fixture-key'))
-  assert.equal((await store.publicSettings()).deeplApiKey,'saved-secret');assert.equal((await store.get()).deeplApiKey,'local-fixture-key')
-  await store.save(await store.publicSettings());assert.equal((await store.get()).deeplApiKey,'local-fixture-key')
+  assert.equal((await store.publicSettings()).deeplApiKey,undefined);assert.equal((await store.get()).provider,'openai')
+  await store.save(await store.publicSettings());assert.equal((await store.get()).deeplApiKey,undefined)
   encryption=false;await assert.rejects(store.save({provider:'deepl',deeplApiKey:'should-not-write'}),/加密/)
-  assert.ok(!readFileSync(h.directory+'/settings-keys.sec','utf8').includes('should-not-write'))
+  assert.equal((await store.publicSettings()).deeplApiKey,undefined)
 })
 test('remembered login migrates only after encrypted persistence succeeds and never falls back to localStorage',async()=>{
   const {SecureAuthStorage}=mainHarness().load('src/renderer/src/lib/secureAuthStorage.ts')

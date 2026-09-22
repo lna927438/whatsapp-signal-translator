@@ -1,6 +1,7 @@
 import { accountNames } from '../../shared/accountConfig'
 import { orderedAccounts } from '../../shared/accountOrder'
 import { normalizeQuality } from '../../shared/translationPolicy'
+import { translationChannel } from '../../shared/translationChannels'
 import { safeStorage } from 'electron'
 import { normalizeProxy } from '../network/accountProxy'
 import { randomUUID } from 'crypto'
@@ -12,7 +13,15 @@ export class AccountManager {
   private writeChain: Promise<unknown> = Promise.resolve()
 
   async list(): Promise<AccountRecord[]> {
-    return (await this.store.read()).map(({ proxySecret, ...record }) => ({ ...record, proxy: record.proxy ? { ...record.proxy, hasPassword: Boolean(proxySecret) } : undefined }))
+    return (await this.store.read()).map(record => this.publicRecord(record))
+  }
+
+  async retireLegacyNotes(): Promise<void> {
+    await this.serialized(async () => {
+      const records = await this.store.read()
+      if (!records.some(record => 'note' in record || 'caption' in record)) return
+      await this.store.write(records.map(record => { const {note,caption,...rest} = record as typeof record & {note?:unknown;caption?:unknown}; return rest }))
+    })
   }
 
   async add(platform: Platform, label?: string, signalAccount?: string, options: Partial<AccountRecord> & { proxy?: any } = {}): Promise<AccountRecord> {
@@ -114,7 +123,7 @@ export class AccountManager {
   }
 
   private publicRecord(record: AccountRecord & { proxySecret?: string }): AccountRecord {
-    const { proxySecret, ...result } = record
+    const { proxySecret, note, caption, ...result } = record as typeof record & {note?:unknown;caption?:unknown}
     return { ...result, proxy: result.proxy ? { ...result.proxy, hasPassword: Boolean(proxySecret) } : undefined }
   }
 
@@ -139,6 +148,7 @@ export class AccountManager {
 
   private preparePatch(input: any): Partial<AccountRecord> & { proxySecret?: string } {
     const out: any = {}
+    if (input.translationProvider !== undefined) out.translationProvider = translationChannel(input.translationProvider)
     if (input.signalEngine !== undefined) { if (!['cli','desktop'].includes(input.signalEngine)) throw new Error('Signal 客户端类型无效。'); out.signalEngine = input.signalEngine }
     if (input.translationQuality !== undefined) out.translationQuality = normalizeQuality(input.translationQuality)
     if ('historyMode' in input) out.historyMode = ['new','manual','visible'].includes(input.historyMode as string) ? input.historyMode : undefined
@@ -149,8 +159,7 @@ export class AccountManager {
     for (const key of ['pinned','group','label','signalAccount','localLanguage','targetLanguage','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','translationsVisible','zoomFactor','toolbarCollapsed']) {
       if (input[key] !== undefined) out[key] = input[key]
     }
-    if (input.note !== undefined) { if (typeof input.note !== 'string' || input.note.length > 80) throw new Error('账号备注最多 80 个字符。'); out.note = input.note.trim() }
-    if (input.caption !== undefined) { if (typeof input.caption !== 'string' || input.caption.length > 120) throw new Error('红色备注最多 120 个字符。'); out.caption = input.caption.trim() }
+    if (input.translationColor !== undefined && !/^#[0-9a-f]{6}$/i.test(input.translationColor)) throw new Error('请选择有效的译文颜色。')
     if (out.group !== undefined) out.group = String(out.group).trim().slice(0, 30)
     if (out.pinned !== undefined) out.pinned = out.pinned === true
     if (out.label !== undefined) { out.label = String(out.label).trim().slice(0, 60); if (!out.label) throw new Error('请输入账号名称。') }

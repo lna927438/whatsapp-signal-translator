@@ -20,3 +20,6 @@
 .adm-popup-preview{margin:16px 0;padding:18px;border:1px solid #3b544b;border-radius:14px;background:#18231f;color:#e8f1ec;max-width:360px;box-shadow:0 8px 22px #10241d20}.adm-popup-preview small{color:#a2b7ad}.adm-popup-preview h3{font-size:16px;margin:10px 0;overflow-wrap:anywhere}.adm-popup-preview p{white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:13px;line-height:1.6}.adm-popup-preview footer{display:flex;justify-content:space-between;font-size:12px;gap:12px}.adm-popup-preview b{color:#97d8b8}
 
 .adm-edit-fields { border:0; padding:0; margin:0; min-width:0; display:contents; }
+
+/* Overview: three usage counters, then three comparable provider cost cards. */
+.adm-overview-stats{grid-template-columns:repeat(3,minmax(0,1fr))}.adm-overview-stats>.adm-overview-characters strong,.adm-overview-stats>.adm-overview-users strong,.adm-overview-stats>.adm-overview-today strong{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}@media(max-width:700px){.adm-overview-stats{grid-template-columns:1fr}.adm-overview-stats>article{padding:16px 18px}.adm-overview-stats>article strong{margin-top:3px}}

@@ -20,11 +20,36 @@ for(const cron of ['*/5 * * * *','17 * * * *'])test(`scheduled billing dispatch 
   return Response.json({})
  })
  await worker.scheduled({cron} as any,env)
- assert.equal(calls.some(path=>path.startsWith('api.openai.com')),cron==='*/5 * * * *')
+ assert.equal(calls.some(path=>path.startsWith('api.openai.com')),true)
  assert.equal(calls.some(path=>path.startsWith('api.deepseek.com')),cron!=='17 * * * *')
  assert.equal(calls.some(path=>path.endsWith('/security_housekeeping')),cron==='17 * * * *')
  assert.equal(calls.filter(path=>path.endsWith('/record_openai_billing_sync')).length,cron==='*/5 * * * *'?1:0)
- assert.equal(logs.length,1);assert.ok(!JSON.stringify(logs).includes('3.00'),'Logs contain no balance amounts')
+ assert.equal(logs.length,cron==='17 * * * *'?2:1);assert.ok(!JSON.stringify(logs).includes('3.00'),'Logs contain no balance amounts')
+})
+
+for(const failed of ['maintenance','billing'] as const)test(`hourly ${failed} failure cannot block its independent peer`,async t=>{
+ const calls:string[]=[],logs:any[]=[]
+ t.mock.method(console,'info',(value:string)=>logs.push(JSON.parse(value)))
+ t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{
+  const url=new URL(String(input));calls.push(url.pathname)
+  if(url.pathname.endsWith('/security_housekeeping')){
+   if(failed==='maintenance')throw Error('private maintenance failure test-service')
+   return Response.json({expired:0})
+  }
+  if(url.hostname==='api.openai.com'){
+   if(failed==='billing')return Response.json({error:{code:'account_deactivated',message:'private billing failure test-admin'}},{status:401})
+   const start=Number(url.searchParams.get('start_time')),end=Number(url.searchParams.get('end_time'))
+   return Response.json({object:'page',has_more:false,data:Array.from({length:(end-start)/86400},(_,i)=>({object:'bucket',start_time:start+i*86400,end_time:start+(i+1)*86400,results:[]}))})
+  }
+  assert.equal(url.pathname,'/rest/v1/rpc/record_official_bill');return Response.json({})
+ })
+ await worker.scheduled({cron:'17 * * * *'} as any,env)
+ assert.ok(calls.includes('/rest/v1/rpc/security_housekeeping'));assert.ok(calls.includes('/v1/organization/costs'))
+ assert.equal(calls.includes('/rest/v1/rpc/record_official_bill'),failed==='maintenance')
+ const maintenance=logs.find(x=>x.event==='security_housekeeping'),billing=logs.find(x=>x.event==='billing_backfill')
+ assert.equal(billing.ok,failed==='maintenance');assert.equal(billing.errorCode,failed==='billing'?'billing_account_deactivated':null)
+ if(failed==='maintenance')assert.equal(maintenance.errorCode,'maintenance_unavailable')
+ assert.ok(!/test-service|test-admin|private .* failure/.test(JSON.stringify(logs)))
 })
 test('billing cron reports failed balance refresh instead of a cached balance as successful',async t=>{
  const logs:any[]=[];t.mock.method(console,'info',(value:string)=>logs.push(JSON.parse(value)))

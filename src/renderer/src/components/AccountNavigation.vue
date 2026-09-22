@@ -4,12 +4,12 @@ import { orderedAccounts, moveAccount } from '../../../shared/accountOrder'
 import { t, uiLanguage } from '../lib/uiLocale'
 import UiIcon from './UiIcon.vue'
 const props=defineProps<{accounts:any[];selectedId?:string;unread:Record<string,number>;position:'top'|'side';platform:string;ordering?:boolean;windowLabels?:boolean;busy?:boolean;iconSource?:string;closeLabel?:string}>()
-const emit=defineEmits(['select','menu','add','search','remove','remark','caption','reorder'])
-const words=computed(()=>props.windowLabels?{navigation:uiLanguage.value==='en'?'Google Voice windows':'Google Voice 窗口',count:uiLanguage.value==='en'?`${props.accounts.length} windows`:`${props.accounts.length} 个窗口`,hint:uiLanguage.value==='en'?'Drag to reorder; double-click to rename':'拖动排序；双击重命名',close:uiLanguage.value==='en'?'Close window':'关闭窗口',add:uiLanguage.value==='en'?'Add Google Voice window':'新增 Google Voice 窗口'}:{navigation:t('账号切换'),count:t('{0} 个账号',props.accounts.length),hint:t('拖动排序；双击编辑备注'),close:t('移除账号入口'),add:t('添加账号')})
+const emit=defineEmits(['select','menu','add','search','remove','rename','reorder'])
+const words=computed(()=>props.windowLabels?{navigation:uiLanguage.value==='en'?'Google Voice windows':'Google Voice 窗口',count:uiLanguage.value==='en'?`${props.accounts.length} windows`:`${props.accounts.length} 个窗口`,hint:uiLanguage.value==='en'?'Drag to reorder; double-click to rename':'拖动排序；双击重命名',close:uiLanguage.value==='en'?'Close window':'关闭窗口',add:uiLanguage.value==='en'?'Add Google Voice window':'新增 Google Voice 窗口'}:{navigation:t('账号切换'),count:t('{0} 个账号',props.accounts.length),hint:t('拖动排序；双击重命名'),close:t('移除账号入口'),add:t('添加账号')})
 const list=ref<HTMLElement>()
 const preview=ref<string[]|null>(null),dragging=ref('')
 const rows=computed(()=>{const ordered=orderedAccounts(props.accounts);return preview.value?preview.value.map(id=>ordered.find(account=>account.id===id)).filter(Boolean):ordered})
-const name=(a:any)=>a.note||a.label
+const name=(a:any)=>a.label
 watch(()=>[props.selectedId,props.position,props.accounts.length],async()=>{await nextTick();list.value?.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView({block:'nearest',inline:'nearest'})})
 let pointer:{id:number;x:number;y:number;account:string;button:HTMLElement}|undefined,suppressClickUntil=0
 function finish(commit=false){
@@ -58,7 +58,7 @@ onUnmounted(cancel)
   <button v-else class="account-count" @click="emit('search')" :title="platform+' · '+words.count" :aria-label="words.count"><img :src="iconSource || `./${platform}.svg`" alt="" /><span>{{accounts.length}}</span></button>
   <div ref="list" class="account-switch-list" @pointermove="drag" @pointerup="release" @pointercancel="cancel" @lostpointercapture="pointer && cancel()">
    <div v-for="(account,index) in rows" :key="account.id" class="account-tab" :data-account-id="account.id" :class="{active:selectedId===account.id,dragging:dragging===account.id}" @contextmenu.prevent="emit('menu',account)">
-    <button class="account-switch" :disabled="busy" :aria-current="selectedId===account.id?'true':undefined" :aria-label="name(account)+(unread[account.id]?' · '+unread[account.id]+t(' 条未读'):'')" :title="account.label+(account.note?' · '+account.note:'')+' · '+words.hint" @pointerdown="start($event,account)" @dragstart.prevent @click="activate(account)" @dblclick="!dragging && emit('remark',account)" @keydown.shift.f10.prevent="emit('menu',account)" @keydown.f2.prevent="emit('remark',account)" @keydown="move($event,index)" @keydown.esc.stop="cancel">
+    <button class="account-switch" :disabled="busy" :aria-current="selectedId===account.id?'true':undefined" :aria-label="name(account)+(unread[account.id]?' · '+unread[account.id]+t(' 条未读'):'')" :title="account.label+' · '+words.hint" @pointerdown="start($event,account)" @dragstart.prevent @click="activate(account)" @dblclick="!dragging && emit('rename',account)" @keydown.shift.f10.prevent="emit('menu',account)" @keydown.f2.prevent="emit('rename',account)" @keydown="move($event,index)" @keydown.esc.stop="cancel">
      <span class="tab-app-icon"><img :src="iconSource || `./${account.platform}.svg`" alt="" /><span v-if="unread[account.id]" class="unread-badge">{{unread[account.id]>99?'99+':unread[account.id]}}</span></span><span class="account-tab-name">{{name(account)}}</span><i v-if="account.pinned" class="account-pin"></i>
     </button>
     <button class="account-close" :disabled="busy" :title="(closeLabel || words.close)+' · '+name(account)" :aria-label="(closeLabel || words.close)+' · '+name(account)" @click.stop="emit('remove',account)">×</button>

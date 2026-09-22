@@ -74,14 +74,38 @@ test('historical breakdown retains each provider bill and missing-period labels,
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data)]
   const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
-    assert.match(h.card().textContent,/尚未同步该账期/);assert.match(h.card().textContent,/\$0\.0329117/);assert.match(h.card().textContent,/DeepSeek/)
+    assert.match(h.card().textContent,/尚未同步该账期/);assert.match(h.card().textContent,/\$0\.03/);assert.match(h.card().textContent,/DeepSeek/)
     assert.doesNotMatch(h.card().textContent,/0\.123456789012|987654321/)
-    assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/0\.123456789012/)
+    assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/\$0\.12/)
     assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/官方账单不能直接分摊到每个用户/)
     data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(30000);await tick()
-    assert.match(h.card().textContent,/\$0\.0329117/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/官方账单 · 手动录入/)
-    data.officialBills=[];h.run(30000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/0\.0329117/)
+    assert.match(h.card().textContent,/\$0\.03/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/官方账单 · 手动录入/)
+    data.officialBills=[];h.run(30000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/\$0\.03/)
   }finally{h.close()}
+})
+
+test('main costs cards show known receipt fees with incomplete labels while official imports update only official amounts',async()=>{
+ const data=costsFixture();data.totals.known_cost_usd_exact='1.62';data.totals.unpriced_requests=536
+ data.providers=[{provider:'deepseek',known_cost_usd_exact:'1.59',unpriced_requests:466},{provider:'openai',known_cost_usd_exact:'0.03',unpriced_requests:57}] as any
+ const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+ try{
+  const card=(name:string)=>h.w.document.querySelector(`.adm-provider-cost-card[data-provider="${name}"]`)
+  const amount=(name:string)=>card(name).querySelector('.adm-provider-amount').textContent
+  const official=(name:string)=>card(name).querySelector('.adm-official-amount').textContent
+  assert.equal(amount('deepseek'),'$1.59');assert.equal(amount('openai'),'$0.03');assert.equal(amount('total'),'$1.62')
+  assert.equal(official('deepseek'),'待同步官方账单');assert.equal(official('total'),'账单未齐全')
+  assert.match(card('total').querySelector('.adm-fee-label').textContent,/已知费用 · 记录待补齐/)
+  assert.match(card('total').textContent,/536 条费用记录不完整/);assert.match(card('total').textContent,/13 条历史记录尚未归属通道/)
+  assert.doesNotMatch(h.body(),/次调用待核算/)
+  data.officialBills=[officialBillFixture('deepseek','1.658919574',data)];h.run(30000);await tick()
+  assert.equal(official('deepseek'),'$1.65');assert.equal(official('total'),'账单未齐全');assert.match(card('total').textContent,/待同步 OpenAI/);assert.doesNotMatch(card('total').textContent,/\$1\.66/)
+  data.officialBills.push(officialBillFixture('openai','0.05',data));h.run(30000);await tick()
+  assert.equal(official('openai'),'$0.05');assert.equal(official('total'),'$1.71');assert.equal(card('deepseek').querySelector('.adm-official-amount').title,'1.658919574')
+  assert.equal(amount('total'),'$1.62')
+  assert.match(card('deepseek').textContent,/GMT\+8/);assert.match(card('openai').textContent,/UTC/)
+  data.officialBills[0].currentAccount=false;h.run(30000);await tick()
+  assert.equal(official('deepseek'),'待同步官方账单');assert.equal(official('total'),'账单未齐全');assert.doesNotMatch(card('total').textContent,/已同步部分/)
+ }finally{h.close()}
 })
 
 test('DeepSeek-only configuration hides retired OpenAI billing warnings and actions while preserving explicit historical receipts',async()=>{
@@ -150,8 +174,9 @@ test('provider query updates historical bill details only after that query succe
   const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const select=h.w.document.querySelectorAll('select')[1];select.value='deepseek';select.dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
-    assert.match(h.card().textContent,/\$0\.0329117/)
-    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.card().textContent,/\$0\.000000000009/);assert.doesNotMatch(h.card().textContent,/OpenAI \+ DeepSeek/)
+    assert.match(h.card().textContent,/\$0\.03/)
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.card().textContent,/\$0\.00/);assert.doesNotMatch(h.card().textContent,/OpenAI \+ DeepSeek/)
+    const total=h.w.document.querySelector('.adm-total-cost');assert.equal(total.querySelector('.adm-provider-amount').textContent,'请选全部通道查看合计');assert.doesNotMatch(total.textContent,/待同步 OpenAI|账单未齐全|已同步部分/);assert.match(total.textContent,/DeepSeek 筛选 · 回执已核算/)
   }finally{h.close()}
 })
 test('non-owner cannot see official billing cards or fetch owner endpoints, including after an access change',async()=>{
@@ -199,6 +224,17 @@ test('account-deactivation status is explicit and an automatic successful status
     assert.match(h.card().textContent,/账单账号已停用/);assert.match(h.card().textContent,/\$0\.20/)
     failed=false;now+=61000;h.run(30000);await tick();assert.doesNotMatch(h.body(),/账单账号已停用/)
   }finally{h.close()}
+})
+
+test('a missing OpenAI billing connection is actionable beside the live fee without substituting the fee for its official bill',async()=>{
+ const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:false,message:'official API not configured'}})
+ try{
+  const card=h.w.document.querySelector('[data-provider="openai"]')
+  assert.equal(card.querySelector('.adm-provider-amount').textContent,'$0.12')
+  assert.equal(card.querySelector('.adm-official-amount').textContent,'待同步官方账单')
+  assert.match(card.textContent,/官方账单未接通，请由主管理员配置账单读取凭据/)
+  assert.equal([...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单').disabled,true)
+ }finally{h.close()}
 })
 
 test('late failed manual sync cannot restore status or text after official-access changes',async()=>{

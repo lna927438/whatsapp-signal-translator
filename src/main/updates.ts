@@ -8,6 +8,10 @@ import { createUpdateRecovery } from './storage/updateRecovery'
 import { trustedUpdate, verifyWindowsInstaller } from './updateTrust'
 import type { SignedUpdate } from '../shared/updateSignature'
 export interface UpdateManifest { version: string; versionKey: string; sha256: string; size: number; channel: 'stable' | 'beta'; notes: string; schemaVersion?:1; issuedAt?:string; expiresAt?:string; sourceCommit?:string; signature?:SignedUpdate['signature'] }
+export interface UpdateNotice {
+  currentVersion: string; latestVersion?: string; notes?: string; checkedAt?: number
+  status: 'available' | 'current' | 'ahead' | 'unknown'; verified: boolean; available: boolean; show: boolean; website: string
+}
 /** Unknown versions are never treated as an upgrade. Stable sorts after its prereleases. */
 export function compareVersions(left: string, right: string): number | undefined {
   const parse=(v:string)=>v.match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc)\.(0|[1-9]\d*))?$/)
@@ -79,32 +83,39 @@ export async function downloadVerified(url: string, destination: string, manifes
 }
 export class UpdateManager {
   private state = new JsonStore<{ manifest?: UpdateManifest; highestTrustedVersion?:string; phase?: string; previousVersion?: string; recoveryDirectory?: string }>('update-state.json', {}, true)
-  private notices = new JsonStore<{ checkedAt?:number; latest?:UpdateManifest; snoozedVersion?:string; snoozedUntil?:number }>('update-notice.json', {})
+  private notices = new JsonStore<{ checkedAt?:number; failedAt?:number; latest?:UpdateManifest; snoozedVersion?:string; snoozedUntil?:number }>('update-notice.json', {})
   private noticeWork?: Promise<unknown>
   private nextNoticeAttempt=0
   private busy = false
   private received = 0
   private error = ''
   private root() { return join(app.getPath('userData'), 'verified-updates') }
-  async notice() {
+  async notice(force=false):Promise<UpdateNotice> {
     const saved=await this.notices.read(),now=Date.now()
-    if(now>=this.nextNoticeAttempt && (!saved.checkedAt || now-saved.checkedAt>=10*60000)) {
+    const verifyCached=async(value:UpdateManifest|undefined)=>{try{return value?validateManifest(await trustedUpdate(value),'stable'):undefined}catch{return undefined}}
+    const fresh=(checkedAt:number|undefined)=>Number.isSafeInteger(checkedAt)&&checkedAt!>0&&checkedAt!<=Date.now()&&Date.now()-checkedAt!<10*60000
+    const cached=await verifyCached(saved.latest)
+    if(force || now>=this.nextNoticeAttempt && (!cached || !fresh(saved.checkedAt))) {
       if(!this.noticeWork)this.noticeWork=(async()=>{
         try {
           const response=await fetch('https://download.hellodog.net/metadata/version.json',{redirect:'error',cache:'no-store',signal:AbortSignal.timeout(12000)})
           if(!response.ok)throw new Error('update-unavailable')
           const latest=await readManifest(response,'stable')
           const current=await this.notices.read()
-          if(current.latest&&compareVersions(latest.version,current.latest.version)===-1)throw new Error('更新版本回退已被阻止。')
-          await this.notices.write({...current,latest,checkedAt:Date.now()});this.nextNoticeAttempt=Date.now()+10*60000
-        } catch { this.nextNoticeAttempt=Date.now()+30*60000 }
+          const previous=await verifyCached(current.latest)
+          if(previous&&compareVersions(latest.version,previous.version)===-1)throw new Error('更新版本回退已被阻止。')
+          await this.notices.write({...current,latest,checkedAt:Date.now(),failedAt:undefined});this.nextNoticeAttempt=Date.now()+10*60000
+        } catch { this.nextNoticeAttempt=Date.now()+30*60000;const current=await this.notices.read();await this.notices.write({...current,failedAt:Date.now()}) }
       })().finally(()=>{this.noticeWork=undefined})
-      await this.noticeWork
     }
+    if(this.noticeWork)await this.noticeWork
     const current=await this.notices.read()
-    const available=!!current.latest && compareVersions(current.latest.version,app.getVersion())===1
-    return {currentVersion:app.getVersion(),latestVersion:current.latest?.version,notes:current.latest?.notes,checkedAt:current.checkedAt,
-      available,show:available && (current.snoozedVersion!==current.latest?.version || (current.snoozedUntil||0)<=Date.now()),website:'https://hellodog.net/download'}
+    const latest=await verifyCached(current.latest)
+    const verified=!!latest&&fresh(current.checkedAt)&&!current.failedAt
+    const order=verified?compareVersions(latest!.version,app.getVersion()):undefined
+    const status:UpdateNotice['status']=order===1?'available':order===0?'current':order===-1?'ahead':'unknown',available=status==='available'
+    return {currentVersion:app.getVersion(),latestVersion:verified?latest?.version:undefined,notes:verified?latest?.notes:undefined,checkedAt:current.checkedAt,status,verified,
+      available,show:available && (current.snoozedVersion!==latest?.version || (current.snoozedUntil||0)<=Date.now()),website:'https://hellodog.net/download'}
   }
   async snooze(version:string) {
     if(this.noticeWork)await this.noticeWork

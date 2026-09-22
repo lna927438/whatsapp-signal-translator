@@ -3,11 +3,12 @@ import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 
 import { computed, ref, watch, onUnmounted } from 'vue'
 import QRCode from 'qrcode'
+import ConfirmColor from './ConfirmColor.vue'
 import SignalGallery from './SignalGallery.vue'
 import type { SignalConversationPreference } from '../../../shared/signalPreferences'
 const props = defineProps<{ recordId: string; account: string; peer: string; preference: SignalConversationPreference; messages: any[]; contacts: any[] }>()
 const emit = defineEmits(['close','change','search','conversation'])
-const detail = ref<any>(null), error = ref(''), busy = ref(false), page = ref('profile'), nickname = ref(''), note = ref('')
+const detail = ref<any>(null), error = ref(''), busy = ref(false), page = ref('profile')
 const identities = ref<any[]>([]), checked = ref(false), safetyQr = ref(''), confirmAction = ref(''), addMembers = ref<string[]>([])
 let generation = 0, disposed = false
 const grouped = computed(() => detail.value?.kind === 'group')
@@ -17,7 +18,7 @@ async function load() {
   try {
     const value = await window.desktopAPI.signalDetails(props.recordId, props.peer)
     if (disposed || generation !== version) return
-    detail.value = value; nickname.value = value.nickName || ''; note.value = value.note || ''
+    detail.value = value
     void window.desktopAPI.signalAvatar(props.recordId, props.peer).then((avatar:string) => { if (!disposed && generation === version && detail.value) detail.value.avatar = avatar }).catch(() => {})
   } catch (e:any) { if (!disposed && generation === version) error.value = e.message }
 }
@@ -29,8 +30,11 @@ async function run(action: () => Promise<any>, reload = false) {
   finally { busy.value = false }
 }
 function pref(patch: any) { return run(() => window.desktopAPI.signalConversationPreferences(props.recordId, props.peer, patch)) }
+async function saveColor(color: string) {
+  await window.desktopAPI.signalConversationPreferences(props.recordId, props.peer, { color })
+  emit('change')
+}
 function timer(event: Event) { const expiration = Number((event.target as HTMLSelectElement).value); return run(() => grouped.value ? window.desktopAPI.signalSaveGroup(props.recordId, props.peer, { expiration }) : window.desktopAPI.signalSaveContact(props.recordId, props.peer, { expiration }), true) }
-function saveNickname() { return run(() => window.desktopAPI.signalSaveContact(props.recordId, props.peer, { nickName: nickname.value, note: note.value }), true) }
 function addGroupMembers() { return run(() => window.desktopAPI.signalSaveGroup(props.recordId, props.peer, { members: [...addMembers.value] }), true) }
 async function safety() {
   page.value = 'safety'; safetyQr.value = ''; checked.value = false
@@ -61,8 +65,7 @@ onUnmounted(() => { disposed = true; generation++ })
         <div class="sd-identity"><img v-if="detail.avatar" :src="detail.avatar" :alt="t('联系人头像')" /><span v-else class="sd-avatar">{{ grouped ? t('群') : detail.name?.slice(0,2) }}</span><h2>{{ detail.name }}</h2><p v-if="detail.number">{{ detail.number }}</p><p v-if="detail.username">@{{ detail.username }}</p><p v-if="detail.about || detail.description">{{ detail.about || detail.description }}</p></div>
         <div class="sd-actions"><button @click="emit('search')">⌕<small>{{ t('搜索') }}</small></button><button :disabled="busy" @click="pref({mutedUntil: (preference.mutedUntil || 0) > Date.now() ? 0 : Number.MAX_SAFE_INTEGER})">♧<small>{{ (preference.mutedUntil || 0) > Date.now() ? t('取消静音') : t('静音') }}</small></button><button :disabled="busy" @click="pref({archived: !(preference.archived ?? detail.archived)})">▣<small>{{ (preference.archived ?? detail.archived) ? t('取消存档') : t('存档') }}</small></button></div>
         <label class="sd-row"><span>{{ t('限时消息') }}<small>{{ t('此后的消息会按设定时长消失。') }}</small></span><select :value="detail.expiration || 0" :disabled="busy" @change="timer"><option :value="0">{{ t('关闭') }}</option><option :value="30">{{ t('30 秒') }}</option><option :value="300">{{ t('5 分钟') }}</option><option :value="3600">{{ t('1 小时') }}</option><option :value="28800">{{ t('8 小时') }}</option><option :value="86400">{{ t('1 天') }}</option><option :value="604800">{{ t('1 周') }}</option><option :value="2419200">{{ t('4 周') }}</option></select></label>
-        <details v-if="!grouped" class="sd-edit"><summary>{{ t('昵称与备注') }}</summary><label>{{ t('昵称') }}<input v-model="nickname" maxlength="80" /></label><label>{{ t('备注') }}<textarea v-model="note" maxlength="2000" rows="3" /></label><button :disabled="busy" @click="saveNickname">{{ t('保存昵称与备注') }}</button></details>
-        <label class="sd-row">{{ t('聊天颜色') }}<input type="color" :value="preference.color || '#3f6ac4'" :disabled="busy" @change="pref({color: ($event.target as HTMLInputElement).value})" /></label>
+        <div class="sd-row"><ConfirmColor :key="peer" :label="t('聊天颜色')" :value="preference.color || '#3f6ac4'" :disabled="busy" :save="saveColor" /></div>
         <label class="sd-row">{{ t('静音时长') }}<select :disabled="busy" :value="(preference.mutedUntil || 0) > Date.now() ? -1 : 0" @change="pref({mutedUntil: Number(($event.target as HTMLSelectElement).value) === 0 ? 0 : Number(($event.target as HTMLSelectElement).value) === -1 ? Number.MAX_SAFE_INTEGER : Date.now() + Number(($event.target as HTMLSelectElement).value)})"><option :value="0">{{ t('不静音') }}</option><option :value="3600000">{{ t('1 小时') }}</option><option :value="28800000">{{ t('8 小时') }}</option><option :value="86400000">{{ t('1 天') }}</option><option :value="-1">{{ t('持续静音') }}</option></select></label>
         <button class="sd-row sd-link" @click="page = 'media'">{{ t('媒体、链接和文件') }}<span>›</span></button>
         <button v-if="!grouped && peer !== account" class="sd-row sd-link" @click="safety">{{ t('查看安全码') }}<span>›</span></button>

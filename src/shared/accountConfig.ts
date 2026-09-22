@@ -5,5 +5,5 @@ export function accountNames(label: string, count: number): string[] {
   return Array.from({ length: count }, (_, i) => count === 1 ? name : `${name} ${i + 1}`)
 }
 export function accountTemplate(value: any) {
-  return Object.fromEntries(['localLanguage','targetLanguage','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','group'].filter(key => value[key] !== undefined).map(key => [key, value[key]]))
+  return Object.fromEntries(['localLanguage','targetLanguage','translationProvider','receiveAutoTranslate','sendAutoTranslate','blockChineseSend','groupTranslate','fontSize','translationColor','group'].filter(key => value[key] !== undefined).map(key => [key, value[key]]))
 }

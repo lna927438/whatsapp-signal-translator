@@ -53,11 +53,12 @@ test('Signal contact, profile, group and block actions use the pinned upstream R
     await h.invoke('signal:block','group:YXNkZg==',true)
     await h.invoke('signal:group-save',null,{name:'Team',members:['+12025550123']})
     assert.deepEqual(JSON.parse(JSON.stringify(h.calls)),[
-      ['+12025550100','updateContact',{recipient:'+12025550123',nickGivenName:'Alex',nickFamilyName:'',note:'Project',expiration:86400}],
+      ['+12025550100','updateContact',{recipient:'+12025550123',nickGivenName:'Alex',nickFamilyName:'',expiration:86400}],
       ['+12025550100','updateProfile',{givenName:'Cristina',familyName:'',about:'Hello'}],
       ['+12025550100','block',{groupId:['YXNkZg==']}],
       ['+12025550100','updateGroup',{name:'Team',member:['+12025550123']}]
     ])
+    assert.ok(h.calls.every((call:any[])=>call[2].note===undefined),'retired note input must never reach Signal')
     await assert.rejects(h.invoke('signal:contact-save','group:YXNkZg==',{note:'bad'}))
     await assert.rejects(h.invoke('signal:block','+12025550100',true))
     await assert.rejects(h.invoke('signal:contact-save','+12025550123',{expiration:-1}))

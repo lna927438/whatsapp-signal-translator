@@ -1,4 +1,31 @@
 export const uiEnglishExtra: Readonly<Record<string,string>> = {
+  '正在打开聊天…':'Opening chat…',
+  '聊天页面连接中断，请刷新重试。':'The chat page disconnected. Refresh to reconnect.',
+  '聊天页面未能显示':'The chat page could not be displayed',
+  '账号和已保存的草稿仍保留，请刷新重试。':'Your account and saved drafts are retained. Refresh to try again.',
+  '正在连接 WhatsApp，可以继续切换其他窗口。':'Connecting to WhatsApp. You can continue using other windows.',
+  '恢复此窗口':'Resume this window', '恢复未完成，请重试。':'The window could not be resumed. Try again.',
+  '聊天显示状态未恢复，请重新打开窗口。':'The chat view could not be restored. Reopen the window.',
+  '刷新当前聊天 (F5)':'Refresh current chat (F5)',
+  '保存草稿并重启 HelloDog':'Save drafts and restart HelloDog',
+  '主页':'Home', '找窗口':'Find window', '我的账号':'My account', '通知':'Notifications',
+  '选择应用，创建聊天窗口':'Choose an app to create a chat window', ' 个窗口':' windows',
+  '已有窗口可从左侧应用继续打开，顶部标签支持拖动排序。':'Open existing windows from the app sidebar. Drag the top tabs to reorder them.',
+  '拖动排序；双击重命名':'Drag to reorder; double-click to rename',
+  '翻译通道':'Translation provider', '此窗口的翻译通道':'Translation provider for this window',
+  '当前使用个人翻译服务，请在设置中选择 HelloDog 云端后切换通道。':'You are using a personal translation service. Select HelloDog Cloud in Settings to switch cloud providers.',
+  '正在检查通道':'Checking providers', '此通道暂不可用':'This provider is currently unavailable',
+  '正在切换…':'Switching…', '已切换，仅此窗口生效':'Switched for this window',
+  '切换未完成，保留原通道':'Switch failed; the previous provider is unchanged',
+  '仅对此窗口的新翻译生效':'Applies to new translations in this window', '暂不可用':'Unavailable',
+  'OpenAI 尚未启用':'OpenAI has not been enabled',
+  '暂时无法确认通道，请检查连接':'Providers could not be checked. Check the connection.',
+  '选择颜色':'Choose a color', '译文预览':'Translation preview', '颜色未保存，请重试':'Color was not saved. Try again.',
+  '请先选择窗口':'Select a window first', '最新版本与通知':'Latest version and notifications',
+  '当前版本':'Current version', '已是当前最新版本':'You are on the latest version', '本机版本较新':'This version is newer',
+  '版本检查尚未完成':'Version check is incomplete', '点击刷新核对官网最新版本。':'Refresh to check the latest official version.',
+  '你的账号、剩余字符与累计用量。':'Your account, remaining characters and total usage.', '正在同步余额…':'Syncing your balance…',
+  '左侧显示应用与常用功能，顶部账号标签可拖动排序。红色角标表示未读消息。':'The sidebar shows apps and common tools. Drag the top account tabs to reorder them. Red badges show unread messages.',
   '拖动排序；双击编辑备注':'Drag to reorder; double-click to edit the note',
   '账号顺序未保存，请重试。':'The account order was not saved. Try again.',
   '窗口设置未保存，请重试。':'Window settings were not saved. Try again.',
@@ -179,4 +206,26 @@ Object.assign(uiEnglishExtra, {
   '前往官网更新':'Update from website', '自动检查官网稳定版；发现新版本会提醒，可稍后更新。':'Automatically checks the official stable release. Updates can be postponed.',
   '版本更新提醒':'Update available', '官网新版本':'New official version', '当前':'Current', '明天提醒':'Remind me tomorrow',
   '账号移除未完成':'The account could not be removed', '编辑备注':'Edit note', '保存备注':'Save note'
+})
+
+Object.assign(uiEnglishExtra, {
+  '服务器默认通道检查':'Server default channel check',
+  '已启用；实际翻译请使用下方测试':'Enabled; use the translation test below to verify actual results',
+  '新窗口默认翻译模型':'Default translation model for new windows',
+  '只影响之后创建的窗口。已有窗口保留自己的通道，可在窗口上方切换。两种模型共用语言、术语、翻译预览和字符余额。':'Applies only to windows created from now on. Existing windows keep their own channel, which can be changed above each window. Both models share language, glossary, translation preview and character balance settings.',
+  '刷新模型状态':'Refresh model status',
+  '模型翻译测试':'Test translation model',
+  '使用新窗口默认模型发起一次真实翻译。成功按字符计费，失败不扣费。':'Run a real translation using the default model for new windows. Successful translations consume characters; failed translations do not.',
+  '旧版个人翻译服务已移除，请重新打开设置后重试。':'Legacy personal translation services have been removed. Reopen settings and try again.'
+})
+
+Object.assign(uiEnglishExtra, {
+  '检查更新':'Check for updates', '检查中…':'Checking…',
+  '软件操作':'Application controls', '一键重启':'Restart HelloDog',
+  '重启前会保存草稿和设置。保存未完成时，软件会保持运行并说明原因。':'Drafts and settings are saved before restarting. If saving fails, HelloDog stays open and explains why.',
+  '正在保存并重启…':'Saving and restarting…',
+  '暂时无法确认最新版本，请重新检查。':'The latest version could not be verified. Please check again.',
+  '下载和校验已完成。':'Download and verification complete.',
+  '安装程序已打开，请按提示完成更新。':'The installer is open. Follow its instructions to update.',
+  '下载进度':'Download progress', '安装恢复':'Installation recovery'
 })

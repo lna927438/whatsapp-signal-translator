@@ -42,6 +42,13 @@ test('polling failures back off after completion up to two minutes and success r
   cadence.failed();cadence.reset();assert.equal(cadence.due(),true)
 })
 
+test('a successful request taking time does not skip the next thirty-second timer tick',()=>{
+ let now=0;const cadence=new ReadPolling(30000,120000,()=>now),startedAt=now
+ now=900;cadence.succeeded(startedAt);now=29999;assert.equal(cadence.due(),false);now=30000;assert.equal(cadence.due(),true)
+ now=65000;cadence.succeeded(30000);assert.equal(cadence.due(),true,'Completed slow calls do not overlap, but no additional full interval is imposed')
+ cadence.failed();now+=59999;assert.equal(cadence.due(),false);now++;assert.equal(cadence.due(),true,'Failures still back off from completion')
+})
+
 test('real overview reads at most every fifteen seconds, aggregates thirty seconds, and none while hidden',async()=>{
   const h=await mount('overview');try{
     const overview=h.count('overview'),costs=h.count('costs?')

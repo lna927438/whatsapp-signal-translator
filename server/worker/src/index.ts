@@ -1,5 +1,5 @@
 import type { SecurityWorkerBindings, ScheduledController, ExecutionContext } from '../worker-configuration'
-import { providerConfig, providerPlan, type ProviderEnv, type ProviderConfig } from './providerConfig'
+import { providerConfig, providerPlan, requestProviderPlan, providerCapabilities, translationModelInfo, type TranslationProvider, type ProviderEnv, type ProviderConfig } from './providerConfig'
 import { boundedJson, rateKey, providerTokenBounds } from './requestSecurity'
 import { ProviderFailure, classifyProviderFailure, providerMessages, checkProviderReadiness } from './providerDiagnostics'
 import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
@@ -9,7 +9,7 @@ import { translationInstructions, translationInput, type TranslationCorrection }
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
 import { providerReceipt, captureProviderReceipt, type ProviderReceipt } from './providerUsage'
-import { syncBillingSnapshots, type BillingSyncEnv } from './billingSync'
+import { syncBillingSnapshots, syncPreviousOfficialCosts, BillingSyncError, type BillingSyncEnv } from './billingSync'
 
 export interface Env extends ProviderEnv, BillingSyncEnv {
   API_RATE_LIMITER: SecurityWorkerBindings['API_RATE_LIMITER']
@@ -21,8 +21,10 @@ export interface Env extends ProviderEnv, BillingSyncEnv {
 }
 
 type User = { id: string; email?: string; user_metadata?: Record<string, unknown> }
+const serviceRelease = 'hellodog-channels-20260922'
 
 type TranslateBody = {
+  providerPreference?: TranslationProvider
   quality?: TranslationQuality
   text?: string
   sourceLanguage?: string
@@ -200,6 +202,7 @@ function failure(code: string): Response {
     translation_repair_unavailable: [409, '此条记录暂不能自动修复。原账目保留，可在记录中免费手动修正。'],
     translation_content_unavailable: [409, '原译文内容已清理，原结算记录保留，不会再次扣费。'],
     invalid_request: [400, '翻译请求格式无效。'],
+    provider_not_available: [503, '所选翻译通道暂未启用。请稍后重试，或为新消息选择其他通道。'],
     translation_failed: [502, '本次翻译失败，未扣减字符。'],
     translation_outcome_unknown: [409, '上次请求结果未能确认，未扣减字符；该请求不会自动再次调用翻译服务。'],
     settlement_pending: [503, '翻译结果正在确认，请使用同一请求编号重试。']
@@ -224,9 +227,10 @@ function claimResponse(claim: Claim): Response {
   return failure(claim.error || 'translation_failed')
 }
 
-function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId' | 'quality'>> & Pick<TranslateBody, 'requestId' | 'quality'> {
+function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId' | 'quality' | 'providerPreference'>> & Pick<TranslateBody, 'requestId' | 'quality' | 'providerPreference'> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_request')
   const b = raw as TranslateBody
+  if (b.providerPreference !== undefined && b.providerPreference !== 'openai' && b.providerPreference !== 'deepseek') throw new Error('invalid_request')
   if (typeof b.text !== 'string' || typeof b.targetLanguage !== 'string') throw new Error('invalid_request')
   for (const value of [b.sourceLanguage, b.requestId, b.accountId, b.conversationId]) {
     if (value !== undefined && typeof value !== 'string') throw new Error('invalid_request')
@@ -242,7 +246,8 @@ function normalizeBody(raw: unknown): Required<Omit<TranslateBody, 'requestId' |
   return {
     text, targetLanguage, sourceLanguage: safeId(b.sourceLanguage) || 'auto',
     accountId: safeId(b.accountId), conversationId: safeId(b.conversationId), context,
-    requestId: b.requestId, ...(b.quality ? { quality: normalizeQuality(b.quality) } : {})
+    requestId: b.requestId, ...(b.quality ? { quality: normalizeQuality(b.quality) } : {}),
+    ...(b.providerPreference ? { providerPreference: b.providerPreference } : {})
   }
 }
 
@@ -251,7 +256,8 @@ async function requestHash(body: TranslateBody, model: string): Promise<string> 
   // Never include the request ID or access token in the content fingerprint.
   const input = JSON.stringify([
     'translation-v1', model, body.text, body.sourceLanguage, body.targetLanguage,
-    body.accountId, body.conversationId, body.context, ...(body.quality ? [body.quality] : [])
+    body.accountId, body.conversationId, body.context, ...(body.quality ? [body.quality] : []),
+    ...(body.providerPreference ? [{ providerPreference: body.providerPreference }] : [])
   ])
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
   return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -269,7 +275,7 @@ async function repairTranslation(body: ReturnType<typeof normalizeBody>, env: En
   ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Response> {
   const originalId = body.requestId || ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(originalId)) return failure('invalid_request')
-  const plan = providerPlan(env), config = plan[0]
+  const plan = requestProviderPlan(env, body.providerPreference, user.id), config = plan[0]
   // Validate the immutable original before ANY successful early return. A
   // changed source can make a bad answer look faithful; semantic checks alone
   // cannot establish that this is the originally paid request. This RPC only
@@ -286,17 +292,19 @@ async function repairTranslation(body: ReturnType<typeof normalizeBody>, env: En
   // Only an authenticated, settled original with a server-detected mismatch
   // enters this path. The DB additionally checks its exact immutable hash.
   if (!isSemanticTranslationMismatch(body.text, saved.translation)) return claimResponse(original)
-  if (plan.length !== 1 || config?.provider !== 'deepseek' || config.model !== 'deepseek-v4-pro') return failure('translation_repair_unavailable')
+  if (plan.length !== 1 || !['deepseek-v4-pro', 'gpt-5.6-luna'].includes(config.model)) return failure('translation_repair_unavailable')
+  const allowCorrection = config.provider === 'deepseek' && config.model === 'deepseek-v4-pro'
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('semantic-repair-v1:' + originalId))
   const repairId = 'repair-' + Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
-  const claimToken = crypto.randomUUID(), bounds = translationBounds(body, true)
+  const claimToken = crypto.randomUUID(), bounds = translationBounds(body, allowCorrection)
   const args = {
     p_user_id: user.id, p_original_request_id: originalId, p_characters: unicodeLength(body.text),
     p_request_id: repairId, p_claim_token: claimToken,
     p_metadata: {
       metering_version: '2', requested_model: config.model, provider: config.provider,
       provider_plan: [{ provider: config.provider, model: config.model }],
-      provider_correction: { provider: config.provider, model: config.model, maxAttempts: 1 },
+      ...(allowCorrection ? { provider_correction: { provider: config.provider, model: config.model, maxAttempts: 1 } } : {}),
+      ...(body.providerPreference ? { provider_preference: body.providerPreference } : {}),
       security_input_token_bound: bounds.input, security_output_token_bound: bounds.output,
       account_id: body.accountId || null, conversation_id: body.conversationId || null,
       source_language: body.sourceLanguage, target_language: body.targetLanguage
@@ -315,7 +323,7 @@ async function repairTranslation(body: ReturnType<typeof normalizeBody>, env: En
   if (claim.state !== 'claimed') return claimResponse(claim)
   // Keep the original body.requestId for outgoing-language checks; only the
   // provider ledger/route job uses the separate, deterministic repair ID.
-  const work = settleRoutedTranslation(env, body, repairId, user.id, claimToken, plan, deadline, true)
+  const work = settleRoutedTranslation(env, body, repairId, user.id, claimToken, plan, deadline, allowCorrection)
   ctx?.waitUntil(work.then(() => undefined, () => undefined))
   return work
 }
@@ -327,14 +335,14 @@ async function translate(request: Request, env: Env, user: User, deadline: numbe
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestId)) return failure('invalid_request')
   body.requestId = requestId
   const claimToken = crypto.randomUUID()
-  const config = providerConfig(env)
-  const plan = providerPlan(env)
+  const plan = requestProviderPlan(env, body.providerPreference, user.id)
+  const config = plan[0]
   const model = config.model
   // The extra inference is enabled only for plans covered by the database's
   // explicit correction reservation. Legacy models retain their old contract.
   const correctionProvider = plan.at(-1)?.provider === 'deepseek' && plan.at(-1)?.model === 'deepseek-v4-pro'
     && (plan.length === 1 || plan[0].provider === 'openai' && plan[0].model === 'gpt-5.6-luna') ? plan.at(-1) : undefined
-  const routed = plan.length > 1 || Boolean(correctionProvider)
+  const routed = Boolean(body.providerPreference) || plan.length > 1 || Boolean(correctionProvider)
   // Reserve for the largest supported correction, including the JSON data
   // envelope/context. Actual provider usage still comes exclusively from receipts.
   const bounds = translationBounds(body, Boolean(correctionProvider))
@@ -347,6 +355,7 @@ async function translate(request: Request, env: Env, user: User, deadline: numbe
     p_claim_token: claimToken,
     p_metadata: {
       metering_version: routed ? '2' : '1', requested_model: model,
+      ...(body.providerPreference ? { provider_preference: body.providerPreference } : {}),
       ...(routed ? { provider_plan: plan.map(item => ({ provider: item.provider, model: item.model })) } : {}),
       ...(correctionProvider ? { provider_correction: { provider: correctionProvider.provider, model: correctionProvider.model, maxAttempts: 1 } } : {}),
       security_input_token_bound: bounds.input, security_output_token_bound: bounds.output,
@@ -390,7 +399,7 @@ async function translate(request: Request, env: Env, user: User, deadline: numbe
 
   const work = routed
     ? settleRoutedTranslation(env, body, requestId, user.id, claimToken, plan, deadline, Boolean(correctionProvider))
-    : settleTranslation(env, body, requestId, user.id, claimToken, model)
+    : settleTranslation(env, body, requestId, user.id, claimToken, config)
   // A tab refresh or a timed-out desktop request must not abandon a claimed
   // translation before its result/failure and wallet reservation are settled.
   ctx?.waitUntil(work.then(() => undefined, () => undefined))
@@ -508,17 +517,18 @@ async function settleRoutedTranslation(env: Env, body: ReturnType<typeof normali
   return failure('settlement_pending')
 }
 
-async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, model: string): Promise<Response> {
+async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, config: ProviderConfig): Promise<Response> {
   const started = Date.now()
+  const model = config.model
   let translated: Awaited<ReturnType<typeof providerTranslate>>
   const receipt=providerReceipt(model)
   try {
-    translated = await providerTranslate(env, body, body.text, receipt)
+    translated = await providerTranslate(env, body, body.text, receipt, config)
   } catch (error: any) {
     const failureCode = error instanceof ProviderFailure ? error.code
       : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'
     console.warn(JSON.stringify({ event: 'translation_provider_failure', code: failureCode,
-      provider: providerConfig(env).provider, model, latencyMs: Date.now() - started,
+      provider: config.provider, model, latencyMs: Date.now() - started,
       status: error instanceof ProviderFailure ? error.upstreamStatus : receipt.httpStatus }))
     // A provider timeout is ambiguous. Store a terminal outcome for this ID,
     // release its reservation, and never automatically call the provider again.
@@ -566,8 +576,11 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
   }
   if (url.pathname.startsWith('/api/admin/')) return handleAdmin(request, supabaseAdminServices(env))
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders })
-  if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'realtime-translator-api', release: 'hellodog-translation-0.5.16', model: providerConfig(env).model, routing: providerPlan(env).map(({ provider, model }) => ({ provider, model })), features: { translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, translationTargetBound: true, translationQuestionGuard: true, accountSnapshot: true, clientMeConsolidated: true, adminOverviewLightweight: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: providerPlan(env).length > 1 } })
-  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: 'hellodog-translation-0.5.15', provider: { configured: Boolean(providerConfig(env).key), liveProbe: false } })
+  if (request.method === 'GET' && url.pathname === '/health') {
+    const plan = providerPlan(env)
+    return json({ ok: true, service: 'realtime-translator-api', release: serviceRelease, model: plan[0] ? translationModelInfo(env, plan[0].provider).model : '', routing: plan.map(({ provider }) => ({ provider, model: translationModelInfo(env, provider).model })), ...providerCapabilities(env), features: { providerSelection: true, translationQuality: true, translationStatus: true, translationSemanticGuard: true, translationRepair: true, translationTargetBound: true, translationQuestionGuard: true, accountSnapshot: true, clientMeConsolidated: true, adminOverviewLightweight: true, adminUsers: true, providerUsage: true, clientNotices: true, adminMfa: true, costProtection: true, providerFailover: plan.length > 1 } })
+  }
+  if (request.method === 'GET' && url.pathname === '/health/translation') return json({ service: 'realtime-translator-api', release: serviceRelease, provider: { configured: Boolean(providerPlan(env)[0]?.key), liveProbe: false } })
 
   const user = await requireUser(request, env)
   if (request.method === 'GET' && url.pathname === '/api/me') {
@@ -577,11 +590,15 @@ async function route(request: Request, env: Env, ctx?: Pick<ExecutionContext, 'w
     const snapshot = await adminPost<{ profile: Awaited<ReturnType<typeof getProfile>>; wallet: Awaited<ReturnType<typeof getWallet>>; error?: 'rate_limited' }>(
       env, '/rest/v1/rpc/client_me', { p_user_id: user.id })
     if (snapshot.error) return failure(snapshot.error)
-    return json({ user: { id: user.id, email: user.email || null }, profile: snapshot.profile, wallet: snapshot.wallet })
+    return json({ user: { id: user.id, email: user.email || null }, profile: snapshot.profile, wallet: snapshot.wallet, ...providerCapabilities(env, user.id) })
   }
   const profile = await getProfile(env, user.id)
   if (!profile || profile.status !== 'active') return failure('account_disabled')
   if (!await adminPost<boolean>(env, '/rest/v1/rpc/security_rate_limit', { p_user_id: user.id, p_scope: 'api' })) return failure('rate_limited')
+
+  if (request.method === 'GET' && url.pathname === '/api/translation-channels') {
+    return json({ ok: true, features: { providerSelection: true }, ...providerCapabilities(env, user.id) })
+  }
 
   if (request.method === 'GET' && url.pathname === '/api/notices') return json(await adminPost(env, '/rest/v1/rpc/client_notices', { p_user_id:user.id }))
   if (request.method === 'POST' && url.pathname === '/api/notices/receipt') {
@@ -624,7 +641,7 @@ export default {
     } catch (error) {
       if (error instanceof Response) return error
       const code = error instanceof Error ? error.message : 'internal_error'
-      if (['account_disabled', 'insufficient_characters', 'request_id_conflict', 'request_not_found', 'translation_content_unavailable', 'invalid_request', 'rate_limited', 'cost_limit', 'security_paused'].includes(code)) return failure(code)
+      if (['account_disabled', 'insufficient_characters', 'request_id_conflict', 'request_not_found', 'translation_content_unavailable', 'invalid_request', 'provider_not_available', 'rate_limited', 'cost_limit', 'security_paused'].includes(code)) return failure(code)
       // Do not log provider responses, bearer tokens, source text or secret values.
       console.error('translation_gateway_error')
       return failure('internal_error')
@@ -643,7 +660,16 @@ export default {
     }
     // Ignore retired or unexpected triggers while cloud configuration propagates.
     if (event.cron !== '17 * * * *') return
-    const result = await adminPost(env, '/rest/v1/rpc/security_housekeeping', {})
-    console.info(JSON.stringify({ event: 'security_housekeeping', result }))
+    // Reuse the existing hourly trigger. Failure in maintenance or historical
+    // billing must not prevent the other independent task from completing.
+    const [maintenance, billing] = await Promise.allSettled([
+      adminPost(env, '/rest/v1/rpc/security_housekeeping', {}),
+      syncPreviousOfficialCosts(env)
+    ])
+    console.info(JSON.stringify({ event: 'security_housekeeping', ...(maintenance.status === 'fulfilled'
+      ? { result: maintenance.value } : { ok: false, errorCode: 'maintenance_unavailable' }) }))
+    console.info(JSON.stringify({ event: 'billing_backfill', provider: 'openai', period: 'previous_utc_month',
+      ok: billing.status === 'fulfilled', skipped: billing.status === 'fulfilled' && 'skipped' in billing.value,
+      errorCode: billing.status === 'rejected' ? billing.reason instanceof BillingSyncError ? billing.reason.code : 'billing_unavailable' : null }))
   }
 }

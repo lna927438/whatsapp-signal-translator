@@ -30,6 +30,28 @@ function fixture() {
 }
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 
+test('provider switching is window-local and preserves the page, draft and checked proxy state', async () => {
+  const { voice, calls, api, errors } = fixture(); await voice.enter()
+  voice.acceptState({id:'one',state:'ready',page:'messages',network:{mode:'proxy',status:'checked',ip:'192.0.2.1'}})
+  const before=calls.length
+  assert.equal(await voice.setTranslationProvider('one','openai'),true)
+  assert.equal(voice.selected.value?.translationProvider,'openai');assert.equal(voice.windows.value[1].translationProvider,undefined)
+  assert.equal(calls.length,before);assert.equal(voice.page.value,'messages');assert.equal(voice.network.value?.ip,'192.0.2.1')
+  api.updateGoogleVoiceWindow=async()=>{throw Error('not enabled')}
+  assert.equal(await voice.setTranslationProvider('one','deepseek'),false)
+  assert.equal(voice.selected.value?.translationProvider,'openai');assert.equal(calls.length,before);assert.equal(errors.length,1)
+  voice.dispose()
+})
+
+test('home inventory never opens a page and a late read cannot remove a newly created window', async () => {
+  const {voice,calls,api}=fixture()
+  await voice.listForHome();assert.equal(voice.windows.value.length,2);assert.equal(calls.length,0);assert.equal(voice.active.value,false)
+  const pending=deferred<GoogleVoiceWindow[]>();api.listGoogleVoiceWindows=()=>pending.promise
+  const reading=voice.listForHome();await voice.add();pending.resolve([{id:'one',label:'Old response'}]);await reading
+  assert.equal(voice.windows.value.length,3);assert.ok(voice.windows.value.some(window=>window.id==='three'));assert.equal(calls.length,0)
+  voice.dispose()
+})
+
 test('page notices separate official access guidance and login from text-page availability', async () => {
   const { voice } = fixture(); await voice.enter()
   assert.equal(voice.page.value, 'unknown'); assert.doesNotMatch(voice.translationNotice.value, /已内置|翻译已就绪/)

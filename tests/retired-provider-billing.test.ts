@@ -27,6 +27,15 @@ test('disabled OpenAI never reads status or calls provider APIs even if stale cr
  await assert.rejects(syncOfficialCostsWithStatus(env,{from:'2026-09-14',to:'2026-09-14'}),/billing_not_configured/)
 })
 
+test('an explicitly selectable OpenAI channel enters per-provider accounting without inventing billing credentials',async t=>{
+ t.mock.method(globalThis,'fetch',async()=>{assert.fail('Missing official credentials must not issue a request')})
+ const selectable={...env,TRANSLATION_SELECTABLE_PROVIDERS:'deepseek,openai',OPENAI_BILLING_ADMIN_KEY:undefined,OPENAI_BILLING_PROJECT_ID:undefined,OPENAI_BILLING_API_KEY_IDS:undefined}
+ assert.deepEqual(enabledBillingProviders(selectable),['openai','deepseek'])
+ const status=await billingSyncStatusWithHistory(selectable)
+ assert.equal(status.configured,false);assert.equal(status.reason,'admin_key_missing')
+ const scopes=await currentOfficialBillScopes(selectable);assert.equal(scopes.openai,null);assert.ok(scopes.deepseek)
+})
+
 test('DS-only scheduled billing still refreshes DS and never calls retired official Costs',async t=>{
  const calls:string[]=[]
  t.mock.method(globalThis,'fetch',async(input:string|URL,init?:RequestInit)=>{

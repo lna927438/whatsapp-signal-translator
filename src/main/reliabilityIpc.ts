@@ -237,7 +237,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
   })
   ipcMain.handle('reliability:copy-diagnostics', (event, preview: string) => { main(event); if (typeof preview !== 'string' || preview.length > 20000) throw new Error('诊断预览无效。'); clipboard.writeText(preview); return true })
   ipcMain.handle('updates:info', event => { main(event); return updates.info() })
-  ipcMain.handle('updates:notice', event => { main(event); return updates.notice() })
+  ipcMain.handle('updates:notice', (event, force: unknown = false) => { main(event); if(typeof force!=='boolean')throw new Error('版本刷新参数无效。'); return updates.notice(force) })
   ipcMain.handle('updates:snooze', (event,version:string) => { main(event); return updates.snooze(version) })
   ipcMain.handle('updates:check', async (event, channel: 'stable' | 'beta') => { main(event); if (!['stable','beta'].includes(channel)) throw new Error('更新渠道无效。'); await settings.save({ ...await settings.get(), updateChannel: channel }); return updates.check(channel) })
   ipcMain.handle('updates:download', event => { main(event); return updates.download() })

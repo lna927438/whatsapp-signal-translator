@@ -22,8 +22,8 @@ test('automatic update notices coalesce, remember snooze across restart, and ret
  assert.equal((await u.check('stable')).version,'0.5.4');assert.equal((await u.info()).phase,'verified')
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
-test('account notes survive storage round trips without changing account identity',async()=>{
- const h=mainHarness();try{const {AccountManager}=h.load('src/main/accounts/accountManager.ts');const m=new AccountManager();const a=await m.add('whatsapp','Main');await m.update(a.id,{note:'Family'});const saved=(await new AccountManager().list())[0];assert.equal(saved.label,'Main');assert.equal(saved.note,'Family');assert.equal(saved.id,a.id);await assert.rejects(m.update(a.id,{note:'x'.repeat(81)}));await m.update(a.id,{note:''});assert.equal((await m.list())[0].note,'')}finally{rmSync(h.directory,{recursive:true,force:true})}
+test('retired account note patches do not alter account identity or return notes',async()=>{
+ const h=mainHarness();try{const {AccountManager}=h.load('src/main/accounts/accountManager.ts');const m=new AccountManager();const a=await m.add('whatsapp','Main');await m.update(a.id,{note:'Family'});const saved=(await new AccountManager().list())[0];assert.equal(saved.label,'Main');assert.equal(saved.note,undefined);assert.equal(saved.id,a.id)}finally{rmSync(h.directory,{recursive:true,force:true})}
 })
 test('history keeps its frozen context and only an explicit new request changes translation options',async()=>{
  const h=mainHarness();try{const {MessageRequests}=h.load('src/main/translation/messageRequests.ts');const m=new MessageRequests();const r={cacheUserId:'owner',accountId:'a',messageId:'peer-message',text:'hello',targetLanguage:'zh-CN'};
