@@ -227,5 +227,10 @@ Object.assign(uiEnglishExtra, {
   '暂时无法确认最新版本，请重新检查。':'The latest version could not be verified. Please check again.',
   '下载和校验已完成。':'Download and verification complete.',
   '安装程序已打开，请按提示完成更新。':'The installer is open. Follow its instructions to update.',
-  '下载进度':'Download progress', '安装恢复':'Installation recovery'
+  '下载进度':'Download progress', '安装恢复':'Installation recovery',
+  '确定':'Confirm',
+  '版本信息已变化，请重新检查。':'Release information has changed. Please check again.',
+  '请先完成下载和校验。':'Complete the download and verification first.',
+  'HelloDog 官网':'HelloDog website', '官网':'Website',
+  '重启中…':'Restarting…', '重启':'Restart', '刷新重试':'Refresh and retry'
 })
