@@ -150,6 +150,35 @@ test('default current-month queries follow UTC midnight and month rollover; manu
   }finally{h.close()}
 })
 
+test('unsubmitted historical filters survive month rollover while displayed bills keep their submitted current-month basis',async()=>{
+ let now=Date.parse('2026-09-30T23:59:58Z'),fail=false
+ const h=await mount({now:()=>now,request:path=>{
+  if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(now):{configured:true}
+  if(fail)throw Error('synthetic query failure')
+  const query=new URLSearchParams(path.slice(6)),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})
+  data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('deepseek','0.1',data),officialBillFixture('openai','0.2',data)];return data
+ }})
+ try{
+  const inputs=h.w.document.querySelectorAll('input[type=date]'),selects=h.w.document.querySelectorAll('select'),form=h.w.document.querySelector('form')
+  inputs[0].value='2026-08-01';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[1].value='2026-08-31';inputs[1].dispatchEvent(new h.w.Event('input',{bubbles:true}))
+  selects[0].value='Asia/Shanghai';selects[0].dispatchEvent(new h.w.Event('change',{bubbles:true}));selects[1].value='deepseek';selects[1].dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
+  now+=33000;h.run(30000);await tick()
+  const current=h.calls.filter(path=>path.startsWith('costs?')).at(-1)!
+  assert.match(current,/from=2026-10-01&to=2026-10-01&provider=&timezone=UTC&officialCurrentMonth=true/)
+  assert.match(h.w.document.querySelector('.adm-query-period').textContent,/2026-10-01 至 2026-10-01 · UTC · 全部通道 · 本月/)
+  assert.equal(h.w.document.querySelector('[data-provider="total"] .adm-provider-amount').textContent,'$0.30')
+  assert.equal(inputs[0].value,'2026-08-01');assert.equal(inputs[1].value,'2026-08-31');assert.equal(selects[0].value,'Asia/Shanghai');assert.equal(selects[1].value,'deepseek')
+  fail=true;form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+  assert.match(h.w.document.querySelector('.adm-query-period').textContent,/本月/,'A failed custom query must retain the successful bill basis')
+  fail=false;now+=90000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).at(-1),current)
+  form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
+  const historical=h.calls.filter(path=>path.startsWith('costs?')).at(-1)!
+  assert.match(historical,/from=2026-08-01&to=2026-08-31&provider=deepseek&timezone=Asia%2FShanghai/);assert.doesNotMatch(historical,/officialCurrentMonth/)
+  assert.doesNotMatch(h.w.document.querySelector('.adm-query-period').textContent,/本月/)
+  now+=33000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).at(-1),historical)
+ }finally{h.close()}
+})
+
 test('current-month official cards and import actions use each supplier month; failed midnight reads never relabel the old bill',async()=>{
  let now=Date.parse('2026-09-30T15:59:58Z'),fail=false
  const h=await mount({now:()=>now,request:path=>{

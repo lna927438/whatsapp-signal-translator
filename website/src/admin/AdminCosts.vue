@@ -12,6 +12,7 @@ const props=defineProps<{officialAccess:boolean}>()
 const emit=defineEmits<{reconcile:[data:Row];funding:[data:Row]}>()
 const to=ref(new Date().toISOString().slice(0,10)),from=ref(to.value.slice(0,8)+'01'),provider=ref(''),timezone=ref('UTC')
 const followCurrentPeriod=ref(true)
+const queriedFollowCurrentPeriod=ref(true)
 const data=ref<Row>({}),busy=ref(false),error=ref(''),syncBusy=ref(false),syncInfo=ref<Row>({}),syncMessage=ref('')
 const syncFailure=ref<{from:string;to:string;after:number}|null>(null)
 const queried=ref({from:from.value,to:to.value,provider:provider.value,timezone:timezone.value,officialCurrentMonth:''})
@@ -67,10 +68,15 @@ let timer:ReturnType<typeof setInterval>|undefined,balanceTimer:ReturnType<typeo
 const readPolling=new ReadPolling(30000),balancePolling=new ReadPolling(30000)
 async function load(applyFilters=false,automatic=false){if(disposed)return;if(busy.value){if(!automatic)refreshAfterLoad=true;return}if(automatic&&(!readPolling.due()||document.visibilityState!=='visible'))return;const version=++revision,accessVersion=accessRevision,startedAt=Date.now();busy.value=true;try{
   const selected=applyFilters?{from:from.value,to:to.value,provider:provider.value,timezone:timezone.value,officialCurrentMonth:''}:{...queried.value}
-  if(followCurrentPeriod.value){Object.assign(selected,currentBillPeriod('UTC'));from.value=selected.from;to.value=selected.to}
-  selected.officialCurrentMonth=followCurrentPeriod.value&&selected.timezone==='UTC'&&!selected.provider?'true':''
+  // Unsubmitted form edits must not change the displayed bill's period or basis.
+  const followSelectedPeriod=applyFilters?followCurrentPeriod.value:queriedFollowCurrentPeriod.value
+  if(followSelectedPeriod){
+    Object.assign(selected,currentBillPeriod('UTC'))
+    if(applyFilters||(followCurrentPeriod.value&&from.value===queried.value.from&&to.value===queried.value.to)){from.value=selected.from;to.value=selected.to}
+  }
+  selected.officialCurrentMonth=followSelectedPeriod&&selected.timezone==='UTC'&&!selected.provider?'true':''
   const params=new URLSearchParams(selected);if(!selected.officialCurrentMonth)params.delete('officialCurrentMonth')
-  const result=await request<Row>('costs?'+params);if(version===revision){data.value=props.officialAccess&&accessVersion===accessRevision?result:{...result,officialBills:[]};costsReadAt.value=Date.now();queried.value=selected;error.value='';readPolling.succeeded(startedAt)}
+  const result=await request<Row>('costs?'+params);if(version===revision){data.value=props.officialAccess&&accessVersion===accessRevision?result:{...result,officialBills:[]};costsReadAt.value=Date.now();queried.value=selected;queriedFollowCurrentPeriod.value=followSelectedPeriod;error.value='';readPolling.succeeded(startedAt)}
 }catch(e){if(version===revision){readPolling.failed();if(e&&typeof e==='object'&&'code' in e&&['unauthorized','admin_forbidden'].includes(String(e.code))){data.value={};++balanceRevision;balance.value=null;balanceError.value='';balanceBusy.value=false;++statusRevision;syncInfo.value={}}error.value=e instanceof Error?e.message:'暂时无法读取。'}}finally{if(version===revision){busy.value=false;if(refreshAfterLoad&&!disposed){refreshAfterLoad=false;void load()}}}}
 async function readSyncStatus(force=false){if(localPreview||!props.officialAccess||disposed||(!force&&Date.now()-statusAt<60000))return;statusAt=Date.now();const version=++statusRevision,accessVersion=accessRevision;try{const value=await request<Row>('billing-status');if(!disposed&&props.officialAccess&&version===statusRevision&&accessVersion===accessRevision)syncInfo.value=value}catch{if(!disposed&&props.officialAccess&&version===statusRevision&&accessVersion===accessRevision)syncInfo.value={...syncInfo.value,statusReadError:'暂时无法读取官方账单连接状态，保留上次结果。'}}}
 async function sync(){if(syncBusy.value||!props.officialAccess||disposed||!openaiEnabled.value)return;const accessVersion=accessRevision,period={from:queried.value.from,to:queried.value.to};syncBusy.value=true;syncMessage.value='';syncFailure.value=null;try{
@@ -96,7 +102,7 @@ defineExpose({refreshFunding:readBalance,refreshCosts:load})
     <label>翻译通道<select v-model="provider" :disabled="busy||syncBusy"><option value="">全部</option><option value="openai">{{openaiEnabled?'OpenAI':'OpenAI（历史）'}}</option><option value="deepseek">DeepSeek</option></select></label>
     <button class="adm-primary" :disabled="busy">{{busy?'读取中…':'查询'}}</button></form>
   <p v-if="error" class="adm-error" role="alert">{{error}} 下方保留上次结果。</p>
-  <p class="adm-help adm-query-period">{{queried.from}} 至 {{queried.to}} · {{queried.timezone==='UTC'?'UTC':'GMT+8'}} · {{queried.provider?providerName(queried.provider):'全部通道'}}<span v-if="followCurrentPeriod"> · 本月</span></p>
+  <p class="adm-help adm-query-period">{{queried.from}} 至 {{queried.to}} · {{queried.timezone==='UTC'?'UTC':'GMT+8'}} · {{queried.provider?providerName(queried.provider):'全部通道'}}<span v-if="queriedFollowCurrentPeriod"> · 本月</span></p>
   <p class="adm-cost-freshness" role="status">{{receiptState}}<span v-if="data.snapshotAt"> · 数据更新于 {{utcTimestamp(data.snapshotAt)}}</span></p>
   <section class="adm-provider-costs" aria-label="通道用量与费用">
     <div class="adm-provider-cost-grid">

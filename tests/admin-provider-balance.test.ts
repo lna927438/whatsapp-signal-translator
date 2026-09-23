@@ -75,8 +75,16 @@ test('cost-reader roles make no owner-only balance or official-bill requests',as
 })
 test('background cost refresh preserves the submitted filter until Query is pressed',async()=>{
   const h=await mount();try{
+    const period=h.w.document.querySelector('.adm-query-period').textContent
+    const previous=h.calls.filter(p=>p.startsWith('costs?')).at(-1)!
+    assert.match(previous,/officialCurrentMonth=true/)
     const input=h.w.document.querySelector('input[type=date]');input.value='2026-01-01';input.dispatchEvent(new h.w.Event('input',{bubbles:true}));await tick()
-    const previous=h.calls.filter(p=>p.startsWith('costs?')).at(-1);h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),previous)
+    assert.equal(h.w.document.querySelector('.adm-query-period').textContent,period,'Draft edits cannot relabel the displayed period')
+    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),previous)
+    assert.equal(input.value,'2026-01-01','Background reads preserve the unsubmitted draft')
     h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.calls.filter(p=>p.startsWith('costs?')).at(-1)!,/from=2026-01-01/)
+    const submitted=h.calls.filter(p=>p.startsWith('costs?')).at(-1)!
+    assert.doesNotMatch(submitted,/officialCurrentMonth/);assert.doesNotMatch(h.w.document.querySelector('.adm-query-period').textContent,/本月/)
+    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),submitted)
   }finally{h.close()}
 })
