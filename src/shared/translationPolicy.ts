@@ -51,14 +51,18 @@ export function protectLiterals(text: string, quality?: TranslationQuality) {
         // Some providers Markdown-escape underscores or copy the original
         // literal from context. Accept these lossless forms, never a changed
         // number/link, an unknown token, or a duplicated/missing placeholder.
-        const escapedToken = token.replace(/_/g, '\\_')
-        result = result.split(escapedToken).join(token)
+        // Markdown permits escaping each underscore independently. Models may
+        // escape only the outer double underscores, or only the inner one.
+        // Canonicalize those exact spellings; never loosen the token name/index
+        // or repair a changed number, link, or missing token.
+        const escapedToken = new RegExp('(?<!\\\\)' + token.split('_').map(escape).join('\\\\?_'), 'g')
+        result = result.replace(escapedToken, () => token)
         const count = result.split(token).length - 1
         if (count > 1) throw new Error('protected_literal_mismatch')
         if (count === 1) result = result.replace(token, () => value)
         else restoredLiteral = true
       }
-      if (result.includes(`__${prefix}_`)) throw new Error('protected_literal_mismatch')
+      if (new RegExp('(?:\\\\?_){2}' + escape(prefix) + '\\\\?_').test(result)) throw new Error('protected_literal_mismatch')
       if (restoredLiteral) {
         // Count longest literals first so "1" cannot stand in for "100" or
         // consume part of a URL. This fallback requires the exact multiplicity.

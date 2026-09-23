@@ -1,7 +1,7 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {officialCostCards,unattributedCostRecords,costRecordCount,deepseekOfficialAmount,officialAmount,providerReceipt,receiptCost} from '../website/src/admin/costCards.ts'
-import {officialBillDelayed,officialBillNotice} from '../website/src/admin/officialBills.ts'
+import {officialBillDelayed,officialBillNotice,officialBillStatus} from '../website/src/admin/officialBills.ts'
 import {costsFixture,officialBillFixture,nativeMonthFixture} from './admin-costs-fixture.ts'
 const period={from:'2026-09-01',to:'2026-09-15',timezone:'UTC',provider:''}
 function fixture(){const value=costsFixture(period);value.officialBills=[officialBillFixture('deepseek','1.65',value),officialBillFixture('openai','0.05',value)];return value}
@@ -58,6 +58,11 @@ test('rereading a manual current-period bill does not renew its freshness or imp
  assert.match(officialBillNotice(official.items[0],period,now),/手动账单不会自动更新.*重新导入/)
  assert.equal(officialBillDelayed(official,{...period,to:'2026-09-14'},now),false)
  assert.equal(official.items[0].amount,'1.658919574')
+ assert.equal(officialBillStatus(official.items[0],period,now),'上次导出金额 · 待更新')
+ assert.equal(officialBillStatus({...official.items[0],fetchedAt:new Date(now-60000).toISOString()},period,now),'官方导出快照')
+ assert.equal(officialBillStatus(undefined,period,now),'尚未同步')
+ assert.equal(officialBillStatus({...official.items[0],provider:'openai',source:'openai_costs_api',timezone:'UTC'},period,now),'同步延迟 · 保留上次金额')
+ assert.equal(officialBillStatus({...official.items[0],provider:'openai',source:'openai_costs_api',timezone:'UTC',fetchedAt:new Date(now).toISOString()},period,now),'官方自动同步')
 })
 
 test('native month overview matches each official timezone while receipt UTC and arbitrary date filters remain separate',()=>{

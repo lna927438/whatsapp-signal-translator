@@ -34,7 +34,7 @@ async function mount(options:Options={}){
  return {w,calls,errors,timers,body:()=>w.document.body.textContent as string,official:()=>w.document.querySelector('.adm-overview-funding'),characters:()=>w.document.querySelector('.adm-overview-characters'),run:(ms:number)=>{for(const item of [...timers.values()])if(item.ms===ms)item.fn()},refresh:async()=>{await w.__refreshOverview();await tick()},navigate:async(path:string)=>{await w.__navigate(path);await tick()},close:()=>{w.__dispose?.();dom.window.close()}}
 }
 
-test('overview live headlines use exact receipt costs, retain separate official bills, and disclose incomplete history',async()=>{
+test('overview headlines use official costs exclusively and collapse incomplete receipt history',async()=>{
  let original:any
  const h=await mount({mode:'component',request:path=>{
   if(path==='provider-balance')return fundingBalanceFixture(initialTime)
@@ -46,15 +46,15 @@ test('overview live headlines use exact receipt costs, retain separate official 
  try{
   const grid=h.w.document.querySelector('.adm-overview-cost-grid')
   assert.equal(grid.querySelectorAll('article').length,3)
-  assert.equal(grid.querySelector('[data-provider="deepseek"] strong').textContent,'$1.19')
-  assert.equal(grid.querySelector('[data-provider="openai"] strong').textContent,'$0.41')
-  assert.equal(grid.querySelector('.adm-overview-cost strong').textContent,'$1.60')
-  assert.match(grid.querySelector('[data-provider="deepseek"] .adm-official-comparison').textContent,/\$0\.19/)
-  assert.match(grid.querySelector('[data-provider="openai"] .adm-official-comparison').textContent,/\$0\.05/)
-  assert.match(grid.querySelector('.adm-overview-cost .adm-official-comparison').textContent,/\$0\.24/)
-  assert.match(grid.querySelector('.adm-overview-cost .adm-receipt-amount').textContent,/已知费用 · 记录待补齐/)
-  assert.match(grid.querySelector('.adm-overview-cost').textContent,/536 条费用记录不完整/)
-  assert.match(grid.querySelector('.adm-overview-cost').textContent,/13 条历史记录尚未归属通道/)
+  assert.equal(grid.querySelector('[data-provider="deepseek"] strong').textContent,'$0.19')
+  assert.equal(grid.querySelector('[data-provider="openai"] strong').textContent,'$0.05')
+  assert.equal(grid.querySelector('.adm-overview-cost strong').textContent,'$0.24')
+  assert.match(grid.querySelector('[data-provider="deepseek"] .adm-official-amount').textContent,/\$0\.19/)
+  assert.match(grid.querySelector('[data-provider="openai"] .adm-official-amount').textContent,/\$0\.05/)
+  assert.match(grid.querySelector('.adm-overview-cost .adm-official-amount').textContent,/\$0\.24/)
+  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/已知费用 · 记录待补齐/)
+  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/536 条费用记录不完整/)
+  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/13 条历史记录尚未归属通道/)
   assert.doesNotMatch(grid.textContent,/次调用待核算/)
   assert.equal(original.totals.known_cost_usd_exact,'1.602070596')
   assert.equal(h.w.document.querySelector('.adm-overview-billing-details').open,false)
@@ -71,7 +71,7 @@ test('missing provider breakdown is unknown, while a verified empty breakdown me
   try{for(const name of ['deepseek','openai']){
    const card=h.w.document.querySelector(`[data-provider="${name}"]`)
    assert.equal(card.querySelector('.adm-official-amount').textContent,name==='deepseek'?'$0.19':'$0.05')
-   assert.match(card.querySelector('strong').textContent,missing?/尚未取得/:/\$0\.00/)
+   assert.equal(card.querySelector('strong').textContent,name==='deepseek'?'$0.19':'$0.05');assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,missing?/尚未取得/:/\$0\.00/)
   }}
   finally{h.close()}
  }
@@ -91,7 +91,7 @@ test('overview missing official bills stay unknown while live receipt costs rema
   assert.equal(card('deepseek').querySelector('.adm-official-amount').textContent,'待同步官方账单')
   assert.equal(card('openai').querySelector('.adm-official-amount').textContent,'待同步官方账单')
   assert.equal(card('total').querySelector('.adm-official-amount').textContent,'账单未齐全')
-  assert.equal(card('total').querySelector('strong').textContent,'$0.17')
+  assert.equal(card('total').querySelector('strong').textContent,'账单未齐全')
   phase=1;await h.refresh();assert.equal(card('deepseek').querySelector('.adm-official-amount').textContent,'$1.65');assert.match(card('total').textContent,/待同步 OpenAI/)
   assert.equal(card('total').querySelector('.adm-official-amount').textContent,'账单未齐全');assert.doesNotMatch(card('total').textContent,/\$1\.66/)
   phase=2;await h.refresh();assert.equal(card('total').querySelector('.adm-official-amount').textContent,'$1.71');assert.equal(card('deepseek').querySelector('.adm-official-amount').title,'1.658919574')
@@ -99,7 +99,7 @@ test('overview missing official bills stay unknown while live receipt costs rema
  }finally{h.close()}
 })
 
-test('new receipt costs update the visible live fee without pretending an older manual bill or account balance is current',async()=>{
+test('new receipt costs cannot overwrite an older official headline or renew its freshness',async()=>{
  let now=initialTime,amount='1.65'
  const importedAt=new Date(now-7200000).toISOString()
  const h=await mount({now:()=>now,request:path=>{
@@ -113,7 +113,7 @@ test('new receipt costs update the visible live fee without pretending an older 
   const card=()=>h.w.document.querySelector('[data-provider="deepseek"]')
   assert.equal(card().querySelector('strong').textContent,'$1.65')
   amount='1.830000000001';now+=30000;h.run(15000);await tick()
-  assert.equal(card().querySelector('strong').textContent,'$1.83')
+  assert.equal(card().querySelector('strong').textContent,'$1.65');assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/\$1\.83/)
   assert.equal(card().querySelector('.adm-official-amount').textContent,'$1.65')
   assert.match(card().textContent,/手动账单不会自动更新.*重新导入/)
   assert.match(h.body(),/官方账单同步有延迟/)
@@ -129,7 +129,7 @@ test('overview requests native current-month official bills and visibly separate
   assert.match(query,/from=2026-09-01&to=2026-09-30&timezone=UTC&provider=&officialCurrentMonth=true/)
   assert.match(h.w.document.querySelector('[data-provider="deepseek"] .adm-bill-period').textContent,/2026-10-01 至 2026-10-01/)
   assert.match(h.w.document.querySelector('[data-provider="openai"] .adm-bill-period').textContent,/2026-09-01 至 2026-09-30/)
-  assert.match(h.w.document.querySelector('.adm-overview-billing-heading').textContent,/2026-09-01 至 2026-09-30 · UTC/)
+  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/2026-09-01 至 2026-09-30 · UTC/)
   assert.equal(h.w.document.querySelector('[data-provider="deepseek"] .adm-official-amount').textContent,'$0.19')
  }finally{h.close()}
 })
@@ -160,8 +160,8 @@ test('parent fifteen-second overview refresh checks usage and funds every thirty
 test('missing monthly bills or changed calendar periods never erase current account funds',async()=>{
  let now=Date.parse('2026-09-30T23:59:58Z')
  const h=await mount({mode:'component',now:()=>now,request:path=>path==='provider-balance'?fundingBalanceFixture(now):{...snapshot(path,now),enabledProviders:['deepseek'],officialBills:[]}});try{
-  assert.match(h.official().textContent,/\$0\.30/);assert.doesNotMatch(h.official().textContent,/OpenAI|尚缺/);assert.match(h.w.document.querySelector('.adm-overview-billing-heading').textContent,/2026-09-01 至 2026-09-30/)
-  now+=6000;await h.refresh();assert.match(h.w.document.querySelector('.adm-overview-billing-heading').textContent,/2026-10-01 至 2026-10-01/);assert.match(h.official().textContent,/\$0\.30/)
+  assert.match(h.official().textContent,/\$0\.30/);assert.doesNotMatch(h.official().textContent,/OpenAI|尚缺/);assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/2026-09-01 至 2026-09-30/)
+  now+=6000;await h.refresh();assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/2026-10-01 至 2026-10-01/);assert.match(h.official().textContent,/\$0\.30/)
  }finally{h.close()}
 })
 test('failure retains prior funds and usage with stale labels; first-read unknown values are never zero',async()=>{
@@ -219,8 +219,8 @@ test('UTC rollover rejects old monthly usage response without relabeling it; cum
  let now=Date.parse('2026-09-30T23:59:58Z'),old:ReturnType<typeof snapshot>|undefined,returnOld=false
  const h=await mount({mode:'component',now:()=>now,request:path=>path==='provider-balance'?fundingBalanceFixture(now):returnOld?old:old=snapshot(path,now)})
  try{
-  now+=6000;returnOld=true;await h.refresh();assert.match(h.characters().textContent,/账期数据尚未核实/);assert.match(h.w.document.querySelector('.adm-overview-billing-heading').textContent,/2026-09-01 至 2026-09-30/);assert.match(h.official().textContent,/\$0\.30/)
-  returnOld=false;await h.refresh();assert.match(h.w.document.querySelector('.adm-overview-billing-heading').textContent,/2026-10-01 至 2026-10-01/)
+  now+=6000;returnOld=true;await h.refresh();assert.match(h.characters().textContent,/账期数据尚未核实/);assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/2026-09-01 至 2026-09-30/);assert.match(h.official().textContent,/\$0\.30/)
+  returnOld=false;await h.refresh();assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/2026-10-01 至 2026-10-01/)
  }finally{h.close()}
 })
 

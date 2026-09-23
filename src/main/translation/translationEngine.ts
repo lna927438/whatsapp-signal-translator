@@ -9,12 +9,14 @@ import { TranslationReceipts, type TranslationReceipt } from './receipts'
 import { normalizeQuality, qualityKey } from '../../shared/translationPolicy'
 import {assertCloudChannelTransport} from '../../shared/translationChannels'
 import { isSemanticTranslationMismatch } from '../../shared/translationSemantics'
+import { normalizeTranslationLayout } from '../../shared/translationLayout'
 import type { TranslationProvider } from './providers/provider'
 import { detectLanguageEvidence } from './languageDetection'
 import { TranslationContentPolicy, type ContentExpiry } from './contentPolicy'
 import { SessionUnavailableError } from '../network/sessionRefresh'
 
 interface QueueJob {
+  key?: string
   interactive: boolean
   run: () => Promise<string>
   resolve: (value: string) => void
@@ -96,9 +98,10 @@ export class TranslationEngine {
   async existingOutgoing(requestId: string, accountId: string, conversationId: string, original: string, translated: string): Promise<TranslationRequest> {
     const owner = this.onlineUserId, revision = this.sessionRevision
     const receipt = await this.receipts.get(owner, requestId)
-    if (revision !== this.sessionRevision || !requestId.startsWith('send-') || !receipt || receipt.contentExpired
+    const storedText = receipt?.correction ?? receipt?.translated
+    if (revision !== this.sessionRevision || !requestId.startsWith('send-') || !receipt || receipt.contentExpired || storedText === undefined
       || !['charged','cached','free'].includes(receipt.state) || receipt.request.accountId !== accountId || receipt.request.conversationId !== conversationId
-      || receipt.request.text !== original || (receipt.correction ?? receipt.translated) !== translated) throw new Error('原发送记录尚未核实，消息未发送。请在原消息上重试。')
+      || receipt.request.text !== original || ![storedText, this.deliverableTranslation(receipt.request, storedText, receipt.correction !== undefined && receipt.correctionSource !== 'cloud-repair')].includes(translated)) throw new Error('原发送记录尚未核实，消息未发送。请在原消息上重试。')
     if (this.quarantined(receipt)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
     return receipt.request
   }
@@ -121,6 +124,12 @@ export class TranslationEngine {
   private quarantined(receipt: TranslationReceipt) {
     return receipt.correction === undefined && receipt.translated !== undefined
       && isSemanticTranslationMismatch(receipt.request.text, receipt.translated)
+  }
+  /** Keep the original settlement text intact. Older provider responses and
+   * caches may contain invented paragraphs; normalize only the outgoing copy.
+   * Explicit user corrections and source-authored line breaks remain intact. */
+  private deliverableTranslation(request: TranslationRequest, text: string, manual = false): string {
+    return request.requestId?.startsWith('send-') && !manual ? normalizeTranslationLayout(request.text, text, request.quality?.glossary?.map(item => item.target)) : text
   }
   private async repairCompletedTranslation(receipt: TranslationReceipt): Promise<TranslationReceipt | undefined> {
     if (receipt.provider !== 'openai' || receipt.state !== 'charged' || receipt.chargedCharacters !== receipt.sourceCharacters
@@ -167,7 +176,7 @@ export class TranslationEngine {
     this.metricsState.cacheHits += 1
     await this.content.assertAvailable(receipt.request)
     if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
-    return restored
+    return this.deliverableTranslation(receipt.request, restored, receipt.correction !== undefined && receipt.correctionSource !== 'cloud-repair')
   }
   private notifyBilling(): void { try { this.billingChanged?.() } catch { /* UI must not affect settlement */ } }
 
@@ -364,7 +373,7 @@ export class TranslationEngine {
       if (prepared.requestId && await this.receipts.get(user, prepared.requestId)) await this.receipts.update(user, prepared.requestId, { lastAccess: 'cache' })
     }
     await this.content.assertAvailable(incoming)
-    return value
+    return value === undefined ? undefined : this.deliverableTranslation(scoped, value)
   }
 
   metrics(): TranslationMetrics {
@@ -424,7 +433,10 @@ export class TranslationEngine {
     if(normalized.providerPreference!==undefined)assertCloudChannelTransport(settings.provider)
     await this.content.assertAvailable(normalized)
     const concurrent = this.inFlight.get(this.requestKey(settings.provider, normalized))
-    if (concurrent) { this.metricsState.dedupHits += 1; return concurrent }
+    if (concurrent) {
+      if (historyRecovery?.manual) this.prioritizeQueued(this.requestKey(settings.provider, normalized))
+      this.metricsState.dedupHits += 1; return concurrent
+    }
     if (stored.state === 'pending') {
       const missing = await this.reconcilePending(stored.requestId)
       const reconciled = await this.receipts.get(owner, stored.requestId)
@@ -471,7 +483,7 @@ export class TranslationEngine {
       await this.receipts.update(owner, normalized.requestId!, { state: 'free', translated: deterministic, chargedCharacters: 0 })
       this.metricsState.lastLatencyMs = 0
       await this.content.assertAvailable(normalized)
-      return deterministic
+      return this.deliverableTranslation(normalized, deterministic)
     }
 
     if (useCache) {
@@ -484,7 +496,7 @@ export class TranslationEngine {
         await this.receipts.update(owner, normalized.requestId!, { state: 'cached', translated: cached, chargedCharacters: 0, lastAccess: 'cache' })
         await this.content.assertAvailable(normalized)
         if (isSemanticTranslationMismatch(normalized.text, cached)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
-        return cached
+        return this.deliverableTranslation(normalized, cached)
       }
     }
 
@@ -492,6 +504,7 @@ export class TranslationEngine {
     const key = this.requestKey(settings.provider, normalized)
     const existing = this.inFlight.get(key)
     if (existing) {
+      if (historyRecovery?.manual) this.prioritizeQueued(key)
       this.metricsState.dedupHits += 1
       return existing
     }
@@ -510,7 +523,7 @@ export class TranslationEngine {
           if (revision !== this.sessionRevision) throw new Error('登录状态已变化。')
           if (cached !== undefined) {
             if (isSemanticTranslationMismatch(normalized.text, cached)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
-            this.metricsState.cacheHits += 1; return cached
+            this.metricsState.cacheHits += 1; return this.deliverableTranslation(normalized, cached)
           }
         }
         this.metricsState.providerCalls += 1
@@ -537,7 +550,7 @@ export class TranslationEngine {
         // Both channels settle exclusively on the authenticated cloud ledger.
         await this.sweepContent()
         await this.content.assertAvailable(normalized)
-        return translated
+        return this.deliverableTranslation(normalized, translated)
       } catch (error: any) {
         const latency = Date.now() - started
         this.recordLatency(latency)
@@ -547,7 +560,7 @@ export class TranslationEngine {
       } finally {
         this.metricsState.lastUpdatedAt = Date.now()
       }
-    }, normalized.requestId?.startsWith('send-') === true)
+    }, normalized.requestId?.startsWith('send-') === true || historyRecovery?.manual === true || !useCache, key)
 
     this.inFlight.set(key, promise)
     try {
@@ -564,9 +577,18 @@ export class TranslationEngine {
     this.metricsState.averageLatencyMs = Math.round(this.latencyTotal / this.latencySamples)
   }
 
-  private enqueue(run: () => Promise<string>, interactive = false): Promise<string> {
+  private prioritizeQueued(key: string): void {
+    const job = this.queue.find(item => item.key === key)
+    if (!job || job.interactive) return
+    // Reuse the already persisted request and its promise. A manual retry must
+    // not wait behind invisible history or create a second paid translation.
+    job.interactive = true
+    void this.pump()
+  }
+
+  private enqueue(run: () => Promise<string>, interactive = false, key?: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      this.queue.push({ run, resolve, reject, interactive })
+      this.queue.push({ run, resolve, reject, interactive, key })
       this.metricsState.queueDepth = this.queue.length
       void this.pump()
     })

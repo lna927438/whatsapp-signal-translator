@@ -46,6 +46,7 @@ before(async () => {
       const body = JSON.parse(String(init?.body))
       assert.ok(!JSON.stringify(body).includes('-secret'), 'provider credentials must never enter message content')
       assert.equal(body.store, false)
+      assert.equal(init?.redirect, 'manual', 'provider requests cannot redirect credentials or chat text')
       const call = { provider, body, signal: init?.signal }
       calls.push(call)
       return handler(call)
@@ -425,6 +426,62 @@ test('an exhausted request deadline before inference releases the claim without 
     assert.deepEqual(await wallet(db),{balance:100,reserved_characters:0,lifetime_debited:0})
     assert.deepEqual(await ledger(),{debits:0,usage:0})
   } finally { Date.now=originalNow; beforeClaim=undefined }
+})
+
+for (const provider of ['openai','deepseek'] as const) test('selected '+provider+' uses the remaining shared budget rather than a retired fallback slice', async () => {
+  const originalNow = Date.now, originalTimeout = AbortSignal.timeout
+  const durations = new WeakMap<AbortSignal, number>()
+  let elapsed = 0
+  Date.now = () => originalNow() + elapsed
+  AbortSignal.timeout = milliseconds => {
+    const signal = originalTimeout(milliseconds)
+    durations.set(signal, milliseconds)
+    return signal
+  }
+  beforeClaim = () => { elapsed = 1000 }
+  try {
+    handler = async call => {
+      const budget = call.signal ? durations.get(call.signal) || 0 : 0
+      assert.ok(budget > 12000 && budget <= 19000, 'single channel has the remaining budget, not only 8 or 12 seconds')
+      elapsed += 13000 // A valid response later than either old fallback slice.
+      return success(call)
+    }
+    const response = await request('single-budget-' + provider, { providerPreference: provider })
+    assert.equal(response.status, 200); const result = await response.json()
+    assert.deepEqual(calls.map(call => call.provider), [provider])
+    assert.deepEqual(await (await request('single-budget-' + provider, { providerPreference: provider })).json(), result)
+    assert.equal(calls.length, 1); assert.deepEqual(await ledger(), { debits: 1, usage: 1 })
+  } finally { Date.now = originalNow; AbortSignal.timeout = originalTimeout; beforeClaim = undefined }
+})
+
+for (const expired of [false, true]) test('legacy single-provider '+(expired ? 'exhausted' : 'reduced')+' request budget includes authentication and claiming', async () => {
+  env.TRANSLATION_PROVIDER = 'openai'; delete env.TRANSLATION_FALLBACK_PROVIDER
+  const originalNow = Date.now, originalTimeout = AbortSignal.timeout
+  const durations = new WeakMap<AbortSignal, number>()
+  let elapsed = 0
+  Date.now = () => originalNow() + elapsed
+  AbortSignal.timeout = milliseconds => {
+    const signal = originalTimeout(milliseconds)
+    durations.set(signal, milliseconds)
+    return signal
+  }
+  beforeClaim = () => { elapsed = expired ? 21000 : 15000 }
+  try {
+    handler = async call => {
+      assert.ok(!expired, 'an expired request must never begin another inference')
+      const budget = call.signal ? durations.get(call.signal) || 0 : 0
+      assert.ok(budget > 0 && budget <= 5000)
+      return success(call)
+    }
+    const response = await request('legacy-budget')
+    assert.equal(response.status, expired ? 502 : 200)
+    const result = await response.json()
+    if (expired) assert.equal(result.error, 'provider_timeout')
+    assert.deepEqual(await (await request('legacy-budget')).json(), result)
+    assert.equal(calls.length, expired ? 0 : 1)
+    assert.equal((await wallet(db)).reserved_characters, 0)
+    assert.deepEqual(await ledger(), expired ? { debits: 0, usage: 0 } : { debits: 1, usage: 1 })
+  } finally { Date.now = originalNow; AbortSignal.timeout = originalTimeout; beforeClaim = undefined }
 })
 
 test('untranslated output from the primary cannot become a successful charged result',async () => {

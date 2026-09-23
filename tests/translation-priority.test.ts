@@ -23,3 +23,36 @@ test('a burst using translation quality shares one capability query and keeps ea
   assert.equal(health,1);assert.equal(new Set(ids).size,3)
  }finally{globalThis.fetch=original;clearCloudCapabilityCache()}
 })
+
+test('manual retry promotes an already queued history request without changing its ID or charging twice', async () => {
+ const h=mainHarness()
+ try {
+  const {TranslationEngine}=h.load('src/main/translation/translationEngine.ts'),engine=new TranslationEngine()
+  engine.setOnlineSession('owner','fixture');engine.settings.get=async()=>({provider:'openai'})
+  const started:string[]=[],releases=new Map<string,()=>void>()
+  engine.createProvider=()=>({translate:async(r:any)=>{
+   started.push(r.requestId)
+   await new Promise<void>(resolve=>releases.set(r.requestId,resolve))
+   await engine.receipts.update('owner',r.requestId,{state:'charged',translated:'翻译完成',chargedCharacters:Array.from(r.text).length})
+   return '翻译完成'
+  }})
+  const request=(id:string)=>({text:'This is a translation priority fixture.',accountId:'wa',conversationId:'wa:peer',messageId:id,requestId:id,targetLanguage:'zh-CN'})
+  const jobs:Promise<string>[]=[]
+  const until=async(check:()=>boolean)=>{for(let i=0;i<1000;i++){if(check())return;await new Promise(resolve=>setTimeout(resolve,2))}assert.fail('queue did not reach expected state')}
+  jobs.push(engine.translateIncoming(request('history-one')));await until(()=>started.length===1)
+  jobs.push(engine.translateIncoming(request('history-two')));await until(()=>started.length===2)
+  jobs.push(engine.translateIncoming(request('history-three')));await until(()=>engine.metrics().queueDepth===1)
+  jobs.push(engine.translateIncoming(request('chosen-message')));await until(()=>engine.metrics().queueDepth===2)
+  const manual=engine.translateIncoming(request('chosen-message'),true)
+  await until(()=>started.includes('chosen-message'))
+  assert.equal(started.includes('history-three'),false)
+  assert.equal(started.filter(id=>id==='chosen-message').length,1)
+  releases.get('chosen-message')!();assert.equal(await manual,'翻译完成')
+  releases.get('history-one')!();releases.get('history-two')!()
+  await until(()=>started.includes('history-three'));releases.get('history-three')!()
+  await Promise.all(jobs)
+  assert.equal(started.length,4)
+  assert.equal((await engine.history()).filter((r:any)=>r.requestId==='chosen-message').length,1)
+  assert.equal(engine.metrics().activeRequests,0)
+ }finally{rmSync(h.directory,{recursive:true,force:true})}
+})

@@ -636,7 +636,15 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     checkNavigation()
     if (disposed || location.origin !== 'https://voice.google.com') throw new Error('页面已离开，操作已停止。')
     const startedEpoch = epoch, startedUrl = location.href
-    const answer = await sendRequest({ v: 1, type: 'voice.' + type, ...(payload ? { payload } : {}) })
+    // A lost IPC reply must not leave the entire scan/preview permanently busy.
+    // The main process still owns the original work and its immutable request
+    // identity; timing out this UI wait never cancels or resends that work.
+    const answer = await new Promise((resolve, reject) => {
+      const failure = code => { const error = new Error('翻译响应暂未完成，原请求已保留，可稍后重试。'); error.code = code; return error }
+      const timer = setTimeout(() => reject(failure('timeout')), 75000)
+      Promise.resolve().then(() => sendRequest({ v: 1, type: 'voice.' + type, ...(payload ? { payload } : {}) }))
+        .then(resolve, () => reject(failure('unavailable'))).finally(() => clearTimeout(timer))
+    })
     if (disposed || epoch !== startedEpoch || location.href !== startedUrl) throw new Error('账号或页面已变化，操作已停止，未发送短信。')
     if (!answer?.ok) { const error = new Error(typeof answer?.error === 'string' ? answer.error : 'HelloDog 尚未完成操作，已保留原文。'); error.code = answer?.code; throw error }
     return answer.result
@@ -719,8 +727,24 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       // not repeatedly query/charge a disabled message on the polling loop.
       if (result?.enabled === false) { state.deferred = true; return }
       const value = translatedValue(result)
-      state.text = value.text
-    } catch (error) { if (epoch === startedEpoch) { state.error = error?.code !== 'busy'; state.retryAfter = error?.code === 'busy' ? Date.now() + 2000 : 0; if (manual) showError(error) } }
+      state.text = value.text; state.retryAfter = 0; state.failures = 0; state.retryWindow = 0; state.recoverable = false
+    } catch (error) {
+      if (epoch === startedEpoch) {
+        const now = Date.now()
+        state.recoverable = ['timeout', 'unavailable'].includes(error?.code)
+        if (error?.code === 'busy') { state.error = false; state.retryAfter = now + 2000 }
+        else if (state.recoverable) {
+          if (manual || !state.retryWindow || now - state.retryWindow >= 300000) { state.retryWindow = now; state.failures = 0 }
+          state.failures = (state.failures || 0) + 1
+          // Two delayed automatic retries per five-minute window, then leave
+          // an actionable button. Engine recovery retains the original ID or
+          // retries only a cloud-confirmed uncharged failure.
+          state.error = state.failures > 2
+          state.retryAfter = state.error ? state.retryWindow + 300000 : now + 5000 * 2 ** (state.failures - 1)
+        } else { state.error = true; state.retryAfter = 0 }
+        if (manual) showError(error)
+      }
+    }
     finally { state.work = false; renderMessageViews(state); scheduleScan() }
   }
   function removeMessageViews() { for (const state of messages.values()) for (const view of state.views?.values() || []) view.node.remove(); messages.clear() }
@@ -829,10 +853,11 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       for (const item of items) {
         if (!adapter.validMessage(item)) continue
         const state = addMessage(item)
+        if (state?.error && state.recoverable && state.retryAfter && Date.now() >= state.retryAfter) { state.error = false; state.retryAfter = 0; state.failures = 0; state.retryWindow = 0; renderMessageViews(state) }
         const automatic = runtimeStatus?.historyMode === 'visible' || runtimeStatus?.historyMode === 'new' && historyBaseline?.eligible.has(item.id)
         if (!nextAuto && automatic && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && (runtimeStatus?.historyMode === 'new' || adapter.visibleMessage(item))) nextAuto = item
       }
-      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
+      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && navigator.onLine !== false && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
         autoBusy = true
         try { await translateMessage(nextAuto, false) } finally { autoBusy = false; scheduleScan() }
       }
@@ -843,6 +868,7 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
   observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-readonly', 'src', 'style'] })
   listen(window, 'popstate', () => { checkNavigation(); scheduleScan() }); listen(window, 'hashchange', checkNavigation)
   listen(window, 'scroll', scheduleScan, true); listen(document, 'visibilitychange', () => { if (document.visibilityState === 'visible') for (const state of messages.values()) state.deferred = false; scheduleScan() })
+  listen(window, 'online', () => { statusAt = 0; scheduleScan() })
   listen(document, 'hellodog-voice-draft-ready', scheduleScan)
   listen(document, 'hellodog-voice-attachment-rejected', () => showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。此次选择已取消，原草稿保留。')))
   listen(document, 'load', event => { if (event.target?.matches?.('gv-message-entry img')) scheduleScan() }, true)

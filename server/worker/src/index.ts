@@ -5,6 +5,7 @@ import { ProviderFailure, classifyProviderFailure, providerMessages, checkProvid
 import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
 import { wrongTargetLanguage, wrongOutgoingTargetLanguage } from '../../../src/shared/translationResult'
 import { isSemanticTranslationMismatch } from '../../../src/shared/translationSemantics'
+import { normalizeTranslationLayout } from '../../../src/shared/translationLayout'
 import { translationInstructions, translationInput, type TranslationCorrection } from './translationPrompt'
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
@@ -139,6 +140,7 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
     method: 'POST',
     // Leave time for settlement before the desktop's 30-second POST timeout.
     signal: AbortSignal.timeout(Math.max(1, Math.floor(timeoutMs))),
+    redirect: 'manual',
     headers: {
       Authorization: `Bearer ${config.key}`,
       'Content-Type': 'application/json'
@@ -163,15 +165,19 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
     throw classifyProviderFailure(response.status, payload)
   }
 
-  let output = String(payload?.output_text || '').trim()
+  let output = typeof payload?.output_text === 'string' ? payload.output_text.trim() : ''
   const refused = Array.isArray(payload?.output) && payload.output.some((item: any) =>
     Array.isArray(item?.content) && item.content.some((part: any) => part?.type === 'refusal'))
   if (refused) throw new InvalidTranslationFailure('provider_not_translation', payload.status === 'completed')
+  // Never silently drop a malformed segment and charge for the remaining
+  // partial sentence, even when another segment or flat output is valid.
+  if (Array.isArray(payload?.output) && payload.output.some((item: any) =>
+    Array.isArray(item?.content) && item.content.some((part: any) => part?.type === 'output_text' && typeof part.text !== 'string'))) throw new ProviderFailure('provider_empty')
   if (!output && Array.isArray(payload?.output)) {
     for (const item of payload.output) {
       if (!Array.isArray(item?.content)) continue
       for (const part of item.content) {
-        if (part?.type === 'output_text' && part?.text) output += `${part.text}\n`
+        if (part?.type === 'output_text' && typeof part.text === 'string') output += `${part.text}\n`
       }
     }
     output = output.trim()
@@ -179,6 +185,7 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   if (!output || (payload.status && payload.status !== 'completed')) throw new ProviderFailure('provider_empty')
   if (output === input.trim()) throw new InvalidTranslationFailure('provider_not_translation', payload.status === 'completed')
   try { output = protectedText.restore(output) } catch { throw new InvalidTranslationFailure('protected_literal_mismatch', payload.status === 'completed') }
+  if (body.requestId?.startsWith('send-')) output = normalizeTranslationLayout(text, output, protectedText.values)
   let languageSample = output
   for (const literal of [...protectedText.values].sort((a, b) => b.length - a.length)) languageSample = languageSample.split(literal).join(' ')
   const target = String(body.targetLanguage || '')
@@ -399,7 +406,7 @@ async function translate(request: Request, env: Env, user: User, deadline: numbe
 
   const work = routed
     ? settleRoutedTranslation(env, body, requestId, user.id, claimToken, plan, deadline, Boolean(correctionProvider))
-    : settleTranslation(env, body, requestId, user.id, claimToken, config)
+    : settleTranslation(env, body, requestId, user.id, claimToken, config, deadline)
   // A tab refresh or a timed-out desktop request must not abandon a claimed
   // translation before its result/failure and wallet reservation are settled.
   ctx?.waitUntil(work.then(() => undefined, () => undefined))
@@ -437,7 +444,10 @@ async function settleRoutedTranslation(env: Env, body: ReturnType<typeof normali
       catch { /* Failed route lookup never authorizes an untracked invocation. */ }
     }
     if (!lease?.allowed) continue
-    const timeoutMs = Math.min(config.provider === 'deepseek' ? 12000 : 8000, deadline - Date.now())
+    // The 8s/12s slices exist to leave a budget for a fallback provider. A
+    // selected single channel has no fallback: let it use the remaining shared
+    // budget instead of prematurely timing out a valid, slower translation.
+    const timeoutMs = Math.min(plan.length === 1 ? 20000 : config.provider === 'deepseek' ? 12000 : 8000, deadline - Date.now())
     if (timeoutMs < 250) break
     const receipt = providerReceipt(config.model)
     const attempt: ProviderAttempt = { provider: config.provider, model: config.model,
@@ -517,13 +527,17 @@ async function settleRoutedTranslation(env: Env, body: ReturnType<typeof normali
   return failure('settlement_pending')
 }
 
-async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, config: ProviderConfig): Promise<Response> {
+async function settleTranslation(env: Env, body: ReturnType<typeof normalizeBody>, requestId: string, userId: string, claimToken: string, config: ProviderConfig, deadline: number): Promise<Response> {
   const started = Date.now()
   const model = config.model
   let translated: Awaited<ReturnType<typeof providerTranslate>>
   const receipt=providerReceipt(model)
   try {
-    translated = await providerTranslate(env, body, body.text, receipt, config)
+    // Older clients/models use the same request deadline, including time spent
+    // authenticating and claiming. Never start another full 20s budget here.
+    const remaining = deadline - Date.now()
+    if (remaining < 250) throw new ProviderFailure('provider_timeout')
+    translated = await providerTranslate(env, body, body.text, receipt, config, remaining)
   } catch (error: any) {
     const failureCode = error instanceof ProviderFailure ? error.code
       : error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable'

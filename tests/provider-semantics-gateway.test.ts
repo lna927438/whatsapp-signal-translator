@@ -132,3 +132,62 @@ test('a repeated impersonal answer fails with no debit and no indefinite model r
   assert.deepEqual(await translate('semantic-impersonal-failed'),result)
   assert.equal(calls.length,2)
 })
+
+for (const segmented of [false, true]) test(`a single-paragraph outgoing ${segmented ? 'content-block' : 'flat'} result is settled and replayed without added hard breaks`, async () => {
+  const text = '他很年轻，而且已经开始工作。'
+  const parts = ['He was young.', 'He had already started working.']
+  output = () => segmented ? { ...success(''), output: [{ type: 'message', role: 'assistant', content:
+    parts.map(text => ({ type: 'output_text', text })) }] } : success(parts.join('\n\n'))
+  const patch = { text, sourceLanguage: 'zh-CN', targetLanguage: 'en-US' }
+  const result = await translate('send-layout-single', patch)
+  assert.equal(result.status, 200); assert.equal(result.body.translation, parts.join(' '))
+  assert.deepEqual(await translate('send-layout-single', patch), result)
+  assert.equal(calls.length, 1); assert.equal(await debits(), 1)
+  assert.equal((await wallet(db)).lifetime_debited, Array.from(text).length)
+})
+
+test('explicit source paragraphs are retained in outgoing results, while receive formatting is unchanged', async () => {
+  const formatted = 'He was young.\n\nHe had already started working.'
+  output = () => success(formatted)
+  const outgoing = await translate('send-layout-explicit', { text: '他很年轻。\n\n他已经开始工作。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' })
+  assert.equal(outgoing.status, 200); assert.equal(outgoing.body.translation, formatted)
+  const incoming = await translate('receive-layout-preserved', { text: '他很年轻，而且已经开始工作。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' })
+  assert.equal(incoming.status, 200); assert.equal(incoming.body.translation, formatted)
+  assert.equal(calls.length, 2); assert.equal(await debits(), 2)
+})
+
+for (const malformed of [{ output_text: { text: '你好' } }, { output_text: ['你好'] },
+  { output_text: '', output: [{ type: 'message', content: [{ type: 'output_text', text: { text: '你好' } }] }] },
+  { output_text: '', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hello' }, { type: 'output_text', text: { text: 'there' } }] }] },
+  { output_text: 'Hello', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hello' }, { type: 'output_text', text: null }] }] }]) {
+  test('malformed provider text is never converted to a paid string: ' + JSON.stringify(malformed), async () => {
+    output = () => ({ ...success(''), ...malformed })
+    const result = await translate('malformed-provider-output', { text: 'Hello', targetLanguage: 'en-US' })
+    assert.equal(result.status, 502); assert.equal(result.body.error, 'provider_empty')
+    assert.equal(calls.length, 1); assert.equal(await debits(), 0)
+    assert.equal((await wallet(db)).reserved_characters, 0)
+    assert.deepEqual(await translate('malformed-provider-output', { text: 'Hello', targetLanguage: 'en-US' }), result)
+    assert.equal(calls.length, 1)
+  })
+}
+
+test('a losslessly Markdown-escaped number is restored without a corrective inference or extra debit', async () => {
+  output = () => success('Please call \\_\\_HDPROTECTED_0\\_\\_.')
+  const patch = { text: '请拨打5551234。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' }
+  const result = await translate('send-partly-escaped-placeholder', patch)
+  assert.equal(result.status, 200); assert.equal(result.body.translation, 'Please call 5551234.')
+  assert.equal(calls.length, 1); assert.equal(await debits(), 1)
+  assert.deepEqual((await evidence()).map(row => row.error_code), [null])
+  assert.deepEqual(await translate('send-partly-escaped-placeholder', patch), result)
+  assert.equal(calls.length, 1)
+})
+
+test('outgoing layout preserves an explicit multiline glossary literal before charging and replay', async () => {
+  const literal = 'First [name]\nSecond (name)'
+  const patch = { text: '请联系联系人。稍后见。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US', quality: { glossary: [{ source: '联系人', target: literal }] } }
+  output = () => success('Contact __HDPROTECTED_0__.\n\nSee you later.')
+  const result = await translate('send-layout-glossary', patch)
+  assert.equal(result.status, 200); assert.equal(result.body.translation, 'Contact ' + literal + '. See you later.')
+  assert.deepEqual(await translate('send-layout-glossary', patch), result)
+  assert.equal(calls.length, 1); assert.equal(await debits(), 1)
+})

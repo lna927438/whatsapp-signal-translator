@@ -31,6 +31,15 @@ export function officialBillNotice(item:OfficialBill|undefined,period:BillPeriod
     ?'官方同步有延迟，保留上次金额。':'官方账单可能延迟补记。'
 }
 
+/** Headline status belongs to the supplier snapshot, never to a newer page read. */
+export function officialBillStatus(item:OfficialBill|undefined,period:BillPeriod,now=Date.now()):string {
+  if(!item)return '尚未同步'
+  const today=currentBillPeriod(item.timezone,now).to
+  if(item.to<today)return item.provisional?'历史账单快照':'历史官方账单'
+  if(item.source==='manual_statement')return now-Date.parse(item.fetchedAt)>10*60000?'上次导出金额 · 待更新':'官方导出快照'
+  return officialBillDelayed({items:[item],complete:true,total:item.amount,partial:item.amount,missing:[]},period,now)?'同步延迟 · 保留上次金额':'官方自动同步'
+}
+
 export function currentBillPeriod(timezone:string,now=Date.now()):{from:string;to:string}{
   const to=new Date(now+(timezone==='Asia/Shanghai'?28800000:0)).toISOString().slice(0,10)
   return {from:to.slice(0,8)+'01',to}

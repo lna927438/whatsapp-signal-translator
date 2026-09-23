@@ -56,3 +56,19 @@ export function nativeMonthFixture(data:ReturnType<typeof costsFixture>,now:numb
  data.officialBillingBasis={kind:'provider_current_month',timezones:{openai:'UTC',deepseek:'Asia/Shanghai'},periods:{openai:period('UTC'),deepseek:period('Asia/Shanghai')}} as any
  return data
 }
+
+/** Synthetic equivalent of the existing native-month server route. Only fixture
+ * responses use this; malformed periods in production are still rejected. */
+export function costsQueryFixture(path:string,input:ReturnType<typeof costsFixture>,now=Date.now()){
+ if(!path.startsWith('costs?')||new URLSearchParams(path.slice(6)).get('officialCurrentMonth')!=='true')return input
+ const data=structuredClone(input),previous=data.officialBillingBasis
+ if(previous.kind==='provider_current_month')return data
+ nativeMonthFixture(data,now)
+ data.officialBills=data.officialBills.map(bill=>{
+  const provider=bill.provider as 'openai'|'deepseek',before=officialBillFixture(provider,'0',input)
+  if(bill.period_from!==before.period_from||bill.period_to!==before.period_to)return bill
+  const after=officialBillFixture(provider,'0',data)
+  return {...bill,period_from:after.period_from,period_to:after.period_to}
+ })
+ return data
+}
