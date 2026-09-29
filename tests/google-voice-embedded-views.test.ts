@@ -6,6 +6,8 @@ import { mainHarness } from './main-harness.ts'
 const A = 'gv-10000000-0000-4000-8000-000000000001'
 const B = 'gv-20000000-0000-4000-8000-000000000002'
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+const checkResult = () => ({ ip: '203.0.113.10', latencyMs: 8, checkedAt: 1000, reachable: true,
+  checks: Object.fromEntries(['exitIp', 'voice', 'signIn'].map(name => [name, { status: 'reachable', latencyMs: 8, checkedAt: 1000 }])) })
 
 test('page location distinguishes messages, login and precise access-help without inferring suspension', () => {
   const { googleVoicePage } = mainHarness().load('src/main/platforms/googleVoice/embeddedViews.ts')
@@ -46,8 +48,10 @@ function fixture(options: any = {}) {
   }
   class FakeContents extends EventEmitter {
     destroyed = false; url = ''; focused = 0; reloads = 0; calls: any[] = []; open: any; sent: any[] = []; mainFrame: any
-    history = false; backCalls = 0; rtcPolicy = ''
+    history = false; backCalls = 0; rtcPolicy = ''; zoomFactor = 1; zoomMode = 'default'
     setWebRTCIPHandlingPolicy(value: string) { this.rtcPolicy = value }
+    setZoomFactor(value: number) { this.zoomFactor = value }
+    setZoomMode(value: string) { this.zoomMode = value }
     navigationHistory = { canGoBack: () => this.history, goBack: () => { this.backCalls++ } }
     constructor(public session: any) { super(); const contents = this; this.mainFrame = { get url() { return contents.url }, detached: false } }
     getURL() { return this.url }
@@ -92,7 +96,7 @@ function fixture(options: any = {}) {
       const call = { contents, proxy, password, active: true }; authCalls.push(call)
       return () => { call.active = false; call.password = '' }
     },
-    checkGoogleVoiceSession: async (...args: any[]) => { networkCalls.push(['check', ...args]); return options.networkCheck ? options.networkCheck(...args) : { ip: '203.0.113.10', latencyMs: 8, checkedAt: 1000 } }
+    checkGoogleVoiceSession: async (...args: any[]) => { networkCalls.push(['check', ...args]); return options.networkCheck ? options.networkCheck(...args) : checkResult() }
   } })
   const module = h.load('src/main/platforms/googleVoice/embeddedViews.ts')
   const manager = new module.GoogleVoiceEmbeddedViews(parent, { ...options, onState: (state: any) => states.push(state), onBlockedNavigation: (event: any) => blocked.push(event) })
@@ -102,7 +106,7 @@ function fixture(options: any = {}) {
 }
 
 const proxyConfig = { enabled: true, protocol: 'http', host: 'proxy.example.invalid', port: 3128, username: 'synthetic' }
-function networkRoute(proxy: any, password: string) { return { proxy, password, closed: 0, async close() { this.closed++; this.password = '' } } }
+function networkRoute(proxy: any, password: string) { return { proxy, password, closed: 0, isClosed() { return this.closed > 0 }, async close() { this.closed++; this.password = '' } } }
 const bridgeRoute = (port: number) => networkRoute({ enabled: true, protocol: 'http', host: '127.0.0.1', port, username: 'capability-' + port }, 'capability-secret-' + port)
 function requestCancelled(session: any): boolean { let result: any; session.webRequest.before({}, (value: any) => { result = value }); return result.cancel }
 
@@ -116,6 +120,8 @@ test('proxy setup gates every request before navigation and applies WebRTC prote
   assert.equal(requestCancelled(wc.session), false); assert.equal(wc.calls[0].url, 'https://voice.google.com/u/0/')
   assert.equal(h.networkCalls[0][2].proxyRules, 'http://proxy.example.invalid:3128')
   assert.equal(h.networkCalls[0][2].proxyBypassRules, '<-loopback>')
+  assert.equal(h.networkCalls.filter(row => row[0] === 'check').length, 0, 'Opening a window must not run unsolicited probes')
+  await h.manager.checkNetwork('owner', A)
   assert.equal(h.networkCalls.find(row => row[0] === 'check')[1], wc.session)
   const child = h.popup(wc).createWindow({}); assert.equal(child.session, wc.session); assert.equal(child.rtcPolicy, 'disable_non_proxied_udp')
   const state = h.manager.getState('owner', A); assert.equal(state.network.ip, '203.0.113.10')
@@ -163,6 +169,7 @@ test('prepared SOCKS routes remain separate and root, popups and IP checks use o
   const configurations = h.networkCalls.filter(row => row[0] === 'proxy')
   assert.deepEqual(configurations.map(row => row[2].proxyRules), ['http://127.0.0.1:18001', 'http://127.0.0.1:18002'])
   const popup = h.popup(a).createWindow({})
+  await Promise.all([h.manager.checkNetwork('owner', A), h.manager.checkNetwork('owner', B)])
   for (const [contents, route] of [[a, first], [b, second], [popup, first]] as const) {
     const auth = h.authCalls.find(row => row.contents === contents && row.active)
     assert.equal(auth.proxy, route.proxy); assert.equal(auth.password, route.password)
@@ -269,6 +276,39 @@ test('system windows explicitly clear previous proxy routing before loading and 
   await assert.rejects(check, /窗口已关闭/); assert.equal(h.states.length, count)
 })
 
+test('manual refresh retains the healthy route, current conversation URL and session without an extra network check', async () => {
+  const h = fixture(); h.manager.create('owner', A, { proxy: proxyConfig, password: 'synthetic' }); await tick()
+  const wc = h.views[0].webContents, route = h.routes[0]
+  wc.url = 'https://voice.google.com/u/0/messages?itemId=synthetic-conversation'; wc.emit('dom-ready')
+  h.manager.reload('owner', A); await tick()
+  assert.equal(wc.reloads, 1); assert.equal(wc.calls.filter(row => row.url).length, 1); assert.equal(wc.destroyed, false)
+  assert.equal(h.preparations.length, 1); assert.equal(route.closed, 0); assert.equal(h.networkCalls.filter(row => row[0] === 'check').length, 0)
+  h.manager.destroy()
+})
+
+test('a closed bridge reconnects on explicit refresh and reloads the existing official login URL', async () => {
+  const first = bridgeRoute(18501), next = bridgeRoute(18502), h = fixture({ prepareNetwork: (_proxy: any, _password: string, index: number) => index === 1 ? first : next })
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'synthetic' }); await tick()
+  const wc = h.views[0].webContents; wc.url = 'https://accounts.google.com/ServiceLogin?continue=synthetic'; await first.close()
+  h.manager.reload('owner', A); assert.equal(requestCancelled(wc.session), true); await tick()
+  assert.equal(requestCancelled(wc.session), false); assert.equal(wc.reloads, 1); assert.equal(wc.calls.filter(row => row.url).length, 1)
+  assert.equal(h.preparations.length, 2); assert.equal(wc.destroyed, false); assert.equal(h.networkCalls.filter(row => row[0] === 'check').length, 0)
+  assert.ok(h.networkCalls.filter(row => row[0] === 'proxy').every(row => row[2].mode === 'fixed_servers')); h.manager.destroy()
+})
+
+test('network probe failures leave a ready document usable and closing aborts an in-flight check', async () => {
+  let pending = false, aborted = false
+  const h = fixture({ networkCheck: (_ses: any, _proxy: any, _password: string, options: any) => {
+    if (pending) return new Promise(resolve => options.signal.addEventListener('abort', () => { aborted = true; resolve(checkResult()) }, { once: true }))
+    const result = checkResult(); result.reachable = false; result.checks.exitIp = { ...result.checks.exitIp, status: 'failed', code: 'timeout' } as any; return result
+  } })
+  h.manager.create('owner', A, { proxy: proxyConfig, password: 'synthetic' }); await tick(); const wc = h.views[0].webContents; wc.emit('dom-ready')
+  const result = await h.manager.checkNetwork('owner', A); assert.equal(result.status, 'error'); assert.equal(result.checks.voice.status, 'reachable')
+  assert.equal(h.manager.getState('owner', A).status, 'ready'); assert.equal(h.views[0].visible, true)
+  pending = true; const check = h.manager.checkNetwork('owner', A); h.manager.close('owner', A)
+  await assert.rejects(check, /窗口已关闭/); assert.equal(aborted, true)
+})
+
 test('embedded views use isolated persistent partitions and never put owner identities in disk paths', () => {
   const h = fixture()
   h.manager.create('first@example.invalid', A); h.manager.create('first@example.invalid', B); h.manager.create('second@example.invalid', A)
@@ -302,6 +342,82 @@ test('selection, overlays, host minimize and clipping never show an inactive acc
   assert.equal(h.views[1].bounds.width, 640); assert.equal(h.views[1].bounds.height, 380)
   h.manager.hide(); assert.ok(h.views.every(view => !view.visible)); assert.equal(h.manager.getState('owner', B).selected, false)
   assert.throws(() => h.manager.setBounds({ x: 0, y: NaN, width: 30, height: 30 }), /区域无效/)
+})
+
+test('Voice stays at native 90% across navigation, reload, popup adoption and window recreation without shrinking its bounds', () => {
+  const h = fixture(); h.manager.create('owner', A); const view = h.views[0], wc = view.webContents
+  const expectedBounds = { x: 60, y: 120, width: 1100, height: 650 }
+  assert.equal(view.options.webPreferences.zoomFactor, 0.9)
+  assert.equal(wc.zoomMode, 'isolated'); assert.equal(wc.zoomFactor, 0.9)
+  assert.deepEqual({ ...view.bounds }, expectedBounds)
+
+  // A different official origin or an old saved Chromium zoom must not revert
+  // the requested page size after login redirects or a normal reload.
+  wc.zoomFactor = 1.25; wc.url = 'https://accounts.google.com/ServiceLogin'
+  wc.emit('did-navigate', {}, wc.url); assert.equal(wc.zoomFactor, 0.9)
+  wc.zoomFactor = 1; h.manager.reload('owner', A); wc.emit('dom-ready')
+  assert.equal(wc.zoomFactor, 0.9); assert.deepEqual({ ...view.bounds }, expectedBounds)
+  wc.url = 'https://voice.google.com/u/0/messages'; wc.emit('did-navigate', {}, wc.url)
+  wc.emit('did-navigate-in-page', {}, wc.url + '?itemId=synthetic', true)
+  assert.equal(wc.zoomFactor, 0.9)
+
+  const popup = h.popup(wc), guest = new h.FakeContents(wc.session)
+  guest.zoomFactor = 1.5; popup.createWindow({ webContents: guest })
+  assert.equal(popup.overrideBrowserWindowOptions.webPreferences.zoomFactor, 0.9)
+  assert.equal(guest.zoomMode, 'isolated'); assert.equal(guest.zoomFactor, 0.9)
+  assert.deepEqual({ ...h.views[1].bounds }, expectedBounds)
+  h.manager.back('owner', A); assert.equal(wc.zoomFactor, 0.9)
+  const getPopup = h.popup(wc).createWindow({})
+  assert.equal(getPopup.zoomFactor, 0.9); assert.equal(getPopup.zoomMode, 'isolated')
+  h.manager.back('owner', A)
+
+  h.manager.close('owner', A); h.manager.create('owner', A)
+  const replacement = h.views.at(-1)!
+  assert.equal(replacement.webContents.session, wc.session)
+  assert.equal(replacement.webContents.zoomFactor, 0.9)
+  assert.equal(replacement.webContents.zoomMode, 'isolated')
+  assert.deepEqual({ ...replacement.bounds }, expectedBounds)
+  assert.doesNotThrow(() => wc.emit('did-finish-load'), 'A late closed-page event must not touch a destroyed webContents')
+  h.manager.destroy()
+})
+
+test('runtime watchdog distinguishes visible ready Voice from loading, sign-in and background throttling', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture({ preloadPath: 'synthetic-preload.js' }); h.manager.create('owner', A)
+  const wc = h.views[0].webContents
+  context.mock.timers.tick(30000); assert.equal(h.manager.getState('owner', A).runtimeHealth, undefined)
+  wc.url = 'https://accounts.google.com/ServiceLogin'; wc.emit('dom-ready')
+  context.mock.timers.tick(30000); assert.equal(h.manager.getState('owner', A).runtimeHealth, undefined)
+  wc.url = 'https://voice.google.com/u/0/messages'; wc.emit('dom-ready')
+  context.mock.timers.tick(10000); h.manager.hide(); context.mock.timers.tick(30000)
+  assert.equal(h.manager.getState('owner', A).runtimeHealth, undefined)
+  h.manager.focus('owner', A); context.mock.timers.tick(14999)
+  assert.equal(h.manager.getState('owner', A).runtimeHealth, undefined)
+  context.mock.timers.tick(1)
+  assert.equal(h.manager.getState('owner', A).runtimeHealth.code, 'runtime-unavailable')
+  assert.equal(h.manager.getState('owner', A).status, 'ready', 'Health diagnostics do not hide the usable official page')
+  assert.equal(wc.reloads, 0, 'No automatic reload may lose a draft')
+  h.manager.observeRuntimeHealth({ sender: wc, senderFrame: wc.mainFrame }, { phase: 'ready', code: 'ready', messageCount: 2 })
+  assert.equal(h.manager.getState('owner', A).runtimeHealth.code, 'ready')
+  h.manager.observeRuntimeHealth({ sender: wc, senderFrame: wc.mainFrame }, { phase: 'waiting', code: 'waiting', messageCount: 0 })
+  context.mock.timers.tick(60000)
+  assert.equal(h.manager.getState('owner', A).runtimeHealth.code, 'waiting', 'A working runtime on the message list can wait without a selected conversation')
+  h.manager.destroy()
+})
+
+test('health accepts only the current trusted main frame and sanitizes preload failures', () => {
+  const h = fixture({ preloadPath: 'synthetic-preload.js' }); h.manager.create('owner', A)
+  const wc = h.views[0].webContents, event = { sender: wc, senderFrame: wc.mainFrame }
+  wc.emit('dom-ready')
+  assert.equal(h.manager.observeRuntimeHealth(event, { phase: 'ready', code: 'ready', messageCount: 1, text: 'private' }), false)
+  assert.throws(() => h.manager.observeRuntimeHealth({ sender: wc, senderFrame: {} }, { phase: 'ready', code: 'ready', messageCount: 1 }))
+  wc.emit('preload-error', {}, 'private-path', new Error('private runtime content'))
+  assert.equal(h.manager.getState('owner', A).runtimeHealth.code, 'preload-failed')
+  assert.ok(!JSON.stringify(h.states).includes('private'))
+  wc.emit('did-start-navigation', {}, 'https://accounts.google.com/ServiceLogin', false, true)
+  assert.equal(h.manager.getState('owner', A).runtimeHealth, undefined)
+  assert.throws(() => h.manager.observeRuntimeHealth(event, { phase: 'ready', code: 'ready', messageCount: 1 }))
+  h.manager.destroy()
 })
 
 test('navigation allowlist rejects URL tricks and reports no path, query, email or fragment', () => {

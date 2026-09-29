@@ -31,6 +31,7 @@ export function attachHelloDog(window: BrowserWindow): void {
     if(event.sender.id===window.webContents.id) process.send?.({channel:'hellodog',type:'activate'});
   });
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  const voicePending = new Set<string>();
   let refreshId: string | undefined;
   let restartId: string | undefined;
   let quickReplyId: string | undefined;
@@ -71,6 +72,17 @@ export function attachHelloDog(window: BrowserWindow): void {
       process.send?.({channel:'hellodog',type:'translate',id,request});
     });
   });
+  ipcMain.handle('hellodog:voice', async (event, request: any) => {
+    if (event.sender.id !== senderId || event.senderFrame !== window.webContents.mainFrame || !process.connected) throw new Error('Signal 语音窗口已断开。');
+    if (voicePending.size || typeof request?.audioBase64 !== 'string' || request.audioBase64.length > 12800064) throw new Error('语音正在处理或超过大小限制，请稍后重试。');
+    const id = randomUUID();
+    return new Promise((resolve, reject) => {
+      const fail = () => { const task = pending.get(id); if (!task) return; clearTimeout(task.timer); pending.delete(id); voicePending.delete(id); reject(new Error('语音翻译尚未完成，请稍后重试。')); };
+      const timer = setTimeout(fail, 300000);
+      pending.set(id, { resolve, reject, timer }); voicePending.add(id);
+      process.send?.({ channel: 'hellodog', type: 'voice', id, request }, error => { if (error) fail(); });
+    });
+  });
   ipcMain.on('hellodog:conversation', (event, context: unknown) => { if(event.sender.id===window.webContents.id) process.send?.({channel:'hellodog',type:'conversation',context}); });
   ipcMain.on('hellodog:connection', (event, state: unknown) => { if(event.sender.id===window.webContents.id) process.send?.({channel:'hellodog',type:'connection',state}); });
   ipcMain.on('hellodog:health', (event, health: any) => {
@@ -83,7 +95,7 @@ export function attachHelloDog(window: BrowserWindow): void {
   });
   process.on('message', (raw: any) => {
     if(raw?.channel!=='hellodog') return;
-    if(raw.type==='translation') { const item=pending.get(raw.id); if(item) { clearTimeout(item.timer); pending.delete(raw.id); if(raw.error) item.reject(new Error(raw.error)); else item.resolve(raw.result); } }
+    if(raw.type==='translation'||raw.type==='voice-result') { const item=pending.get(raw.id); if(item && (raw.type==='voice-result')===voicePending.has(raw.id)) { clearTimeout(item.timer); pending.delete(raw.id); voicePending.delete(raw.id); if(raw.error) item.reject(new Error(raw.error)); else item.resolve(raw.result); } }
     if(raw.type==='focus') window.webContents.focus();
     if(raw.type==='insert-draft' && typeof raw.id==='string' && typeof raw.text==='string' && raw.text.length<=2000) {
       quickReplyId=raw.id;window.webContents.send('hellodog:insert-draft',{id:raw.id,text:raw.text});

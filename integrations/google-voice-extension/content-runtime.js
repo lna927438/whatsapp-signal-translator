@@ -3,18 +3,26 @@ import { SendGuard } from './send-guard.mjs'
 import { GoogleVoiceDomAdapter } from './voice-adapter.mjs'
 
 /** Shared isolated-world UI. The transport is supplied by the extension or preload. */
-export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
+export function installGoogleVoiceRuntime({ sendRequest, subscribe, onHealth } = {}) {
   if (window !== window.top || location.origin !== 'https://voice.google.com' || typeof sendRequest !== 'function') return null
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
-  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
-  let historyBaseline, statusReady = false, statusError = false
+  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoFlight, disposed = false, restoreListener, currentUrl = location.href
+  let historyBaseline, historyFlight, statusReady = false, statusError = false, statusFlight, lastHealth = ''
+  function health(phase, code, messageCount = 0) {
+    const value = { phase, code, messageCount: Math.min(500, messageCount) }, signature = JSON.stringify(value)
+    if (disposed || signature === lastHealth) return
+    lastHealth = signature
+    // Optional, bounded diagnostics contain no page text, recipients or URLs.
+    try { onHealth?.(value) } catch { /* reporting must never stop translation */ }
+  }
   const removers = []
   function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
   function invalidate() {
-    epoch++; runtimeStatus = null; statusAt = 0; statusReady = false; statusError = false; historyBaseline = null; guard?.invalidate(); guard = null; guardConversation = null; pending = null
+    epoch++; runtimeStatus = null; statusAt = 0; statusReady = false; statusError = false; statusFlight = null; autoFlight = null; historyFlight = null; historyBaseline = null; guard?.invalidate(); guard = null; guardConversation = null; pending = null
     removeMessageViews(); panelLifecycle?.dismiss(); panelLifecycle = null; panel?.remove(); panel = null
     currentUrl = location.href
+    health('waiting', 'waiting')
     if (!disposed) scheduleScan()
   }
   function checkNavigation() { if (currentUrl !== location.href) invalidate() }
@@ -114,6 +122,8 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     if (!intent) return
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
     if (intent === 'attachment') { showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。视频和音频附件不在此发送范围内。')); return }
+    if (intent === 'unrecognized-control') { if (!['keyup', 'keypress'].includes(type)) showError(new Error('当前短信编辑器有未识别的操作控件，已阻止此操作。请保留草稿并刷新页面后重试。')); return }
+    if (intent === 'unrecognized-editor') { if (!['keyup', 'keypress', 'beforeinput'].includes(type)) showError(new Error('当前操作来自未识别的输入框，已阻止发送；不会使用其他输入框的草稿代替。请保留内容并刷新页面后重试。')); return }
     if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.altKey || event.metaKey || type === 'keyup' || type === 'keypress' || type === 'beforeinput') return
     void prepareOutgoing().catch(showError)
   }, true)
@@ -208,7 +218,8 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     renderMessageViews(state)
     return state
   }
-  async function observeNewMessages(items) {
+  async function observeNewMessages(items, previousKeys) {
+    const observedEpoch = epoch
     if (runtimeStatus?.historyMode !== 'new' || !runtimeStatus.newMessageTracking || !runtimeStatus.receiveAutoTranslate || runtimeStatus.translationsVisible === false) { historyBaseline = null; return }
     if (!statusReady || !items.length) return
     const first = items[0], before = historyBaseline
@@ -218,15 +229,17 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       historyBaseline = null
       if (items.length > 500) return
       const reply = await request('history-baseline', { conversationId: first.conversationId, ids: items.map(item => item.id) })
+      if (disposed || observedEpoch !== epoch) return
       if (!validId(reply?.token) || !Number.isSafeInteger(reply.startedAt) || !Number.isSafeInteger(reply.expiresAt) || reply.expiresAt <= Date.now() || reply.anchorId !== items[items.length - 1].id || !items.every(item => adapter.validMessage(item))) return
       const settled = await adapter.messages()
+      if (disposed || observedEpoch !== epoch) return
       if (settled.length !== items.length || settled.some((item, index) => item.id !== items[index].id || item.thread !== first.thread)) { scheduleScan(); return }
       historyBaseline = { ...reply, thread: first.thread, conversationId: first.conversationId, tailId: reply.anchorId, seen: new Set(items.map(item => item.id)), eligible: new Set() }
       return
     }
     const tail = items.findIndex(item => item.id === before.tailId)
     for (let index = 0; index < items.length; index++) {
-      const item = items[index], previousKey = elementKeys.get(item.element)
+      const item = items[index], previousKey = previousKeys.get(item.element)
       // A prepend, rerender or recycled DOM node is not a newly received SMS.
       // Main additionally proves timestamp freshness against its own baseline.
       if (!before.seen.has(item.id) && index > tail && item.direction === 'incoming' && (!previousKey || previousKey === item.conversationId + ':' + item.id)) before.eligible.add(item.id)
@@ -241,14 +254,26 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     scanBusy = true
     const startedEpoch = epoch
     try {
-      const supported = await adapter.refresh()
+      // Keep the UI and read-only history alive when a changed composer or an
+      // attachment throws during inspection. Sending still requires refresh
+      // and an exact snapshot; no guessed controls are authorized here.
+      toolbar(false)
+      let supported = false, editorFailed = false
+      try { supported = await adapter.refresh() } catch {
+        adapter.current = null; editorFailed = true
+        adapter.reason = '短信编辑器暂未识别，发送已暂停；已有消息仍可翻译。'
+      }
       if (disposed || startedEpoch !== epoch) return
       toolbar(supported)
       // Incoming history remains readable while a draft is uploading, a
       // composer is disabled, or an unknown send surface is safely blocked.
-      if (Date.now() - statusAt > 10000 && !autoBusy && !['preparing', 'authorizing'].includes(guard?.state)) {
+      if (Date.now() - statusAt > 10000 && !statusFlight && !autoFlight && !['preparing', 'authorizing'].includes(guard?.state)) {
         statusAt = Date.now()
-        try {
+        const flight = {}; statusFlight = flight
+        // A slow/lost status reply must not hide message controls or hold the
+        // DOM scanner for the entire IPC timeout. Automatic translation waits
+        // for a verified status; manual controls remain available meanwhile.
+        void (async () => { try {
           const next = await bridge.status()
           if (disposed || startedEpoch !== epoch) return
           if (runtimeStatus && runtimeStatus.localLanguage !== next.localLanguage) invalidate()
@@ -261,12 +286,37 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
           // Keep its display but pause automatic work until status is fresh.
           if (error?.code === 'busy') statusAt = Date.now() - 9000
           else { runtimeStatus = null; historyBaseline = null }
-        }
-        toolbar(supported)
+        } finally { if (statusFlight === flight) statusFlight = null; scheduleScan() } })()
       }
       const items = await adapter.messages()
       if (disposed || startedEpoch !== epoch) return
-      try { await observeNewMessages(items) } catch (error) { if (error?.code === 'busy') scheduleScan(); else historyBaseline = null }
+      const previousKeys = new Map(items.map(item => [item.element, elementKeys.get(item.element)]))
+      // Paint controls before any history-baseline or translation request.
+      for (const item of items) if (adapter.validMessage(item)) addMessage(item)
+      const unrecognizedText = !!adapter.route() && !items.length && [...document.querySelectorAll('gv-message-list gv-message-item gv-annotation.content')].some(node => node.getClientRects().length && node.textContent?.trim())
+      if (editorFailed) health('error', 'editor-unrecognized', items.length)
+      else if (statusError) health('error', 'status-unavailable', items.length)
+      else if (unrecognizedText) health('error', 'message-unrecognized')
+      else if (!statusReady) health('waiting', 'waiting', items.length)
+      else if (!runtimeStatus?.connected) health('error', 'status-unavailable', items.length)
+      else if (runtimeStatus?.translationsVisible === false) health('ready', 'translations-hidden', items.length)
+      else if (!runtimeStatus?.receiveAutoTranslate) health('ready', 'translation-disabled', items.length)
+      else if (runtimeStatus?.historyMode !== 'visible') health('ready', 'manual-mode', items.length)
+      else if (!supported && document.querySelector('gv-message-entry')) health('ready', 'editor-unrecognized', items.length)
+      else if (items.length || supported) health('ready', 'ready', items.length)
+      else health('waiting', 'waiting')
+      if (!historyFlight) {
+        const flight = {}, baseline = historyBaseline, eligible = baseline?.eligible.size
+        historyFlight = flight
+        void observeNewMessages(items, previousKeys).catch(error => {
+          if (disposed || epoch !== startedEpoch || historyFlight !== flight) return
+          if (error?.code === 'busy') scheduleScan(); else historyBaseline = null
+        }).finally(() => {
+          if (historyFlight !== flight) return
+          historyFlight = null
+          if (historyBaseline !== baseline || historyBaseline?.eligible.size !== eligible) scheduleScan()
+        })
+      }
       if (disposed || startedEpoch !== epoch) return
       let nextAuto
       for (const item of items) {
@@ -276,9 +326,19 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
         const automatic = runtimeStatus?.historyMode === 'visible' || runtimeStatus?.historyMode === 'new' && historyBaseline?.eligible.has(item.id)
         if (!nextAuto && automatic && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && (runtimeStatus?.historyMode === 'new' || adapter.visibleMessage(item))) nextAuto = item
       }
-      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && navigator.onLine !== false && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
-        autoBusy = true
-        try { await translateMessage(nextAuto, false) } finally { autoBusy = false; scheduleScan() }
+      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && navigator.onLine !== false && document.visibilityState === 'visible' && !autoFlight && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
+        const flight = {}; autoFlight = flight
+        // One automatic translation at a time, without freezing discovery of
+        // newly rendered messages while the provider is responding.
+        void translateMessage(nextAuto, false).catch(() => { if (!disposed && startedEpoch === epoch) health('error', 'scan-failed', items.length) })
+          .finally(() => { if (autoFlight === flight) autoFlight = null; scheduleScan() })
+      }
+    } catch {
+      if (!disposed && startedEpoch === epoch) {
+        adapter.current = null
+        adapter.reason = '页面翻译暂未恢复，请保留草稿后刷新页面。'
+        health('error', 'scan-failed')
+        toolbar(false)
       }
     } finally { scanBusy = false }
   }
@@ -299,10 +359,11 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     // BFCache resumes a document without running its preload/content script
     // again. Reinstall the same isolated guard before the restored page is used.
     if (event.persisted) {
-      restoreListener = () => { restoreListener = null; installGoogleVoiceRuntime({ sendRequest, subscribe }) }
+      restoreListener = () => { restoreListener = null; installGoogleVoiceRuntime({ sendRequest, subscribe, onHealth }) }
       window.addEventListener('pageshow', restoreListener, { once: true })
     }
   })
+  health('waiting', 'waiting')
   scheduleScan()
 
   const unsubscribe = subscribe?.((message, reply = () => {}) => {
@@ -319,7 +380,7 @@ export function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     if (message.type !== 'selection.result' || !pending || message.id !== pending.id || message.ticket !== pending.ticket) return
     pending = null
     const value = typeof message.text === 'string' ? message.text : message.error
-    if (typeof value !== 'string' || Array.from(value).length > 8000) return
+    if (typeof value !== 'string' || value.length > 20000) return
     showPanel(message.error ? 'HelloDog · 翻译未完成' : 'HelloDog · 选中文字翻译', value, [], '仅预览，不会自动填写或发送。发送保护仅适用于已识别的纯文本短信编辑器。')
   })
   function dispose() {

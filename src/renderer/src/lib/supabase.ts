@@ -21,13 +21,13 @@ export const supabase: SupabaseClient | null = supabaseConfigured
 
 export function requireSupabase(): SupabaseClient {
   if (!supabase) {
-    throw new Error('在线登录尚未配置。请设置 VITE_SUPABASE_URL 和 VITE_SUPABASE_PUBLISHABLE_KEY 后重新构建。')
+    throw new Error('当前安装包缺少登录服务配置，请安装修正版后重试。')
   }
   return supabase
 }
 
 export function createTransientSupabase(): SupabaseClient {
-  if (!supabaseConfigured) throw new Error('在线登录尚未配置。')
+  if (!supabaseConfigured) throw new Error('当前安装包缺少登录服务配置，请安装修正版后重试。')
   return createClient(supabaseUrl, supabasePublishableKey, {
     auth: {
       persistSession: false,

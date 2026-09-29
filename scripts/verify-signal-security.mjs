@@ -6,7 +6,8 @@ import { resolve, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const checkout = await realpath(resolve(root, 'integrations/signal-desktop'))
+const checkoutArg = process.argv.find(value => value.startsWith('--checkout='))
+const checkout = await realpath(checkoutArg ? resolve(checkoutArg.slice('--checkout='.length)) : resolve(root, 'integrations/signal-desktop'))
 const require = createRequire(import.meta.url)
 const builderRequire = createRequire(require.resolve('electron-builder'))
 const asar = createRequire(builderRequire.resolve('app-builder-lib'))('@electron/asar')

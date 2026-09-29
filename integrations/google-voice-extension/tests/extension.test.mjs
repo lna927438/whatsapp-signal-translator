@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { ExtensionBridge, SelectionTasks } from '../background-core.mjs'
-import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext, mediaValue, recipientContextValue, translationPayload } from '../protocol.mjs'
+import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext, mediaValue, recipientContextValue, translationPayload, translatedValue, translatedTextValue } from '../protocol.mjs'
 import { SendGuard, installSendInterception } from '../send-guard.mjs'
 
 const token = 'a'.repeat(64), code = 'b'.repeat(64), extensionId = 'kigfaejcipjibnmnpinplphfldjahknn'
@@ -130,6 +130,70 @@ test('native timeout does not release a still-running host slot or allow delayed
   const next = s.client.request('status', undefined, token)
   s.callbacks.message({ v: 1, id: s.sent[1].id, ok: true, result: { connected: true } })
   assert.deepEqual(await next, { connected: true })
+})
+
+test('expanded paid translations retain their own bound while original drafts stay limited', async () => {
+  const s = guardSetup(), translated = 'Expanded translated sentence. '.repeat(320)
+  s.bridge.translate = async () => ({ enabled: true, text: translated, requestId: 'send-expanded' })
+  assert.ok(translated.length > 8000)
+  assert.equal((await s.guard.prepare()).text, translated); assert.equal(s.sent(), 0)
+  await s.guard.confirm(); assert.equal(s.sent(), 1); assert.equal(s.snapshot.text, translated)
+  assert.equal(translatedTextValue('中'.repeat(20000)).length, 20000)
+  assert.throws(() => translatedTextValue('😀'.repeat(10001)), /译文/)
+  for (const value of ['', '  ', 'a\0b', 'x'.repeat(20001), 123]) assert.throws(() => translatedValue({ enabled: true, text: value, requestId: 'send-invalid' }))
+  assert.throws(() => translationPayload({ direction: 'outgoing', id: randomUUID(), conversationId: 'fixture', text: 'x'.repeat(8001) }))
+})
+
+test('authorization bridge preserves expanded translated receipt and still rejects oversized translations', async () => {
+  const s = setup(); s.values.pairToken = token
+  const url = 'https://voice.google.com/u/0/messages?itemId=t.expanded', conversationId = 'gv_' + createHash('sha256').update(JSON.stringify(['/u/0/messages', 't.expanded'])).digest('hex')
+  const sender = { id: extensionId, frameId: 0, tab: { id: 2 }, url }, original = { conversationId, text: 'Short original' }
+  const { id } = await s.bridge.handle({ v: 1, type: 'voice.outgoing-id', payload: original }, sender)
+  const payload = { ...original, id, translated: 'Expanded translation '.repeat(500), requestId: 'send-expanded-bridge' }
+  s.native.request = async (op, value) => { assert.equal(op, 'authorize'); assert.equal(value.translated, payload.translated); return { authorized: true, requestId: value.requestId, attempt: 1 } }
+  assert.equal((await s.bridge.handle({ v: 1, type: 'voice.authorize', payload }, sender)).authorized, true)
+  await assert.rejects(s.bridge.handle({ v: 1, type: 'voice.authorize', payload: { ...payload, translated: 'x'.repeat(20001) } }, sender), /译文/)
+})
+
+test('native envelope permits bounded source plus expanded receipt but never arbitrary oversized payloads', async () => {
+  const s = nativeSetup(), payload = { text: '😀'.repeat(8000), translated: '中'.repeat(20000) }
+  const task = s.client.request('authorize', payload, token)
+  assert.equal(s.sent.length, 1); assert.ok(Buffer.byteLength(JSON.stringify(s.sent[0])) > 65536)
+  s.callbacks.message({ v: 1, id: s.sent[0].id, ok: true, result: { authorized: true } }); await task
+  await assert.rejects(s.client.request('authorize', { text: 'x'.repeat(128 * 1024) }, token), /格式无效/)
+  assert.equal(s.sent.length, 1)
+})
+
+test('an expanded draft reconciles an earlier uncertain send before considering another translation', async () => {
+  const s = guardSetup(); s.snapshot.text = 'Expanded paid translation '.repeat(400)
+  s.bridge.dispatchStatus = async payload => {
+    assert.equal(payload.text, s.snapshot.text)
+    return { state: 'uncertain', requestId: 'send-expanded-existing', attempt: 1 }
+  }
+  await assert.rejects(s.guard.prepare(), /此前发送结果/)
+  assert.equal(s.guard.state, 'uncertain'); assert.equal(s.calls.length, 0); assert.equal(s.sent(), 0)
+  const next = guardSetup(); next.snapshot.text = s.snapshot.text; next.bridge.dispatchStatus = async () => ({ state: 'clear' })
+  await assert.rejects(next.guard.prepare(), /文字为空或过长/); assert.equal(next.calls.length, 0)
+})
+
+test('disabled native send never starts paid translation or reserves an attempt', async () => {
+  const s = guardSetup(); s.snapshot.sendButton.disabled = true
+  await assert.rejects(s.guard.prepare(), /发送按钮暂不可用/); assert.equal(s.calls.length, 0)
+  s.snapshot.sendButton.disabled = false; await s.guard.prepare()
+  let authorizations = 0; s.bridge.authorize = async () => { authorizations++; throw new Error('must not reserve') }
+  s.snapshot.sendButton.disabled = true
+  await assert.rejects(s.guard.confirm(), /发送按钮暂不可用/); assert.equal(authorizations, 0); assert.equal(s.sent(), 0)
+  // A disabled button must not prevent reconciliation of an earlier submission.
+  const pending = guardSetup(); pending.snapshot.sendButton.disabled = true
+  pending.bridge.dispatchStatus = async () => ({ state: 'uncertain', requestId: 'send-disabled-existing', attempt: 1 })
+  await assert.rejects(pending.guard.prepare(), /此前发送结果/); assert.equal(pending.guard.state, 'uncertain'); assert.equal(pending.calls.length, 0)
+})
+
+test('a send button disabled while obtaining the durable ID prevents a late paid translation', async () => {
+  const s = guardSetup()
+  s.bridge.logicalId = async () => { s.snapshot.sendButton.disabled = true; return { id: randomUUID() } }
+  await assert.rejects(s.guard.prepare(), /发送按钮暂不可用/)
+  assert.equal(s.calls.length, 0); assert.equal(s.sent(), 0)
 })
 test('unknown adapter rejects before contacting any billing bridge', async () => {
   const s = guardSetup(); s.adapter.supported = false

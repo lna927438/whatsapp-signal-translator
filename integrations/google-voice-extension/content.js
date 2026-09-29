@@ -3,6 +3,7 @@
 'use strict';
 const HOST = 'net.hellodog.google_voice'
 const MAX_TEXT = 8000
+const MAX_TRANSLATED_TEXT = 20000
 const ADAPTER = Object.freeze({ supported: false, reason: '配对不代表当前页面已识别。请查看短信编辑器上方的保护状态；未知页面仍可右键翻译选中文字。' })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 const opaque = /^[A-Za-z0-9_-]{32,256}$/
@@ -40,6 +41,12 @@ function draftTextValue(value, media) {
   if (typeof value !== 'string' || Array.from(value).length > MAX_TEXT || /[\u0000]/u.test(value)) throw new Error('文字过长或格式无效。')
   return value
 }
+// Translation expansion has a separate bound from user-submitted source text.
+// Keep this UTF-16 limit aligned with the main process translation receipt.
+function translatedTextValue(value, media) {
+  if (typeof value !== 'string' || (!media && !value.trim()) || value.length > MAX_TRANSLATED_TEXT || /[\u0000]/u.test(value)) throw new Error('译文为空、过长或格式无效。')
+  return value
+}
 function translationPayload(value) {
   if (!value || !['incoming', 'outgoing'].includes(value.direction) || !validId(value.id) ||
       typeof value.conversationId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(value.conversationId) ||
@@ -60,7 +67,7 @@ function translatedValue(value) {
   if (!value.enabled) throw new Error('当前账号未启用该方向翻译。')
   if (typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId)) throw new Error('翻译回执编号无效。')
   const media = mediaValue(value.media)
-  return { enabled: true, text: draftTextValue(value.text, media), requestId: value.requestId, ...(media ? { media } : {}), ...(value.untranslated === true ? { untranslated: true } : {}) }
+  return { enabled: true, text: translatedTextValue(value.text, media), requestId: value.requestId, ...(media ? { media } : {}), ...(value.untranslated === true ? { untranslated: true } : {}) }
 }
 
 class NativeBusyError extends Error {
@@ -101,7 +108,7 @@ class NativeClient {
     // that could begin billing only after its UI has already timed out.
     if (this.pending.size !== 0) return Promise.reject(new NativeBusyError())
     const id = this.randomId(), message = { v: 1, id, op, ...(pairToken ? { pairToken } : {}), ...(payload ? { payload } : {}) }
-    if (!validId(id) || new TextEncoder().encode(JSON.stringify(message)).length > 65536) return Promise.reject(new Error('请求格式无效。'))
+    if (!validId(id) || new TextEncoder().encode(JSON.stringify(message)).length > 128 * 1024) return Promise.reject(new Error('请求格式无效。'))
     return new Promise((resolve, reject) => {
       // A UI timeout is not proof that the host stopped. Keep its slot occupied
       // until a late correlated receipt or disconnect arrives; do not replay.
@@ -118,6 +125,7 @@ const hasForbiddenHan = (text, language) => !/^(zh|ja)(?:-|$)/i.test(language) &
 const sameTarget = (a, b) => a && b && a.conversationId === b.conversationId && JSON.stringify(a.context) === JSON.stringify(b.context) && a.composer === b.composer && a.sendButton === b.sendButton
 const sameMedia = (a, b) => JSON.stringify(a?.media) === JSON.stringify(b?.media) && a?.mediaRevision === b?.mediaRevision
 const sameDraft = (a, b) => sameTarget(a, b) && sameMedia(a, b) && a.text === b.text && a.revision === b.revision
+const assertSendReady = original => { if (original.sendButton?.disabled || original.sendButton?.getAttribute?.('aria-disabled') === 'true') throw new Error('Google Voice 发送按钮暂不可用。请保留草稿，等待图片或网络恢复后重新预览。') }
 const mediaFields = original => ({ ...(original.media ? { media: mediaValue(original.media) } : {}), ...(original.context ? { context: recipientContextValue(original.context) } : {}) })
 
 /**
@@ -150,7 +158,10 @@ class SendGuard {
     if (['preparing', 'authorizing'].includes(this.state)) throw new Error('当前请求处理中，不可重复发送。')
     const original = this.adapter.snapshot()
     if (!original) throw new Error('无法确认当前对话和输入框，已阻止翻译发送。')
-    draftTextValue(original.text, mediaValue(original.media))
+    // A draft may contain an expanded, already-paid translation after an
+    // interrupted send. Reconcile that receipt before applying the narrower
+    // source limit to any NEW translation request.
+    translatedTextValue(original.text, mediaValue(original.media))
     if (this.state === 'uncertain') {
       if (this.job && this.job.original.conversationId === original.conversationId && sameMedia(this.job.original, original) && [this.job.original.text, this.job.translated?.text].includes(original.text)) throw new Error('当前请求待确认，不可重复发送。')
       this.state = 'idle'; this.job = null
@@ -172,6 +183,8 @@ class SendGuard {
         }
         if (pending.state !== 'clear') throw new Error('无法核对此前发送状态。')
       }
+      draftTextValue(original.text, mediaValue(original.media))
+      assertSendReady(original)
       if (this.bridge.logicalId) {
         const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
         this.assertPreviewCurrent(revision)
@@ -179,6 +192,7 @@ class SendGuard {
         job.id = result.id
       }
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('草稿或会话已变化，未提交翻译。')
+      assertSendReady(original)
       const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
       const translated = translatedValue(await this.bridge.translate(payload))
       this.assertPreviewCurrent(revision)
@@ -195,6 +209,7 @@ class SendGuard {
     if (this.state !== 'preview' || !this.job?.translated) throw new Error('请先成功翻译并确认预览。')
     const job = this.job, original = job.original, revision = this.previewRevision
     if (!sameDraft(original, this.adapter.snapshot())) { this.state = 'failed'; throw new Error('草稿已变化，已阻止发送。') }
+    assertSendReady(original)
     this.state = 'authorizing'
     try {
       // Host must validate current owner/record/language/wallet/settled translation.
@@ -273,6 +288,15 @@ const cssImageToken = value => {
   return match ? match[1].toLowerCase() + ';' + match[2] : null
 }
 const identicalPreviewTokens = (a, b) => a.length === b.length && a.every((value, index) => value === b[index])
+const actionSelector = 'button,[role="button"],input[type="submit"],input[type="image"],input[type="button"]'
+const attachmentControl = control => control.matches('gv-send-attachment-list span.close-icon-overlay[role="button"]') ||
+  control.matches('button') && /^(?:Add image|添加图片|新增圖片|Remove image|移除图片|删除图片|移除圖片|刪除圖片)$/i.test(control.getAttribute('aria-label') || '')
+const actionableControl = control => {
+  if (control.closest('[hidden],[inert]') || control.matches(':disabled') || !control.getClientRects().length) return false
+  const style = control.ownerDocument.defaultView.getComputedStyle(control)
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+}
+const visibleProgress = entry => [...entry.querySelectorAll('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')].some(node => node.getClientRects().length > 0)
 const recipientNumber = text => {
   const value = (text || '').replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim()
   if (!/^[+()\d\s.\-]+$/.test(value)) return null
@@ -387,7 +411,7 @@ class GoogleVoiceDomAdapter {
     const previews = css.previews
     if (!previews.length) return null
     if (!record || record.cleared || !record.knownFiles?.length) return { error: '图片未能与所选文件核对，请移除草稿图片后重新选择。' }
-    if (previews.some(preview => preview.pending) || entry.querySelector('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')) return { error: Date.now() <= record.deadline ? '图片仍在准备，请等官方预览完成。' : '图片预览未能完成，请移除后重新选择较小图片。' }
+    if (previews.some(preview => preview.pending) || visibleProgress(entry)) return { error: Date.now() <= record.deadline ? '图片仍在准备，请等官方预览完成。' : '图片预览未能完成，请移除后重新选择较小图片。' }
     const tokens = previews.map(preview => preview.token)
     const mapped = tokens.map(token => record.knownFiles.find(file => file.token === token))
     if (mapped.some(file => !file)) return { error: '图片预览与所选文件无法核对，请移除后重新选择较小图片。' }
@@ -419,7 +443,7 @@ class GoogleVoiceDomAdapter {
     const files = [...entry.querySelectorAll('input[type="file"]')].flatMap(input => [...input.files || []])
     if (!record && imageFiles(files)) { this.captureFiles(entry, files); record = this.attachments.get(entry) }
     const css = this.cssPreviews(entry)
-    const hasProgress = [...entry.querySelectorAll('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')].some(node => node.getClientRects().length)
+    const hasProgress = visibleProgress(entry)
     const previewsRemoved = !previews.length && !css?.error && !css?.previews?.length && !hasProgress
     if (record && !record.cleared && previewsRemoved && (record.removeRequested || record.seenPreview && !record.selectionPending)) record = this.clearAttachments(entry, record)
     if (record?.error) return { error: record.error }
@@ -430,7 +454,7 @@ class GoogleVoiceDomAdapter {
       return { mediaRevision: record?.revision || 0 }
     }
     if (!record?.media || record.cleared || previews.length !== record.media.count) return { error: '无法核实全部图片，请移除草稿图片后重新选择。' }
-    if (entry.querySelector('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')) return { error: '图片仍在准备，请等官方预览完成。' }
+    if (hasProgress) return { error: '图片仍在准备，请等官方预览完成。' }
     if (previews.some(image => !image.getClientRects().length || !image.complete || image.naturalWidth < 1)) return { error: '图片预览尚未加载完成，请稍候。' }
     const signature = JSON.stringify(previews.map(image => image.currentSrc || image.getAttribute('src') || ''))
     if (!record.seenPreview && record.initialPreviews.length && record.previousFingerprint !== record.media.fingerprint && previews.every(image => record.initialPreviews.some(before => before.image === image && before.src === (image.currentSrc || image.getAttribute('src') || '')))) return { error: '正在等待所选图片的官方预览，请稍候。' }
@@ -470,10 +494,14 @@ class GoogleVoiceDomAdapter {
     const recipients = this.recipients(), route = recipients ? JSON.stringify([recipients.path, 'draft', recipients.signature]) : this.route(), thread = one(this.document, 'gv-thread-details'), entry = one(this.document, 'gv-message-entry')
     if (!route || !thread || !entry || !recipients && this.document.querySelector('gv-message-party-picker')) { this.reason = '请先选择短信会话，或完整选定 1–7 位收件人；待输入号码与未识别收件人不会发送。'; return null }
     const composer = one(entry, 'textarea.message-input'), sendButton = one(entry, 'button.send-button')
-    if (!composer || !sendButton || composer.disabled || composer.readOnly || composer.getAttribute('aria-readonly') !== 'false' || composer.closest('form')) return null
+    if (!composer || !sendButton || composer.closest('form')) { this.reason = '当前短信编辑器或发送按钮未识别，已阻止发送；请保留草稿。'; return null }
+    // Native readOnly/disabled properties are authoritative. ARIA is optional
+    // on a textarea; its absence must not make an otherwise valid editor fail.
+    const ariaReadOnly = composer.getAttribute('aria-readonly')
+    if (composer.disabled || composer.readOnly || ariaReadOnly !== null && ariaReadOnly !== 'false') { this.reason = '短信编辑器暂不可输入，请等待页面恢复后重试。'; return null }
     // Stable custom element/class selectors identify the send surface across
     // localized labels. Image controls remain inside the native actions area.
-    if ([...entry.querySelectorAll('button')].some(button => button !== sendButton && !button.closest('gv-message-actions') && !/^(?:Add image|添加图片|新增圖片|Remove image|移除图片|删除图片|移除圖片|刪除圖片)$/i.test(button.getAttribute('aria-label') || ''))) { this.reason = '当前编辑器有未识别的操作控件，请保留草稿。'; return null }
+    if ([...entry.querySelectorAll(actionSelector)].some(control => control !== sendButton && actionableControl(control) && !attachmentControl(control))) { this.reason = '当前编辑器有未识别的操作控件，已阻止发送；请保留草稿。'; return null }
     const attachment = this.attachmentSnapshot(entry)
     if (entry.querySelector('video,audio')) { this.reason = '当前仅支持官方图片短信，视频和音频附件不能在此发送。'; return null }
     if (attachment.error) { this.reason = attachment.error; return null }
@@ -506,10 +534,21 @@ class GoogleVoiceDomAdapter {
       this.captureFiles(entry, files)
       return null
     }
-    if (event.type === 'click' && target.closest('button.send-button')) return target.closest('button.send-button') === this.allowedButton ? null : 'send'
+    const control = target.closest(actionSelector)
+    if (control && (event.type === 'click' || ['keydown', 'keyup', 'keypress'].includes(event.type) && ['Enter', ' '].includes(event.key))) {
+      if (control.matches('button.send-button')) return control === this.allowedButton ? null : 'send'
+      if (!attachmentControl(control)) return 'unrecognized-control'
+    }
     if (event.type === 'submit') return 'send'
-    if (!target.matches('textarea.message-input')) return null
-    if ((event.key === 'Enter' && (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey)) || event.type === 'beforeinput' && event.inputType === 'insertParagraph') return 'send'
+    // A renamed editor must still be intercepted. Only inspect() may decide
+    // whether its target is known well enough to prepare or confirm a send.
+    const editor = target.closest('textarea,[contenteditable]:not([contenteditable="false"])')
+    if (!editor) return null
+    if ((event.key === 'Enter' && (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey)) || event.type === 'beforeinput' && event.inputType === 'insertParagraph') {
+      // Catch an unknown input without substituting another known draft. An
+      // event from a second editor is never intent to send the primary one.
+      return editor === one(entry, 'textarea.message-input') ? 'send' : 'unrecognized-editor'
+    }
     return null
   }
   isSendEvent(event) { return this.eventIntent(event) === 'send' }
@@ -543,7 +582,7 @@ class GoogleVoiceDomAdapter {
   }
   dispatch(current) {
     const now = this.snapshot()
-    if (!now || now.conversationId !== current.conversationId || now.composer !== current.composer || now.sendButton !== current.sendButton || now.text !== current.text || !sameAdapterMedia(current, now) || now.sendButton.disabled) throw new Error('发送前页面已变化，请核对草稿。')
+    if (!now || now.conversationId !== current.conversationId || now.composer !== current.composer || now.sendButton !== current.sendButton || now.text !== current.text || !sameAdapterMedia(current, now) || now.sendButton.disabled || now.sendButton.getAttribute('aria-disabled') === 'true') throw new Error('发送前页面已变化，请核对草稿。')
     this.allowedButton = now.sendButton
     try { now.sendButton.click() } finally { this.allowedButton = null }
   }
@@ -584,18 +623,26 @@ class GoogleVoiceDomAdapter {
 
 
 /** Shared isolated-world UI. The transport is supplied by the extension or preload. */
-function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
+function installGoogleVoiceRuntime({ sendRequest, subscribe, onHealth } = {}) {
   if (window !== window.top || location.origin !== 'https://voice.google.com' || typeof sendRequest !== 'function') return null
   const documentTicket = crypto.randomUUID(), logicalIds = new Map(), messages = new Map(), elementKeys = new WeakMap()
   const adapter = new GoogleVoiceDomAdapter(document, location)
-  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoBusy = false, disposed = false, restoreListener, currentUrl = location.href
-  let historyBaseline, statusReady = false, statusError = false
+  let panel, panelLifecycle, pending, bar, guard, guardConversation, runtimeStatus, statusAt = 0, scanTimer, scanBusy = false, epoch = 0, autoFlight, disposed = false, restoreListener, currentUrl = location.href
+  let historyBaseline, historyFlight, statusReady = false, statusError = false, statusFlight, lastHealth = ''
+  function health(phase, code, messageCount = 0) {
+    const value = { phase, code, messageCount: Math.min(500, messageCount) }, signature = JSON.stringify(value)
+    if (disposed || signature === lastHealth) return
+    lastHealth = signature
+    // Optional, bounded diagnostics contain no page text, recipients or URLs.
+    try { onHealth?.(value) } catch { /* reporting must never stop translation */ }
+  }
   const removers = []
   function listen(target, type, handler, capture = false) { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)) }
   function invalidate() {
-    epoch++; runtimeStatus = null; statusAt = 0; statusReady = false; statusError = false; historyBaseline = null; guard?.invalidate(); guard = null; guardConversation = null; pending = null
+    epoch++; runtimeStatus = null; statusAt = 0; statusReady = false; statusError = false; statusFlight = null; autoFlight = null; historyFlight = null; historyBaseline = null; guard?.invalidate(); guard = null; guardConversation = null; pending = null
     removeMessageViews(); panelLifecycle?.dismiss(); panelLifecycle = null; panel?.remove(); panel = null
     currentUrl = location.href
+    health('waiting', 'waiting')
     if (!disposed) scheduleScan()
   }
   function checkNavigation() { if (currentUrl !== location.href) invalidate() }
@@ -695,6 +742,8 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     if (!intent) return
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
     if (intent === 'attachment') { showError(new Error('仅支持 JPEG、PNG、GIF 或 BMP 图片，最多 10 张、合计 20 MB；单张 GIF 不超过 2 MB。视频和音频附件不在此发送范围内。')); return }
+    if (intent === 'unrecognized-control') { if (!['keyup', 'keypress'].includes(type)) showError(new Error('当前短信编辑器有未识别的操作控件，已阻止此操作。请保留草稿并刷新页面后重试。')); return }
+    if (intent === 'unrecognized-editor') { if (!['keyup', 'keypress', 'beforeinput'].includes(type)) showError(new Error('当前操作来自未识别的输入框，已阻止发送；不会使用其他输入框的草稿代替。请保留内容并刷新页面后重试。')); return }
     if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.altKey || event.metaKey || type === 'keyup' || type === 'keypress' || type === 'beforeinput') return
     void prepareOutgoing().catch(showError)
   }, true)
@@ -789,7 +838,8 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     renderMessageViews(state)
     return state
   }
-  async function observeNewMessages(items) {
+  async function observeNewMessages(items, previousKeys) {
+    const observedEpoch = epoch
     if (runtimeStatus?.historyMode !== 'new' || !runtimeStatus.newMessageTracking || !runtimeStatus.receiveAutoTranslate || runtimeStatus.translationsVisible === false) { historyBaseline = null; return }
     if (!statusReady || !items.length) return
     const first = items[0], before = historyBaseline
@@ -799,15 +849,17 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
       historyBaseline = null
       if (items.length > 500) return
       const reply = await request('history-baseline', { conversationId: first.conversationId, ids: items.map(item => item.id) })
+      if (disposed || observedEpoch !== epoch) return
       if (!validId(reply?.token) || !Number.isSafeInteger(reply.startedAt) || !Number.isSafeInteger(reply.expiresAt) || reply.expiresAt <= Date.now() || reply.anchorId !== items[items.length - 1].id || !items.every(item => adapter.validMessage(item))) return
       const settled = await adapter.messages()
+      if (disposed || observedEpoch !== epoch) return
       if (settled.length !== items.length || settled.some((item, index) => item.id !== items[index].id || item.thread !== first.thread)) { scheduleScan(); return }
       historyBaseline = { ...reply, thread: first.thread, conversationId: first.conversationId, tailId: reply.anchorId, seen: new Set(items.map(item => item.id)), eligible: new Set() }
       return
     }
     const tail = items.findIndex(item => item.id === before.tailId)
     for (let index = 0; index < items.length; index++) {
-      const item = items[index], previousKey = elementKeys.get(item.element)
+      const item = items[index], previousKey = previousKeys.get(item.element)
       // A prepend, rerender or recycled DOM node is not a newly received SMS.
       // Main additionally proves timestamp freshness against its own baseline.
       if (!before.seen.has(item.id) && index > tail && item.direction === 'incoming' && (!previousKey || previousKey === item.conversationId + ':' + item.id)) before.eligible.add(item.id)
@@ -822,14 +874,26 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     scanBusy = true
     const startedEpoch = epoch
     try {
-      const supported = await adapter.refresh()
+      // Keep the UI and read-only history alive when a changed composer or an
+      // attachment throws during inspection. Sending still requires refresh
+      // and an exact snapshot; no guessed controls are authorized here.
+      toolbar(false)
+      let supported = false, editorFailed = false
+      try { supported = await adapter.refresh() } catch {
+        adapter.current = null; editorFailed = true
+        adapter.reason = '短信编辑器暂未识别，发送已暂停；已有消息仍可翻译。'
+      }
       if (disposed || startedEpoch !== epoch) return
       toolbar(supported)
       // Incoming history remains readable while a draft is uploading, a
       // composer is disabled, or an unknown send surface is safely blocked.
-      if (Date.now() - statusAt > 10000 && !autoBusy && !['preparing', 'authorizing'].includes(guard?.state)) {
+      if (Date.now() - statusAt > 10000 && !statusFlight && !autoFlight && !['preparing', 'authorizing'].includes(guard?.state)) {
         statusAt = Date.now()
-        try {
+        const flight = {}; statusFlight = flight
+        // A slow/lost status reply must not hide message controls or hold the
+        // DOM scanner for the entire IPC timeout. Automatic translation waits
+        // for a verified status; manual controls remain available meanwhile.
+        void (async () => { try {
           const next = await bridge.status()
           if (disposed || startedEpoch !== epoch) return
           if (runtimeStatus && runtimeStatus.localLanguage !== next.localLanguage) invalidate()
@@ -842,12 +906,37 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
           // Keep its display but pause automatic work until status is fresh.
           if (error?.code === 'busy') statusAt = Date.now() - 9000
           else { runtimeStatus = null; historyBaseline = null }
-        }
-        toolbar(supported)
+        } finally { if (statusFlight === flight) statusFlight = null; scheduleScan() } })()
       }
       const items = await adapter.messages()
       if (disposed || startedEpoch !== epoch) return
-      try { await observeNewMessages(items) } catch (error) { if (error?.code === 'busy') scheduleScan(); else historyBaseline = null }
+      const previousKeys = new Map(items.map(item => [item.element, elementKeys.get(item.element)]))
+      // Paint controls before any history-baseline or translation request.
+      for (const item of items) if (adapter.validMessage(item)) addMessage(item)
+      const unrecognizedText = !!adapter.route() && !items.length && [...document.querySelectorAll('gv-message-list gv-message-item gv-annotation.content')].some(node => node.getClientRects().length && node.textContent?.trim())
+      if (editorFailed) health('error', 'editor-unrecognized', items.length)
+      else if (statusError) health('error', 'status-unavailable', items.length)
+      else if (unrecognizedText) health('error', 'message-unrecognized')
+      else if (!statusReady) health('waiting', 'waiting', items.length)
+      else if (!runtimeStatus?.connected) health('error', 'status-unavailable', items.length)
+      else if (runtimeStatus?.translationsVisible === false) health('ready', 'translations-hidden', items.length)
+      else if (!runtimeStatus?.receiveAutoTranslate) health('ready', 'translation-disabled', items.length)
+      else if (runtimeStatus?.historyMode !== 'visible') health('ready', 'manual-mode', items.length)
+      else if (!supported && document.querySelector('gv-message-entry')) health('ready', 'editor-unrecognized', items.length)
+      else if (items.length || supported) health('ready', 'ready', items.length)
+      else health('waiting', 'waiting')
+      if (!historyFlight) {
+        const flight = {}, baseline = historyBaseline, eligible = baseline?.eligible.size
+        historyFlight = flight
+        void observeNewMessages(items, previousKeys).catch(error => {
+          if (disposed || epoch !== startedEpoch || historyFlight !== flight) return
+          if (error?.code === 'busy') scheduleScan(); else historyBaseline = null
+        }).finally(() => {
+          if (historyFlight !== flight) return
+          historyFlight = null
+          if (historyBaseline !== baseline || historyBaseline?.eligible.size !== eligible) scheduleScan()
+        })
+      }
       if (disposed || startedEpoch !== epoch) return
       let nextAuto
       for (const item of items) {
@@ -857,9 +946,19 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
         const automatic = runtimeStatus?.historyMode === 'visible' || runtimeStatus?.historyMode === 'new' && historyBaseline?.eligible.has(item.id)
         if (!nextAuto && automatic && state && !state.work && !state.text && !state.error && !state.deferred && (!state.retryAfter || Date.now() >= state.retryAfter) && item.automatic && (runtimeStatus?.historyMode === 'new' || adapter.visibleMessage(item))) nextAuto = item
       }
-      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && navigator.onLine !== false && document.visibilityState === 'visible' && !autoBusy && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
-        autoBusy = true
-        try { await translateMessage(nextAuto, false) } finally { autoBusy = false; scheduleScan() }
+      if (nextAuto && statusReady && runtimeStatus?.connected && runtimeStatus.receiveAutoTranslate && runtimeStatus.translationsVisible !== false && navigator.onLine !== false && document.visibilityState === 'visible' && !autoFlight && !['preparing', 'authorizing', 'preview'].includes(guard?.state)) {
+        const flight = {}; autoFlight = flight
+        // One automatic translation at a time, without freezing discovery of
+        // newly rendered messages while the provider is responding.
+        void translateMessage(nextAuto, false).catch(() => { if (!disposed && startedEpoch === epoch) health('error', 'scan-failed', items.length) })
+          .finally(() => { if (autoFlight === flight) autoFlight = null; scheduleScan() })
+      }
+    } catch {
+      if (!disposed && startedEpoch === epoch) {
+        adapter.current = null
+        adapter.reason = '页面翻译暂未恢复，请保留草稿后刷新页面。'
+        health('error', 'scan-failed')
+        toolbar(false)
       }
     } finally { scanBusy = false }
   }
@@ -880,10 +979,11 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     // BFCache resumes a document without running its preload/content script
     // again. Reinstall the same isolated guard before the restored page is used.
     if (event.persisted) {
-      restoreListener = () => { restoreListener = null; installGoogleVoiceRuntime({ sendRequest, subscribe }) }
+      restoreListener = () => { restoreListener = null; installGoogleVoiceRuntime({ sendRequest, subscribe, onHealth }) }
       window.addEventListener('pageshow', restoreListener, { once: true })
     }
   })
+  health('waiting', 'waiting')
   scheduleScan()
 
   const unsubscribe = subscribe?.((message, reply = () => {}) => {
@@ -900,7 +1000,7 @@ function installGoogleVoiceRuntime({ sendRequest, subscribe } = {}) {
     if (message.type !== 'selection.result' || !pending || message.id !== pending.id || message.ticket !== pending.ticket) return
     pending = null
     const value = typeof message.text === 'string' ? message.text : message.error
-    if (typeof value !== 'string' || Array.from(value).length > 8000) return
+    if (typeof value !== 'string' || value.length > 20000) return
     showPanel(message.error ? 'HelloDog · 翻译未完成' : 'HelloDog · 选中文字翻译', value, [], '仅预览，不会自动填写或发送。发送保护仅适用于已识别的纯文本短信编辑器。')
   })
   function dispose() {

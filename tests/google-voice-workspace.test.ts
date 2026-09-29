@@ -43,6 +43,28 @@ test('provider switching is window-local and preserves the page, draft and check
   voice.dispose()
 })
 
+test('unchanged window configuration preserves page state and last network diagnostic without refocusing', async () => {
+  const h = fixture(); await h.voice.enter()
+  const proxy = { enabled: true, protocol: 'http' as const, host: 'proxy.invalid', port: 3128 }
+  await h.voice.configure('one', { proxy })
+  h.voice.acceptState({ id: 'one', state: 'ready', page: 'messages', network: { mode: 'proxy', status: 'checked', ip: '192.0.2.1' } })
+  const before = h.calls.length
+  assert.equal(await h.voice.configure('one', { label: 'Renamed', proxy: { ...proxy, password: '' } }), true)
+  assert.equal(h.calls.length, before); assert.equal(h.voice.page.value, 'messages')
+  assert.equal(h.voice.network.value?.ip, '192.0.2.1'); assert.equal(h.voice.selected.value?.label, 'Renamed')
+  h.voice.dispose()
+})
+
+test('a synchronously unavailable bridge releases the write lock so a later save can recover', async () => {
+  const h = fixture(); await h.voice.enter()
+  const saved = h.api.updateGoogleVoiceWindow
+  h.api.updateGoogleVoiceWindow = () => { throw new Error('Bridge unavailable') }
+  assert.equal(await h.voice.rename('one', 'First'), false); assert.equal(h.voice.busy.value, false)
+  h.api.updateGoogleVoiceWindow = saved
+  assert.equal(await h.voice.rename('one', 'Recovered'), true); assert.equal(h.voice.selected.value?.label, 'Recovered')
+  h.voice.dispose()
+})
+
 test('home inventory never opens a page and a late read cannot remove a newly created window', async () => {
   const {voice,calls,api}=fixture()
   await voice.listForHome();assert.equal(voice.windows.value.length,2);assert.equal(calls.length,0);assert.equal(voice.active.value,false)
@@ -56,7 +78,7 @@ test('page notices separate official access guidance and login from text-page av
   const { voice } = fixture(); await voice.enter()
   assert.equal(voice.page.value, 'unknown'); assert.doesNotMatch(voice.translationNotice.value, /已内置|翻译已就绪/)
   voice.acceptState({ id: 'one', state: 'ready', page: 'messages' })
-  assert.match(voice.translationNotice.value, /短信页面已打开/)
+  assert.match(voice.translationNotice.value, /翻译正在准备/)
   voice.acceptState({ id: 'one', state: 'ready', page: 'access-help' })
   assert.match(voice.translationNotice.value, /Google 显示访问限制说明.*核对账号状态/)
   assert.doesNotMatch(voice.translationNotice.value, /封禁|已内置|翻译已就绪/)
@@ -68,6 +90,24 @@ test('page notices separate official access guidance and login from text-page av
   assert.match(voice.translationNotice.value, /请完成 Google 登录或验证/)
   voice.acceptState({ id: 'one', state: 'loading', page: 'messages' })
   assert.equal(voice.page.value, 'unknown'); assert.match(voice.translationNotice.value, /尚未就绪/)
+  voice.dispose()
+})
+
+test('translation status explains runtime failures and preferences without replacing login guidance', async () => {
+  const { voice } = fixture(); await voice.enter()
+  const cases = [
+    ['preload-failed', /翻译未能启动/], ['runtime-unavailable', /翻译未能启动/], ['scan-failed', /未能识别当前会话/],
+    ['editor-unrecognized', /短信输入框暂未识别.*已有消息仍可翻译/], ['message-unrecognized', /可翻译的文字/], ['status-unavailable', /翻译设置尚未连接/],
+    ['translation-disabled', /自动翻译已关闭/], ['translations-hidden', /译文已隐藏/], ['manual-mode', /历史消息不会自动翻译/]
+  ] as const
+  for (const [code, text] of cases) {
+    voice.acceptState({ id: 'one', state: 'ready', page: 'messages', runtimeHealth: { phase: 'error', code, messageCount: 2 } })
+    assert.match(voice.translationNotice.value, text)
+  }
+  voice.acceptState({ id: 'one', state: 'ready', page: 'sign-in', runtimeHealth: { phase: 'error', code: 'preload-failed', messageCount: 0 } })
+  assert.match(voice.translationNotice.value, /请完成 Google 登录或验证/)
+  voice.acceptState({ id: 'one', state: 'ready', page: 'messages', runtimeHealth: { phase: 'ready', code: 'ready', messageCount: 1, text: 'private' } })
+  assert.equal(voice.runtimeHealth.value, undefined); assert.match(voice.translationNotice.value, /翻译正在准备/)
   voice.dispose()
 })
 
@@ -186,6 +226,24 @@ test('Refresh and independent-window actions stay on the selected Voice window',
   await voice.external()
   assert.deepEqual(calls.at(-1), ['external', 'one'])
   assert.equal(voice.state.value, 'idle')
+  voice.dispose()
+})
+
+test('Duplicate refresh actions are coalesced without blocking another window or stealing its state', async () => {
+  const { voice, api, calls } = fixture()
+  await voice.enter()
+  const gate = deferred<unknown>()
+  api.refreshGoogleVoiceWindow = async id => { calls.push(['refresh', id]); return gate.promise }
+  const first = voice.refresh()
+  await voice.refresh()
+  assert.equal(calls.filter(call => call[0] === 'refresh').length, 1)
+  await voice.focus('two')
+  gate.resolve({ state: 'error', message: 'Old refresh failed' }); await first
+  assert.equal(voice.selectedId.value, 'two'); assert.equal(voice.state.value, 'ready')
+  await voice.focus('one')
+  api.refreshGoogleVoiceWindow = async id => { calls.push(['refresh', id]); return { state: 'ready' } }
+  await voice.refresh()
+  assert.equal(calls.filter(call => call[0] === 'refresh').length, 2)
   voice.dispose()
 })
 

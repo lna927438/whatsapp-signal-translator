@@ -8,6 +8,7 @@ import type { AccountRecord } from '../../types'
 import { setAccountState, setExternalMetrics } from '../../runtimeHealth'
 import { updateAccountUnread, notifyAccount } from '../../desktopRuntime'
 import { signalTranslationErrorMessage } from './signalTranslationErrors'
+import { decodeSignalVoiceRequest, type DesktopVoiceRequest, type DesktopVoiceResult } from './signalDesktopVoice'
 
 export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number; authorizationOnly?: boolean; requestId?: string; translated?: string }
 type Instance = { owner: string; accountId: string; child: ChildProcess; helper?: ChildProcess; state: 'starting' | 'ready' | 'failed' | 'stopped'; error?: string; version?: string; startedAt: number; visible?: boolean; boundsKey?: string; pending?: number; view?: string; startupTimer?: ReturnType<typeof setTimeout>; refresh?: { id:string; work:Promise<void>; finish:(error?:boolean)=>void } }
@@ -30,7 +31,8 @@ export class SignalDesktopHost {
   private bounds = {x:0,y:0,width:800,height:600}
   constructor(private window: BrowserWindow, private owner: () => string,
     private translate: (accountId:string, request:DesktopTranslationRequest, startedAt:number) => Promise<unknown>,
-    private contentLifecycle?: (owner:string, accountId:string, updates:Array<{id:string;conversationId:string;expiresAt:number}>)=>Promise<void>) {
+    private contentLifecycle?: (owner:string, accountId:string, updates:Array<{id:string;conversationId:string;expiresAt:number}>)=>Promise<void>,
+    private voice?: (accountId:string, request:DesktopVoiceRequest, authorized:()=>boolean)=>Promise<DesktopVoiceResult>) {
     window.on('hide',()=>this.updateVisibility())
     window.on('show',()=>this.updateVisibility())
     window.on('resize',()=>this.updateVisibility())
@@ -87,6 +89,8 @@ export class SignalDesktopHost {
     const current=()=>this.instances.get(record.id)===item&&owner===this.owner()
     const publish=()=>{if(!this.window.isDestroyed())this.window.webContents.send('signal-desktop:status',{accountId:record.id,...this.status(record.id)})}
     const reply=(value:any)=>{if(current()&&child.connected)child.send({channel:'hellodog',...value})}
+    let voiceBusy = false
+    const voiceTasks = new Map<string, { expiresAt: number; revoked: boolean }>()
     item.startupTimer=setTimeout(()=>{if(current()&&item.state==='starting'){item.state='failed';item.error='Signal 启动超时，数据已保留，请重新打开。';publish()}},90000)
     item.startupTimer.unref()
     child.on('message',(raw:any)=>{
@@ -94,6 +98,10 @@ export class SignalDesktopHost {
       if(raw.type==='unread'&&Number.isSafeInteger(raw.count)&&raw.count>=0&&raw.count<=99999){updateAccountUnread(record.id,raw.count);this.window.webContents.send('accounts:unread',{accountId:record.id,count:raw.count})}
       if(raw.type==='notification')notifyAccount(record.id,record.label,{silent:raw.silent===true?true:undefined})
       if(raw.type==='privacy' && this.contentLifecycle && Array.isArray(raw.updates) && raw.updates.length <= 100 && raw.updates.every((value:any)=>value && /^[\w-]{1,100}$/.test(value.id) && /^[\w-]{1,100}$/.test(value.conversationId) && Number.isSafeInteger(value.expiresAt) && value.expiresAt >= 0)) {
+        for (const update of raw.updates) {
+          const task = voiceTasks.get(JSON.stringify([update.conversationId, update.id]))
+          if (task) { task.revoked ||= update.expiresAt === 0; task.expiresAt = Math.min(task.expiresAt, update.expiresAt || Infinity) }
+        }
         void this.contentLifecycle(owner, record.id, raw.updates).then(()=>reply({type:'privacy-applied',updates:raw.updates}),()=>{
           item.error='本机译文清理未完成，正在保留原清理记录以便重试。';publish()
         })
@@ -126,6 +134,20 @@ export class SignalDesktopHost {
           // leak raw provider responses, stack traces, tokens or message text.
           reply({type:'translation',id:raw.id,error:signalTranslationErrorMessage(error)})
         })
+      }
+      if (raw.type === 'voice' && typeof raw.id === 'string' && /^[\w-]{1,100}$/.test(raw.id)) {
+        if (!this.voice || voiceBusy) { reply({type:'voice-result',id:raw.id,error:'上一条语音正在处理，请稍后重试。'}); return }
+        let request: DesktopVoiceRequest
+        try { request = decodeSignalVoiceRequest(raw.request) } catch { reply({type:'voice-result',id:raw.id,error:'语音数据无效，请重新下载后重试。'}); return }
+        const scope = JSON.stringify([request.conversationId, request.id]), deadline = Date.now() + 300000
+        const task = { expiresAt: request.expiresAt ?? Infinity, revoked: false }
+        voiceTasks.set(scope, task); voiceBusy = true
+        const authorized = () => current() && child.connected && !task.revoked && task.expiresAt > Date.now() && Date.now() < deadline
+        let timer: ReturnType<typeof setTimeout> | undefined
+        void Promise.race([Promise.resolve().then(() => { if (!authorized()) throw new Error('expired'); return this.voice!(record.id,request,authorized) }),
+          new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),300000)})])
+          .then(result=>{if(authorized())reply({type:'voice-result',id:raw.id,result});else reply({type:'voice-result',id:raw.id,error:'语音已过期或账号状态已变化。'})},()=>reply({type:'voice-result',id:raw.id,error:'语音暂未转为中文，请稍后重试。原语音已保留。'}))
+          .finally(()=>{clearTimeout(timer); task.revoked=true; voiceTasks.delete(scope); voiceBusy=false})
       }
       if(raw.type==='conversation'&&typeof raw.context?.id==='string'&& /^[\w-]{1,100}$/.test(raw.context.id)){
         this.window.webContents.send('signal-desktop:conversation',{accountId:record.id,id:'signal-desktop:'+raw.context.id,name:String(raw.context.name||'Signal').slice(0,150)})

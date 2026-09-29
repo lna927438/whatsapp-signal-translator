@@ -40,3 +40,15 @@ test('unknown counts reset notification baseline, window cleanup is independent 
   tracker.clear()
   assert.deepEqual(tracker.observe('b', sample(3, 1)), { count: 3, increased: false })
 })
+
+test('an ambiguous same-document account transition stays badge-only until a full document replacement', () => {
+  const tracker = new GoogleVoiceUnread()
+  tracker.observe('window', sample(1, 1))
+  assert.deepEqual(tracker.observe('window', { ...sample(1, 2), notificationsSuppressed: true }), undefined)
+  assert.deepEqual(tracker.observe('window', { ...sample(5, 3), notificationsSuppressed: true }), { count: 5, increased: false })
+  assert.deepEqual(tracker.observe('window', sample(6, 4)), { count: 6, increased: false }, 'suppression cannot be removed by a later message from the same document')
+  assert.deepEqual(tracker.observe('window', { ...sample(7, 5), notificationsSuppressed: false }), { count: 7, increased: false })
+  assert.equal(tracker.observe('window', { ...sample(9, 6), notificationsSuppressed: 'false' }), undefined)
+  assert.deepEqual(tracker.observe('window', sample(7, 1, B)), { count: 7, increased: false })
+  assert.deepEqual(tracker.observe('window', sample(8, 2, B)), { count: 8, increased: true })
+})

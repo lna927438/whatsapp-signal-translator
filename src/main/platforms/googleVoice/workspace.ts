@@ -4,6 +4,7 @@ import { GoogleVoiceRecords, type GoogleVoiceRecord } from './windowRecords'
 import { GoogleVoiceEmbeddedViews, type GoogleVoiceEmbeddedOptions, type GoogleVoiceEmbeddedState, type GoogleVoiceTrustedPage } from './embeddedViews'
 import { testGoogleVoiceProxy } from './network'
 import { GoogleVoiceUnread } from './unread'
+import { googleVoiceProxyConnectionKey, googleVoiceProxyNeedsReconnect } from '../../../shared/googleVoiceWindowConfig'
 
 type Identity = { owner: string; authorized: () => boolean }
 type Bounds = { x: number; y: number; width: number; height: number }
@@ -99,7 +100,7 @@ export class GoogleVoiceWorkspace {
     if (this.window.isDestroyed() || !this.currentOwner(item.owner)) return
     const status = state.status === 'failed' ? 'error' : state.status
     const detail = message || (status === 'error' ? (state.network?.message || (state.network?.mode === 'proxy' ? '此窗口代理或页面连接失败，请检查 IP 设置后重试；不会自动切换为直连。' : `Google Voice 页面未能加载${state.origin ? '（' + state.origin + '）' : ''}，请重试。`)) : '')
-    this.window.webContents.send('google-voice:state', { id: state.windowId, state: status, page: state.page, message: detail, canGoBack: state.canGoBack, network: state.network })
+    this.window.webContents.send('google-voice:state', { id: state.windowId, state: status, page: state.page, message: detail, canGoBack: state.canGoBack, network: state.network, runtimeHealth: state.runtimeHealth })
   }
 
   async list() {
@@ -123,13 +124,19 @@ export class GoogleVoiceWorkspace {
     if (this.changing.has(id)) throw new Error('此窗口正在调整，请稍后重试。')
     this.changing.add(id)
     try {
+      const before = googleVoiceProxyConnectionKey((await this.records.get(identity.owner, id)).proxy)
+      this.requireAvailable(identity, lifecycle)
       const row = await this.records.update(identity.owner, id, { label: patch.label, proxy: patch.proxy, translationProvider:patch.translationProvider }); this.requireAvailable(identity, lifecycle)
-      if (patch.proxy !== undefined) {
+      const connectionChanged = patch.proxy !== undefined && googleVoiceProxyNeedsReconnect(before, row.proxy, patch.proxy as { password?: string; clearPassword?: boolean })
+      if (connectionChanged) {
         this.windowRevisions.set(id, (this.windowRevisions.get(id) || 0) + 1)
         if (this.active === id) this.hide()
         const item = this.instances.get(id)
         if (item?.owner === identity.owner) this.views?.close(identity.owner, id)
         this.instances.delete(id)
+      } else {
+        const item = this.instances.get(id)
+        if (item?.owner === identity.owner) item.record = row
       }
       return this.safe(row)
     } finally { this.changing.delete(id) }
@@ -199,7 +206,7 @@ export class GoogleVoiceWorkspace {
     try {
       this.active = id
       const state = previous ? views.focus(identity.owner, id) : views.create(identity.owner, id, { proxy: record.proxy, password })
-      return { state: state.status === 'failed' ? 'error' : state.status === 'closed' ? 'idle' : state.status, page: state.page, canGoBack: state.canGoBack, network: state.network }
+      return { state: state.status === 'failed' ? 'error' : state.status === 'closed' ? 'idle' : state.status, page: state.page, canGoBack: state.canGoBack, network: state.network, runtimeHealth: state.runtimeHealth }
     } catch {
       this.active = ''
       if (!previous) this.instances.delete(id)
@@ -233,17 +240,7 @@ export class GoogleVoiceWorkspace {
     const identity = this.identity(), lifecycle = this.lifecycle, revision = this.revision
     const record = await this.records.get(identity.owner, id); this.requireAvailable(identity, lifecycle)
     if (revision !== this.revision) return { state: 'cancelled' }
-    if (record.proxy?.enabled) {
-      if (this.changing.has(id)) throw new Error('此窗口正在调整，请稍后重试。')
-      this.changing.add(id)
-      try {
-        this.windowRevisions.set(id, (this.windowRevisions.get(id) || 0) + 1)
-        const item = this.instances.get(id)
-        if (item?.owner === identity.owner) this.views?.close(identity.owner, id)
-        this.instances.delete(id)
-      } finally { this.changing.delete(id) }
-      return this.focus(id)
-    }
+    if (this.changing.has(id)) throw new Error('此窗口正在调整，请稍后重试。')
     const result = await this.focus(id)
     if (result.state === 'cancelled' || !this.views || this.active !== id || !this.available(identity, lifecycle)) return { state: 'cancelled' }
     const item = this.instances.get(id)
@@ -315,6 +312,11 @@ export class GoogleVoiceWorkspace {
       this.instances.get(page.accountId) === item && item?.owner === page.owner && page.owner === identity.owner && page.authorized()
     if (!authorized()) throw new Error('Google Voice 页面或登录状态已变化。')
     return { owner: page.owner, accountId: page.accountId, url: page.url, authorized }
+  }
+
+  observeRuntimeHealth(event: IpcMainInvokeEvent, input: unknown): boolean {
+    const page = this.trustedPage(event)
+    return page.authorized() && Boolean(this.views?.observeRuntimeHealth(event, input))
   }
 
   detachAll(): Promise<void> {

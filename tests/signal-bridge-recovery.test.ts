@@ -89,5 +89,5 @@ test('a quick reply acknowledgement is bound to the originating native renderer 
   assert.equal(h.sent.length,0)
   h.ipc.emit('hellodog:draft-inserted',h.event,{id:'draft-a'})
   assert.equal(h.sent[0].type,'draft-inserted');assert.equal(h.sent[0].error,false)
-  assert.equal(h.reloads(),0);assert.equal(h.handlers.size,1)
+  assert.equal(h.reloads(),0);assert.deepEqual([...h.handlers.keys()].sort(),['hellodog:translate','hellodog:voice'])
 })

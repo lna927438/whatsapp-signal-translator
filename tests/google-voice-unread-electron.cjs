@@ -19,10 +19,10 @@ const syntheticHtml = (count, collapsed = false) => `<!doctype html><meta charse
 // workspace ownership, actual Electron senderFrame checks, tracker, shared
 // desktop count store and shell preload are all production code.
 ipcMain.handle('google-voice:unread', (event, message) => {
-  assert.deepEqual(Object.keys(message).sort(), ['count', 'documentId', 'sequence', 'source'])
+  assert.deepEqual(Object.keys(message).sort(), message.notificationsSuppressed === true ? ['count', 'documentId', 'notificationsSuppressed', 'sequence', 'source'] : ['count', 'documentId', 'sequence', 'source'])
   let accepted = false
   try { accepted = workspace.observeUnread(event, message) } catch { /* deliberately refused untrusted fixture */ }
-  reports.push({ source: message.source, documentId: message.documentId, sequence: message.sequence, count: message.count, accepted, contentsId: event.sender.id })
+  reports.push({ source: message.source, documentId: message.documentId, sequence: message.sequence, count: message.count, ...(message.notificationsSuppressed === true ? { notificationsSuppressed: true } : {}), accepted, contentsId: event.sender.id })
   if (accepted) activeEvents.set(event.sender.id, event)
   return accepted
 })
@@ -84,6 +84,41 @@ app.whenReady().then(async () => {
   assert.deepEqual(accountUnreadSnapshot(), { [A]: 2, [B]: 3 }); assert.equal(notifications.length, 1)
   checks.push('Collapsed navigation with strict official title contributes its unread count through the actual production preload and IPC without changing another account or announcing an initial baseline')
 
+  const b = pages.get(B), oldAccountDocument = reports.filter(report => report.contentsId === b.id && report.accepted).at(-1).documentId
+  await page(b, `history.pushState({},'', '/u/1/messages');dispatchEvent(new PopStateEvent('popstate'))`)
+  await until(() => reports.some(report => report.contentsId === b.id && report.accepted && report.documentId !== oldAccountDocument), 'route changes before its previous account DOM updates')
+  assert.equal(accountUnreadSnapshot()[B], 3)
+  await pause(850)
+  await page(b, `document.title='Voice - (8) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 8, 'same-document account switch baseline')
+  assert.equal(notifications.length, 1, 'old unread messages in another Google account are not new incoming messages')
+  const switchedDocument = reports.filter(report => report.contentsId === b.id && report.accepted).at(-1).documentId
+  assert.notEqual(switchedDocument, oldAccountDocument)
+  assert.equal(reports.filter(report => report.contentsId === b.id && report.accepted).at(-1).notificationsSuppressed, true)
+  await page(b, `document.title='Voice - (9) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 9, 'late count change remains badge-only after an unverified same-document account transition')
+  assert.equal(notifications.length, 1)
+  await page(b, `history.pushState({},'', '/u/0/messages');document.title='Voice - (3) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 3, 'returning account silent baseline')
+  assert.equal(notifications.length, 1)
+  await page(b, `dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}));dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));document.title='Voice - (4) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 4, 'BFCache-style observer reinstall retains suppression')
+  await page(b, `document.title='Voice - (5) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 5, 'count increases stay silent after observer reinstall')
+  assert.equal(notifications.length, 1)
+  assert.equal(reports.filter(report => report.contentsId === b.id && report.accepted).at(-1).notificationsSuppressed, true)
+  checks.push('Delayed DOM after same-document Google account changes remains badge-only through later count increases and BFCache-style observer reinstall, without guessing when the new account finished loading')
+
+  await b.reload()
+  await until(() => reports.some(report => report.contentsId === b.id && report.accepted && !report.notificationsSuppressed && report.documentId !== oldAccountDocument && report.documentId !== switchedDocument), 'full document reload restores a trusted silent baseline')
+  assert.equal(accountUnreadSnapshot()[B], 3); assert.equal(notifications.length, 1)
+  await page(b, `document.title='Voice - (4) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 4, 'new message after full reload')
+  assert.equal(notifications.length, 2); assert.equal(notifications[1].id, B)
+  await page(b, `document.title='Voice - (3) Messages'`)
+  await until(() => accountUnreadSnapshot()[B] === 3, 'count decrease after restored notifications')
+  checks.push('A complete reload establishes a new silent baseline and restores normal subsequent notifications without affecting another independent window')
+
   const aEvent = activeEvents.get(a.id)
   await a.loadURL('https://accounts.google.com/fixture')
   assert.throws(() => workspace.observeUnread(aEvent, { source: 'sms-navigation', documentId: randomUUID(), sequence: 1, count: 99 }), /变化|主页面|打开/)
@@ -106,7 +141,6 @@ app.whenReady().then(async () => {
   assert.deepEqual(accountUnreadSnapshot(), { [B]: 3 }); assert.equal(notifications[0].authorized(), false)
   checks.push('Closing one account clears its shell badge and store entry, revokes its pending notification action and preserves the other account')
 
-  const b = pages.get(B)
   await page(b, `document.title='Voice - Messages'`)
   await until(() => accountUnreadSnapshot()[B] === 0, 'collapsed zero through actual IPC')
   await until(async () => await page(shell.webContents, `unread[${JSON.stringify(B)}]`) === 0, 'zero clears collapsed badge')

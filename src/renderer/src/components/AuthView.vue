@@ -167,7 +167,7 @@ async function login() {
   if (busy.value) return
   busy.value = true; clearStatus()
   try {
-    if (!supabaseConfigured) throw new Error(t('在线账号配置尚未注入当前构建，请检查 GitHub Variables 后重新构建。'))
+    if (!supabaseConfigured) throw new Error(t('当前安装包缺少登录服务配置，请安装修正版后重试。'))
     const clean = cleanEmail(identifier.value)
     validateEmail(clean)
     const client = requireSupabase()
@@ -184,7 +184,7 @@ async function register() {
   if (busy.value) return
   busy.value = true; clearStatus()
   try {
-    if (!supabaseConfigured) throw new Error(t('在线账号配置尚未注入当前构建，请检查 GitHub Variables 后重新构建。'))
+    if (!supabaseConfigured) throw new Error(t('当前安装包缺少登录服务配置，请安装修正版后重试。'))
     const cleanUsername = username.value.trim()
     const clean = cleanEmail(email.value)
     if (cleanUsername.length < 3) throw new Error(t('用户名至少 3 个字符。'))

@@ -59,6 +59,7 @@ exports.makeSocksFixture = async function makeSocksFixture(backendPort, username
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   return {
     stats, server, port: server.address().port, setRejectAuth(value) { rejected = value },
+    dropConnections() { for (const socket of sockets) socket.destroy() },
     async close() { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)) }
   }
 }

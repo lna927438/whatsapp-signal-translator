@@ -8,7 +8,7 @@ import { voiceAudioWav } from '../../../shared/voiceAudio'
 const props = defineProps<{ accountId: string; peer: string; attachment: SignalAttachment; staged?: boolean; thumbnail?: boolean; gallery?: SignalMediaEntry[]; timestamp?: number }>()
 const kind = computed(() => mediaKind(props.attachment.contentType)), url = ref(''), error = ref(''), busy = ref(false), expanded = ref(false), element = ref<HTMLElement>()
 const saving = ref(false), notice = ref('')
-const recognizing=ref(false),voiceBusy=ref(false),voiceText=ref(''),voiceOutput=ref('')
+const voiceBusy=ref(false),voiceError=ref(''),voiceOutput=ref('')
 const filename = computed(() => signalAttachmentFilename(props.attachment))
 const ownEntry = computed<SignalMediaEntry>(() => ({ ...props.attachment, filename: filename.value, peer: props.peer, timestamp: props.timestamp || 0, key: JSON.stringify([props.peer, props.timestamp || 0, props.attachment.id]) }))
 const galleryItems = computed(() => props.gallery?.length ? props.gallery : [ownEntry.value])
@@ -42,22 +42,21 @@ async function act(action: SignalMediaAction) {
   finally { if (current === identity.value) saving.value = false }
 }
 function openImage() { returnFocus = document.activeElement as HTMLElement; expanded.value = true }
-async function recognizeVoice(){
- if(recognizing.value||!url.value||props.staged)return
- const current=identity.value;recognizing.value=true;voiceOutput.value='';error.value=''
- try{const bytes=await voiceAudioWav(url.value);if(disposed||current!==identity.value)return;const result=await window.desktopAPI.recognizeVoice(props.accountId,bytes);if(!disposed&&current===identity.value)voiceText.value=result.text}
- catch(e:any){if(!disposed&&current===identity.value)error.value=e.message||t('语音识别失败，请重试。')}
- finally{if(current===identity.value)recognizing.value=false}
-}
 async function translateVoice(){
- if(voiceBusy.value||!voiceText.value.trim())return
- const current=identity.value;voiceBusy.value=true;error.value=''
- try{const text=await window.desktopAPI.translateVoice(props.accountId,props.peer,'voice:'+JSON.stringify([props.peer,props.attachment.id,props.timestamp||0]),voiceText.value);if(!disposed&&current===identity.value)voiceOutput.value=text}
- catch(e:any){if(!disposed&&current===identity.value)error.value=e.message||t('翻译失败，请重试。')}
+ if(voiceBusy.value||voiceOutput.value||!url.value||props.staged||props.thumbnail)return
+ const current=identity.value;voiceBusy.value=true;voiceError.value=''
+ try{
+  const bytes=await voiceAudioWav(url.value);if(disposed||current!==identity.value)return
+  const result=await window.desktopAPI.translateVoiceMessage(props.accountId,{bytes,conversationId:props.peer,messageId:'voice:'+JSON.stringify([props.peer,props.attachment.id,props.timestamp||0])})
+  if(disposed||current!==identity.value)return
+  if(result?.targetLanguage!=='zh-CN'||typeof result.translation!=='string'||!result.translation.trim())throw new Error(t('翻译失败，请重试。'))
+  voiceOutput.value=result.translation
+ }
+ catch(e:any){if(!disposed&&current===identity.value)voiceError.value=e.message||t('语音暂未转为中文，请稍后重试。原语音已保留。')}
  finally{if(current===identity.value)voiceBusy.value=false}
 }
 function closeImage() { expanded.value = false; if (returnFocus?.isConnected) returnFocus.focus(); returnFocus = undefined }
-watch(identity, () => { revision++; url.value = ''; error.value = ''; notice.value = ''; busy.value = false; saving.value = false;recognizing.value=false;voiceBusy.value=false;voiceText.value='';voiceOutput.value=''; closeImage(); if (visible) void load() })
+watch(identity, () => { revision++; url.value = ''; error.value = ''; notice.value = ''; busy.value = false; saving.value = false;voiceBusy.value=false;voiceError.value='';voiceOutput.value=''; closeImage(); if (visible) void load() })
 onMounted(() => {
   if (typeof IntersectionObserver === 'undefined') { visible = true; void load(); return }
   observer = new IntersectionObserver(entries => { if (entries.some(item => item.isIntersecting)) { visible = true; observer?.disconnect(); void load() } }, { rootMargin: '200px' })
@@ -74,9 +73,10 @@ onUnmounted(() => { disposed = true; revision++; observer?.disconnect(); closeIm
     <span v-else-if="busy" class="media-loading">{{ t('正在读取附件…') }}</span>
     <div v-if="!thumbnail" class="media-caption"><span>{{ attachment.isVoiceNote ? t('语音消息') : filename }} <small>{{ attachment.size >= 1048576 ? (attachment.size / 1048576).toFixed(1) + ' MB' : Math.ceil(attachment.size / 1024) + ' KB' }}</small></span><button v-if="!staged" :disabled="saving" :title="t('保存附件')" @click="act('save')">↓</button></div>
     <div v-if="kind==='audio'&&!staged&&!thumbnail" class="voice-review">
-      <button :disabled="recognizing||!url" @click="recognizeVoice">{{t(recognizing?'正在识别语音…':'翻译语音')}}</button>
-      <template v-if="voiceText"><p>{{t('核对识别文字后翻译，可先修改识别有误的内容。')}}</p><textarea v-model="voiceText" :disabled="voiceBusy" :aria-label="t('语音识别文字')" maxlength="12000"/><button :disabled="voiceBusy" @click="translateVoice">{{t(voiceBusy?'正在翻译…':'确认并翻译')}}</button></template>
-      <p v-if="voiceOutput" class="voice-output">{{voiceOutput}}</p>
+      <button :disabled="voiceBusy||!url||Boolean(voiceOutput)" @click="translateVoice">{{t(voiceBusy?'正在转为中文…':voiceOutput?'已转为中文':voiceError?'重试语音翻译':'转为中文')}}</button>
+      <p v-if="voiceError" role="status">{{uiError(voiceError)}}</p>
+      <p v-if="voiceOutput" class="voice-output" role="status" :aria-label="t('语音中文译文')">{{voiceOutput}}</p>
+      <p v-else-if="!voiceError&&!voiceBusy">{{t('仅显示中文，不会发送消息。')}}</p>
     </div>
     <p v-if="error" role="status">{{ uiError(error) }} <button v-if="kind !== 'file'" @click="load">{{ t('重试') }}</button></p>
     <p v-else-if="notice" class="media-notice" role="status">{{ notice }}</p>

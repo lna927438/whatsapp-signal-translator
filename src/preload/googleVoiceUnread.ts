@@ -31,33 +31,51 @@ export function readGoogleVoiceUnread(document: Document): number | null {
   return /^[1-9]\d{0,4}$/.test(value) ? Number(value) : null
 }
 
-/** Isolated preload only. Sends numbers, not names, text, IDs or phone numbers. */
-export function installGoogleVoiceUnread(document: Document, report: (value: { source: 'sms-navigation'; documentId: string; sequence: number; count: number | null }) => Promise<unknown>): () => void {
+// A BFCache pageshow reinstalls the observer on the same document. Keep its
+// conservative account-switch state; only a genuinely new document resets it.
+const documentScopes = new WeakMap<Document, { scope: string | null; suppressed: boolean }>()
+
+/** Isolated preload only. Sends numbers and lifecycle flags, never message data. */
+export function installGoogleVoiceUnread(document: Document, report: (value: { source: 'sms-navigation'; documentId: string; sequence: number; count: number | null; notificationsSuppressed?: boolean }) => Promise<unknown>): () => void {
   const view = document.defaultView
   if (!view || view !== view.top || view.location.origin !== 'https://voice.google.com') return () => {}
-  const documentId = view.crypto.randomUUID()
+  const accountScope = () => /^\/u\/\d+(?=\/|$)/.exec(view.location.pathname)?.[0] ?? null
+  const lifecycle = documentScopes.get(document) || { scope: accountScope(), suppressed: false }
+  documentScopes.set(document, lifecycle)
+  let documentId = view.crypto.randomUUID()
   let disposed = false, sequence = 0, timer: ReturnType<typeof setTimeout> | undefined, working = false
   let candidate: number | null | undefined, stableSince = 0, reported: number | null | undefined
   const schedule = () => { if (!disposed && !timer) timer = setTimeout(() => { timer = undefined; void sample() }, 350) }
   const sample = async () => {
     if (disposed || working) return
-    const count = readGoogleVoiceUnread(document)
+    const currentScope = accountScope()
+    if (lifecycle.scope !== currentScope) {
+      // The URL and account DOM can update separately. There is no reliable DOM
+      // proof of which account owns a later count, so keep badges but suppress
+      // notifications for the rest of this document, including BFCache restore.
+      lifecycle.scope = currentScope; lifecycle.suppressed = true
+      documentId = view.crypto.randomUUID(); sequence = 0
+      candidate = undefined; reported = undefined; stableSince = 0
+    }
+    const count = lifecycle.scope === null ? null : readGoogleVoiceUnread(document)
     if (count !== candidate) { candidate = count; stableSince = Date.now(); schedule(); return }
     if (Date.now() - stableSince < 300) { schedule(); return }
     if (count === reported) return
     working = true
+    const sentScope = lifecycle.scope
     try {
-      const accepted = await report({ source: 'sms-navigation', documentId, sequence: ++sequence, count })
-      if (!disposed && accepted === true) reported = count
+      const accepted = await report({ source: 'sms-navigation', documentId, sequence: ++sequence, count, ...(lifecycle.suppressed ? { notificationsSuppressed: true } : {}) })
+      if (!disposed && sentScope === accountScope() && accepted === true) reported = count
     } catch { /* no page data or IPC failure details are logged */ }
-    finally { working = false; if (!disposed && readGoogleVoiceUnread(document) !== count) schedule() }
+    finally { working = false; if (!disposed && (sentScope !== accountScope() || readGoogleVoiceUnread(document) !== count)) schedule() }
   }
   const observer = new view.MutationObserver(schedule)
   observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'aria-hidden', 'aria-busy', 'style', 'hidden', 'inert'] })
   const periodic = setInterval(schedule, 5000)
-  const dispose = () => { disposed = true; observer.disconnect(); clearInterval(periodic); clearTimeout(timer); view.removeEventListener('pagehide', pagehide) }
+  const dispose = () => { disposed = true; observer.disconnect(); clearInterval(periodic); clearTimeout(timer); view.removeEventListener('pagehide', pagehide); view.removeEventListener('popstate', schedule) }
   const pagehide = (event: PageTransitionEvent) => { dispose(); if (event.persisted) view.addEventListener('pageshow', () => installGoogleVoiceUnread(document, report), { once: true }) }
   view.addEventListener('pagehide', pagehide)
+  view.addEventListener('popstate', schedule)
   schedule()
   return dispose
 }

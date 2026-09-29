@@ -1,5 +1,6 @@
 export const HOST = 'net.hellodog.google_voice'
 export const MAX_TEXT = 8000
+export const MAX_TRANSLATED_TEXT = 20000
 export const ADAPTER = Object.freeze({ supported: false, reason: '配对不代表当前页面已识别。请查看短信编辑器上方的保护状态；未知页面仍可右键翻译选中文字。' })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 const opaque = /^[A-Za-z0-9_-]{32,256}$/
@@ -37,6 +38,12 @@ export function draftTextValue(value, media) {
   if (typeof value !== 'string' || Array.from(value).length > MAX_TEXT || /[\u0000]/u.test(value)) throw new Error('文字过长或格式无效。')
   return value
 }
+// Translation expansion has a separate bound from user-submitted source text.
+// Keep this UTF-16 limit aligned with the main process translation receipt.
+export function translatedTextValue(value, media) {
+  if (typeof value !== 'string' || (!media && !value.trim()) || value.length > MAX_TRANSLATED_TEXT || /[\u0000]/u.test(value)) throw new Error('译文为空、过长或格式无效。')
+  return value
+}
 export function translationPayload(value) {
   if (!value || !['incoming', 'outgoing'].includes(value.direction) || !validId(value.id) ||
       typeof value.conversationId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(value.conversationId) ||
@@ -57,7 +64,7 @@ export function translatedValue(value) {
   if (!value.enabled) throw new Error('当前账号未启用该方向翻译。')
   if (typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId)) throw new Error('翻译回执编号无效。')
   const media = mediaValue(value.media)
-  return { enabled: true, text: draftTextValue(value.text, media), requestId: value.requestId, ...(media ? { media } : {}), ...(value.untranslated === true ? { untranslated: true } : {}) }
+  return { enabled: true, text: translatedTextValue(value.text, media), requestId: value.requestId, ...(media ? { media } : {}), ...(value.untranslated === true ? { untranslated: true } : {}) }
 }
 
 export class NativeBusyError extends Error {
@@ -98,7 +105,7 @@ export class NativeClient {
     // that could begin billing only after its UI has already timed out.
     if (this.pending.size !== 0) return Promise.reject(new NativeBusyError())
     const id = this.randomId(), message = { v: 1, id, op, ...(pairToken ? { pairToken } : {}), ...(payload ? { payload } : {}) }
-    if (!validId(id) || new TextEncoder().encode(JSON.stringify(message)).length > 65536) return Promise.reject(new Error('请求格式无效。'))
+    if (!validId(id) || new TextEncoder().encode(JSON.stringify(message)).length > 128 * 1024) return Promise.reject(new Error('请求格式无效。'))
     return new Promise((resolve, reject) => {
       // A UI timeout is not proof that the host stopped. Keep its slot occupied
       // until a late correlated receipt or disconnect arrives; do not replay.

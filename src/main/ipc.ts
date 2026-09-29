@@ -37,6 +37,8 @@ import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoi
 import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread, clearAccountNotifications } from './desktopRuntime'
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
+import { VoiceTranslationService } from './translation/voiceTranslation'
+import type { VoiceMessageAudio } from '../shared/voiceTranslation'
 import { GoogleVoiceWorkspace } from './platforms/googleVoice/workspace'
 import { GoogleVoiceRecords, type GoogleVoiceData } from './platforms/googleVoice/windowRecords'
 import { GoogleVoiceEmbeddedTranslation, type GoogleVoiceEmbeddedDraftData } from './platforms/googleVoice/embeddedTranslation'
@@ -171,6 +173,63 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return cloudRead(path, (force, rejectedToken) => sessions.token(owner, force, rejectedToken))
   }
   const outgoingCredit = new OutgoingCredit(() => onlineIdentity?.userId || '', () => cloudRequest('/api/me'), id => translator.outgoingSettlement(id))
+  const voiceTranslations = new VoiceTranslationService({
+    recognize: (bytes, authorized) => voice.recognize(bytes, authorized),
+    prepare: request => translator.preserveVoiceRequest(request),
+    translate: request => translator.translateIncoming(request, true)
+  })
+  const stopVoice = () => { voiceTranslations.clear(); return voice.dispose() }
+  mainWindow.once('closed', () => { void stopVoice() })
+  let voiceQuitPending: Promise<void> | undefined
+  // A cancelled before-quit prompt or close-to-tray must keep recognition alive.
+  // Once quitting is final, wait for the native child and its temporary cleanup.
+  app.on('will-quit', event => {
+    if (!voice.busy) return
+    event.preventDefault()
+    if (!voiceQuitPending) voiceQuitPending = stopVoice().then(() => { app.quit() })
+  })
+  const voiceRuntime = async (id: string, owner: string, conversationId?: string) => {
+    if (typeof id !== 'string' || !id || id.length > 120) throw new Error('请选择有效的聊天窗口。')
+    if (id.startsWith('gv-')) {
+      const record = await googleVoiceRecords.get(owner, id), base = await settings.runtime()
+      const providerPreference = record.translationProvider ? await requestChannelPreference(record.translationProvider) : undefined
+      return { ...base, providerPreference }
+    }
+    if (!(await accounts.list()).some(item => item.id === id)) throw new Error('聊天窗口不存在，请重新选择。')
+    return accountRuntime(id, conversationId)
+  }
+  ipcMain.handle('voice:translate-file-audio', async (event, id: string, bytes: Uint8Array) => {
+    requireMain(event)
+    const identity = taskIdentity(), runtime = await voiceRuntime(id, identity.owner)
+    return voiceTranslations.translate({ owner: identity.owner, accountId: id, conversationId: 'local-voice-files', bytes,
+      authorized: () => identity.authorized() && !event.sender.isDestroyed(), quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
+  })
+  ipcMain.handle('voice:translate-message', async (event, id: string, input: VoiceMessageAudio) => {
+    const identity = taskIdentity(), record = (await accounts.list()).find(item => item.id === id)
+    if (!record || !input || typeof input.conversationId !== 'string' || !input.conversationId || input.conversationId.length > 240
+      || typeof input.messageId !== 'string' || !input.messageId || input.messageId.length > 1000) throw new Error('语音消息标识无效。')
+    let conversationId = input.conversationId
+    const owns = () => !event.sender.isDestroyed() && (event.sender.id === mainWindow.webContents.id
+      || record.platform === 'whatsapp' && whatsapp.ownsSender(id, event.sender.id))
+    if (!owns()) throw new Error('语音不属于当前聊天窗口。')
+    if (record.platform === 'whatsapp') {
+      const match = input.messageId.match(/^voice:(?:true|false)_([^_\s]+@[^_\s]+)_.+$/)
+      if (!match || conversationId !== 'peer:' + match[1]) throw new Error('语音与当前会话不匹配，请重新打开这条语音。')
+    } else {
+      requireMain(event)
+      conversationId = normalizeSignalPeer(conversationId)
+    }
+    const runtime = await accountRuntime(id, conversationId)
+    return voiceTranslations.translate({ owner: identity.owner, accountId: id, conversationId, messageId: input.messageId,
+      bytes: input.bytes, authorized: () => identity.authorized() && owns(), quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
+  })
+  // Dedicated Google Voice IPC: never expose the trusted shell's generic IPC
+  // bridge, accept a file path, or let a page choose another account/window.
+  electronIpcMain.handle('google-voice:voice-audio', async (event, bytes: Uint8Array) => {
+    const page = googleVoice.trustedPage(event), runtime = await voiceRuntime(page.accountId, page.owner)
+    return voiceTranslations.translate({ owner: page.owner, accountId: page.accountId, conversationId: 'google-voice-audio',
+      bytes, authorized: page.authorized, quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
+  })
   const embeddedVoiceTranslation = new GoogleVoiceEmbeddedTranslation<Electron.IpcMainInvokeEvent>({
     trustedPage:event=>googleVoice.trustedPage(event),
     translate:createGoogleVoiceTranslator(translator,outgoingCredit,async accountId=>{
@@ -185,6 +244,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   // Google pages never receive the trusted shell's general IPC permissions.
   electronIpcMain.handle('google-voice:translate-request',(event,message)=>embeddedVoiceTranslation.request(event,message))
   electronIpcMain.handle('google-voice:unread',(event,message)=>{try{return googleVoice.observeUnread(event,message)}catch{return false}})
+  electronIpcMain.handle('google-voice:runtime-health',(event,message)=>{try{return googleVoice.observeRuntimeHealth(event,message)}catch{return false}})
   ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
   ipcMain.handle('google-voice:add',async(event,options?:{label?:string;proxy?:unknown})=>{
     requireMain(event); const identity=taskIdentity(),translationProvider=(await settings.get()).translationProvider || 'deepseek'
@@ -329,6 +389,15 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return { enabled: text !== undefined, manual: text === undefined, text, requestId:request.requestId, fontSize:runtime.fontSize, color:runtime.translationColor, uiLanguage:runtime.uiLanguage }
   }, async (owner, accountId, updates) => {
     await translator.trackContent(updates.map(item => ({ owner, accountId, conversationId:'signal-desktop:'+item.conversationId, identity:item.id, expiresAt:item.expiresAt, reason:'message' })))
+  }, async (accountId, raw, current) => {
+    const identity = taskIdentity(), conversationId = 'signal-desktop:' + raw.conversationId
+    const record = (await accounts.list()).find(item => item.id === accountId && item.platform === 'signal' && item.signalEngine === 'desktop' && item.runtimeMode !== 'paused')
+    if (!record || !current() || !identity.authorized()) throw new Error('Signal 语音窗口已变化。')
+    if (raw.expiresAt !== undefined) await translator.trackContent([{ owner: identity.owner, accountId, conversationId, identity: raw.id, expiresAt: raw.expiresAt, reason: 'message' }])
+    const runtime = await accountRuntime(accountId, conversationId)
+    return voiceTranslations.translate({ owner: identity.owner, accountId, conversationId, messageId: raw.id, bytes: raw.bytes,
+      authorized: () => identity.authorized() && current(), expiresAt: raw.expiresAt,
+      quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
   })
   ipcMain.handle('signal-desktop:status', async (event, id: string) => { requireMain(event); await requireAuth(); return signalDesktop.status(id) })
   ipcMain.handle('accounts:contact-quality', async (event, id: string, conversation: string, quality: unknown) => {
@@ -359,7 +428,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (event.sender.id !== mainWindow.webContents.id) throw new Error('登录会话只能由主窗口更新。')
     const previous = onlineIdentity
     onlineIdentity = identity?.userId ? identity : null
-    if (previous?.userId !== onlineIdentity?.userId) identityRevision += 1
+    if (previous?.userId !== onlineIdentity?.userId) { identityRevision += 1; voiceTranslations.clear() }
     const channelOwner=onlineIdentity?.userId,channelRevision=identityRevision
     setTranslationChannelIdentity(channelOwner ? {owner:channelOwner,token:(force,rejectedToken)=>sessions.token(channelOwner,force,rejectedToken),
       authorized:()=>onlineIdentity?.userId===channelOwner && identityRevision===channelRevision}:undefined)
@@ -407,6 +476,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     notifications.setIdentity()
     accountStatus.setIdentity()
     identityRevision += 1
+    voiceTranslations.clear()
     translator.setOnlineSession(null, null)
     whatsapp.resetViews()
     signal.setOnlineUser('')

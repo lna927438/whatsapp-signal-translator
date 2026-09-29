@@ -144,6 +144,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onSignalDesktopStatus: (callback: (value: any) => void) => { const listener = (_event:any,value:any) => callback(value); ipcRenderer.on('signal-desktop:status',listener); return () => ipcRenderer.removeListener('signal-desktop:status',listener) },
   onSignalDesktopConversation: (callback: (value: any) => void) => { const listener = (_event:any,value:any) => callback(value); ipcRenderer.on('signal-desktop:conversation',listener); return () => ipcRenderer.removeListener('signal-desktop:conversation',listener) },
   recognizeVoice: (id: string, bytes: Uint8Array) => ipcRenderer.invoke('voice:recognize',id,bytes),
+  translateVoiceMessage: (id: string, value: import('../shared/voiceTranslation').VoiceMessageAudio) => ipcRenderer.invoke('voice:translate-message',id,value),
+  translateVoiceFileAudio: (id: string, bytes: Uint8Array) => ipcRenderer.invoke('voice:translate-file-audio',id,bytes),
   translateVoiceFile: (id: string, audioId: string, text: string) => ipcRenderer.invoke('voice:translate-file',id,audioId,text),
   translateVoice: (id: string, peer: string, messageId: string, text: string) => ipcRenderer.invoke('voice:translate',id,peer,messageId,text),
   signalStageMedia: (id: string, value: { bytes: Uint8Array; filename: string; voiceNote?: boolean }) => ipcRenderer.invoke('signal:media-stage', id, value),

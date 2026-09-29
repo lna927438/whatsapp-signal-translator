@@ -1,0 +1,2 @@
+# Native dependency patches are checksum-verified byte for byte.
+security/vendor-patches/*.patch text eol=lf

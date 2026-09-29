@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { googleVoiceAppBundle } from './google-voice-ui-fixture.mjs'
 
 const { chromium } = createRequire(import.meta.url)('D:/UserAppData/OpenAI/DevelopmentRuntime/codex-primary-runtime/dependencies/node/node_modules/playwright')
-const folder = new URL('../verification/google-voice-ui-20260918/', import.meta.url)
+const folder = new URL('../verification/google-voice-ui-20260924/', import.meta.url)
 await mkdir(folder, { recursive: true })
 const bundle = await googleVoiceAppBundle()
 const css = (await Promise.all(['style.css', 'hellodog.css', 'workspace.css', 'compactSidebar.css'].map(name => readFile(new URL('../src/renderer/src/' + name, import.meta.url), 'utf8')))).join('\n')
@@ -25,6 +25,7 @@ try {
       window.__proxyCheckFails = false; window.__holdProxyCheck = false; window.__currentCheckFails = false; window.__proxySaveFails = false
       let nextId = 3
       const publicProxy = (proxy, previous) => { const { password, clearPassword, ...rest } = proxy; return { ...rest, hasPassword: !!password || (!clearPassword && previous?.hasPassword === true) } }
+      const checkResult = ip => ({ reachable: true, ip, latencyMs: 44, checkedAt: Date.now(), checks: Object.fromEntries(['exitIp','voice','signIn'].map(name => [name, {status:'reachable',latencyMs:42,checkedAt:Date.now()}])) })
       const accounts = [{ id: 'wa1', platform: 'whatsapp', label: 'WhatsApp Test' }, { id: 'signal1', platform: 'signal', label: 'Signal Test', signalEngine: 'cli' }]
       const methods = {
         listAccounts: async () => structuredClone(accounts),
@@ -40,8 +41,8 @@ try {
         listGoogleVoiceWindows: async () => structuredClone(window.__voiceRecords),
         addGoogleVoiceWindow: async options => { const record = { id: 'v' + nextId, label: options?.label || 'Voice ' + nextId, tabOrder: window.__voiceRecords.length, ...(options?.proxy ? { proxy: publicProxy(options.proxy) } : {}) }; nextId++; window.__voiceRecords.push(record); return structuredClone(record) },
         updateGoogleVoiceWindow: async (id, patch) => { if (window.__proxySaveFails) throw new Error('代理设置暂时未保存，请重试。'); const record = window.__voiceRecords.find(row => row.id === id); Object.assign(record, { ...patch, ...(patch.proxy ? { proxy: publicProxy(patch.proxy, record.proxy) } : {}) }); return structuredClone(record) },
-        testGoogleVoiceProxy: async () => { if (window.__holdProxyCheck) await new Promise(resolve => { window.__resolveProxyCheck = resolve }); if (window.__proxyCheckFails) throw new Error('代理连接失败，请检查地址、端口和认证信息。'); return { ip: '198.51.100.23', latencyMs: 42, checkedAt: Date.now() } },
-        checkGoogleVoiceNetwork: async id => { const network = window.__currentCheckFails ? { mode: 'proxy', status: 'error', message: '当前窗口代理未连接，请检查配置后重试。' } : { mode: 'proxy', status: 'checked', ip: '198.51.100.24', latencyMs: 44, checkedAt: Date.now() }; window.__events.onGoogleVoiceState?.({ id, state: 'ready', network }); return network },
+        testGoogleVoiceProxy: async () => { if (window.__holdProxyCheck) await new Promise(resolve => { window.__resolveProxyCheck = resolve }); if (window.__proxyCheckFails) throw new Error('代理连接失败，请检查地址、端口和认证信息。'); return checkResult('198.51.100.23') },
+        checkGoogleVoiceNetwork: async id => { const network = {mode:'proxy',status:'checked', ...checkResult('198.51.100.24')}; if(window.__currentCheckFails){network.status='error';network.reachable=false;network.checks.voice={status:'failed',code:'timeout',latencyMs:12000,checkedAt:Date.now()};network.message='当前窗口代理未连接，请检查配置后重试。'} window.__events.onGoogleVoiceState?.({ id, state: 'ready', page:'messages', network }); return network },
         reorderGoogleVoiceWindows: async ids => { window.__voiceRecords = ids.map((id, tabOrder) => ({ ...window.__voiceRecords.find(row => row.id === id), tabOrder })); return structuredClone(window.__voiceRecords) },
         focusGoogleVoiceWindow: async id => { if (id && window.__failVoiceFocus) throw new Error('Synthetic browser unavailable') },
         refreshGoogleVoiceWindow: async () => {}, openGoogleVoiceExternal: async () => {},
@@ -65,7 +66,7 @@ try {
     assert.equal(await page.locator('.account-navigation.side').count(), 0, 'Voice always uses top window tabs')
     assert.match(await page.locator('.voice-protection-status').innerText(), /请打开 Google Voice 短信会话/)
     await page.evaluate(() => window.__events.onGoogleVoiceState({ id: 'v1', state: 'ready', page: 'access-help' }))
-    await page.getByRole('button', { name: '翻译与通话', exact: true }).click()
+    await page.getByRole('button', { name: '翻译与通知', exact: true }).click()
     const restrictedSettings = page.getByRole('dialog', { name: 'Google Voice 设置' })
     await restrictedSettings.waitFor()
     assert.match(await page.locator('.voice-protection-status').innerText(), /Google 显示访问限制说明.*核对账号状态/)
@@ -113,6 +114,7 @@ try {
     await page.getByRole('button', { name: 'IP settings', exact: true }).click()
     const networkSetup = page.getByRole('dialog', { name: '窗口与 IP', exact: true })
     await networkSetup.getByRole('switch').check()
+    assert.equal(await networkSetup.locator('.network-mode').innerText(), '系统网络', 'editing the draft does not relabel the active system connection as a proxy')
     assert.equal(await networkSetup.getByRole('button', { name: '解析', exact: true }).isDisabled(), true, 'empty import cannot silently parse or submit')
     await networkSetup.getByRole('combobox').selectOption('http')
     await networkSetup.getByLabel('代理地址', { exact: true }).fill('proxy.example.invalid')
@@ -127,11 +129,15 @@ try {
     assert.equal(await networkSetup.getByLabel('代理地址', { exact: true }).isDisabled(), true)
     await page.evaluate(() => { window.__holdProxyCheck = false; window.__resolveProxyCheck() })
     await networkSetup.getByRole('status').filter({ hasText: '198.51.100.23' }).waitFor()
+    assert.match(await networkSetup.locator('.configuration-test').innerText(), /待保存配置检测[\s\S]*不会切换当前窗口的连接/)
+    assert.match(await networkSetup.locator('.current-network').innerText(), /当前窗口仍使用已保存连接[\s\S]*保存并重连[\s\S]*再次检测/)
+    assert.equal(await networkSetup.locator('.network-mode').innerText(), '系统网络')
+    assert.equal(await page.evaluate(() => window.__voiceRecords.find(row => row.id === 'v3').proxy.enabled), false, 'successful proxy testing does not apply the draft settings')
     const testedInput = await page.evaluate(() => window.__calls.filter(call => call[0] === 'testGoogleVoiceProxy').at(-1))
     assert.equal(testedInput[2], 'v3')
     assert.deepEqual([testedInput[1].protocol, testedInput[1].host, testedInput[1].port, testedInput[1].username, testedInput[1].password], ['http', 'proxy.example.invalid', 3128, 'synthetic-proxy-user', 'synthetic-not-a-secret'])
     await networkSetup.getByLabel('代理地址', { exact: true }).fill('changed-proxy.example.invalid')
-    assert.equal(await networkSetup.getByRole('status').count(), 0, 'configuration edits clear stale successful IP checks')
+    assert.equal(await networkSetup.getByRole('status').filter({ hasText: '198.51.100.23' }).count(), 0, 'configuration edits clear stale successful IP checks')
     await page.evaluate(() => { window.__proxyCheckFails = true })
     await networkSetup.getByRole('button', { name: '检测此配置', exact: true }).click()
     await networkSetup.getByRole('alert').filter({ hasText: '代理连接失败' }).waitFor()
@@ -155,13 +161,17 @@ try {
     assert.equal(await page.evaluate(() => Object.hasOwn(window.__voiceRecords.find(row => row.id === 'v3').proxy, 'password')), false)
     await page.getByRole('button', { name: 'IP settings', exact: true }).click()
     await networkSetup.waitFor()
+    assert.equal(await networkSetup.locator('.network-mode').innerText(), '已保存代理', 'reopened settings identify the saved proxy before another diagnostic')
     assert.equal(await networkSetup.getByLabel('代理密码', { exact: true }).inputValue(), '')
     assert.equal(await networkSetup.getByLabel('代理密码', { exact: true }).getAttribute('placeholder'), '已保存，留空保留')
     assert.equal(await networkSetup.getByLabel('代理密码', { exact: true }).getAttribute('maxlength'), '1024')
     assert.equal(await networkSetup.getByLabel('代理账号', { exact: true }).getAttribute('maxlength'), '256')
     assert.equal(await networkSetup.getByLabel('代理账号', { exact: true }).inputValue(), 'synthetic-proxy-user')
     assert.doesNotMatch(await networkSetup.innerText(), /synthetic-not-a-secret/)
-    await networkSetup.getByRole('button', { name: '刷新当前 IP', exact: true }).click()
+    await networkSetup.getByRole('button', { name: '检测此配置', exact: true }).click()
+    await networkSetup.locator('.configuration-test').getByText('填写配置检测', { exact: true }).waitFor()
+    assert.doesNotMatch(await networkSetup.locator('.current-network').innerText(), /当前窗口仍使用已保存连接/)
+    await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).click()
     await networkSetup.getByText('198.51.100.24', { exact: false }).waitFor()
     assert.match(await page.getByRole('button', { name: 'IP settings', exact: true }).innerText(), /198\.51\.100\.24/)
     await page.setViewportSize({ width: 420, height: 740 })
@@ -170,11 +180,11 @@ try {
     assert.equal(layout.overflow, false, 'proxy dialog controls do not overflow horizontally')
     assert.doesNotMatch(layout.background, /rgba\([^)]*,\s*0\)|transparent/, 'proxy panel stays opaque')
     await page.screenshot({ path: fileURLToPath(new URL('voice-proxy-narrow-' + position + '.png', folder)) })
-    await networkSetup.getByRole('button', { name: '刷新当前 IP', exact: true }).scrollIntoViewIfNeeded()
-    const currentActionBounds = await networkSetup.getByRole('button', { name: '刷新当前 IP', exact: true }).boundingBox()
+    await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).scrollIntoViewIfNeeded()
+    const currentActionBounds = await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).boundingBox()
     assert.ok(currentActionBounds.y >= 0 && currentActionBounds.y + currentActionBounds.height <= 740, 'current IP action remains reachable by scrolling')
-    await networkSetup.getByRole('button', { name: '保存并重连', exact: true }).scrollIntoViewIfNeeded()
-    assert.equal(await networkSetup.getByRole('button', { name: '保存并重连', exact: true }).isVisible(), true)
+    await networkSetup.getByRole('button', { name: '保存设置', exact: true }).scrollIntoViewIfNeeded()
+    assert.equal(await networkSetup.getByRole('button', { name: '保存设置', exact: true }).isVisible(), true)
     await page.setViewportSize({ width, height })
     await networkSetup.getByLabel('清除已保存的代理密码', { exact: true }).check()
     await networkSetup.getByLabel('代理密码', { exact: true }).fill('discarded-synthetic-value')
@@ -191,7 +201,7 @@ try {
     const importSuccess = networkSetup.getByRole('status').filter({ hasText: '已填入代理配置' })
     await importSuccess.waitFor()
     assert.equal(await importSuccess.evaluate(element => { const bounds = element.getBoundingClientRect(); return bounds.top >= 0 && bounds.bottom <= innerHeight }), true, 'successful parse feedback scrolls into the viewport without test-driven scrolling')
-    assert.equal(await importSuccess.evaluate(element => element.previousElementSibling?.id === 'voice-proxy-import-help' && element.nextElementSibling?.tagName === 'BUTTON'), true, 'import success is next to the import field and before the separate test action')
+    assert.equal(await importSuccess.evaluate(element => element.previousElementSibling?.id === 'voice-proxy-import-help' && element.nextElementSibling?.tagName === 'P'), true, 'import success is next to the import field and before the separate test action')
     assert.equal(await importMutationCount(), callsBeforeImport, 'parsing never starts network testing, saves credentials or reconnects')
     assert.doesNotMatch(await importSuccess.innerText(), /synthetic-user|synthetic-password/)
     await page.screenshot({ path: fileURLToPath(new URL('voice-proxy-four-part-import-' + position + '.png', folder)) })
@@ -201,7 +211,7 @@ try {
     const importFailure = networkSetup.locator('.proxy-settings').getByRole('alert')
     await importFailure.waitFor()
     assert.equal(await importFailure.evaluate(element => { const bounds = element.getBoundingClientRect(); return bounds.top >= 0 && bounds.bottom <= innerHeight }), true, 'invalid parse feedback scrolls into the viewport without test-driven scrolling')
-    assert.equal(await importFailure.evaluate(element => element.previousElementSibling?.id === 'voice-proxy-import-help' && element.nextElementSibling?.tagName === 'BUTTON'), true, 'invalid import reports immediately below format help without moving existing fields')
+    assert.equal(await importFailure.evaluate(element => element.previousElementSibling?.id === 'voice-proxy-import-help' && element.nextElementSibling?.tagName === 'P'), true, 'invalid import reports immediately below format help without moving existing fields')
     assert.equal(await networkSetup.getByLabel('导入代理链接', { exact: true }).getAttribute('aria-invalid'), 'true')
     assert.deepEqual(await proxyFields(), filledBeforeInvalid, 'invalid import never partially overwrites the previous host, port or credentials')
     assert.doesNotMatch(await importFailure.innerText(), /do-not-save|synthetic-private/)
@@ -236,10 +246,42 @@ try {
     assert.equal(await networkSetup.getByLabel('代理密码', { exact: true }).inputValue(), '')
     assert.equal(await page.evaluate(() => window.__calls.filter(call => call[0] === 'updateGoogleVoiceWindow').length), savedCount)
     await page.evaluate(() => { window.__currentCheckFails = true })
-    await networkSetup.getByRole('button', { name: '刷新当前 IP', exact: true }).click()
+    await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).click()
     await networkSetup.getByRole('alert').filter({ hasText: '当前窗口代理未连接' }).waitFor()
+    assert.match(await networkSetup.locator('[data-probe="voice"]').innerText(), /连接超时/)
+    assert.match(await networkSetup.locator('[data-probe="signIn"]').innerText(), /可连接/)
+    assert.match(await networkSetup.locator('[data-probe="exitIp"]').innerText(), /198\.51\.100\.24/)
+    assert.equal(await page.locator('.google-voice-content').getAttribute('aria-busy'), 'false', 'a diagnostic failure does not replace a usable page')
+    await page.screenshot({ path: fileURLToPath(new URL('voice-network-partial-' + position + '.png', folder)) })
     await page.evaluate(() => { window.__currentCheckFails = false })
-    await networkSetup.getByRole('button', { name: '刷新当前 IP', exact: true }).click()
+    await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).click()
+    assert.equal(await networkSetup.getByRole('alert').count(), 0, 'clear the previous manual-check error before the separate HTTP status cases')
+    for (const [httpStatus, expectedReason] of [
+      [401, '已收到响应，请在页面确认登录'],
+      [403, '已收到响应，请在页面确认访问限制'],
+      [429, '检测请求受限，请稍后重试'],
+      [503, '服务返回异常']
+    ]) {
+      await page.evaluate(httpStatus => {
+        const checkedAt = Date.now(), reachable = { status: 'reachable', latencyMs: 42, checkedAt }
+        window.__events.onGoogleVoiceState({ id: 'v3', state: 'ready', page: 'messages', network: {
+          mode: 'proxy', status: 'error', reachable: false, ip: '198.51.100.24', checkedAt,
+          checks: { exitIp: reachable, voice: reachable, signIn: { status: 'failed', code: 'http-error', httpStatus, latencyMs: 42, checkedAt } }
+        } })
+      }, httpStatus)
+      const signIn = networkSetup.locator('[data-probe="signIn"]'), expected = `${expectedReason}（HTTP ${httpStatus}）`
+      await signIn.getByText(expected, { exact: true }).waitFor()
+      assert.equal(await signIn.locator('b').innerText(), expected, 'HTTP diagnostics retain the exact numeric status and specific reason')
+      assert.equal(await signIn.evaluate(row => row.classList.contains('failed')), true, 'an HTTP failure is never relabeled as a successful probe')
+      assert.doesNotMatch(await signIn.innerText(), /网络连接失败|代理无法连接|代理认证失败|可连接/)
+      assert.equal(await signIn.locator('b').evaluate(node => getComputedStyle(node).color), 'rgb(241, 164, 153)', 'HTTP failures keep the warning color')
+      assert.notEqual(await signIn.locator('b').evaluate(node => getComputedStyle(node).color), await networkSetup.locator('[data-probe="voice"] b').evaluate(node => getComputedStyle(node).color))
+      assert.match(await page.getByRole('button', { name: 'IP settings', exact: true }).innerText(), /连接待检查/)
+      assert.equal(await page.locator('.google-voice-content').getAttribute('aria-busy'), 'false', 'an HTTP diagnostic cannot replace the usable official document')
+    }
+    await page.screenshot({ path: fileURLToPath(new URL('voice-network-http-' + position + '.png', folder)) })
+    await page.evaluate(() => { window.__currentCheckFails = false })
+    await networkSetup.getByRole('button', { name: '检测当前连接', exact: true }).click()
     await networkSetup.getByText('198.51.100.24', { exact: false }).waitFor()
     assert.equal(await networkSetup.getByRole('alert').count(), 0)
     await networkSetup.getByRole('button', { name: '取消', exact: true }).click()
@@ -251,7 +293,7 @@ try {
     await page.locator('[data-account-id="v2"] .account-close').click()
     assert.equal(await page.locator('[data-account-id="v2"]').count(), 0)
     assert.equal(await page.locator('[data-account-id="v3"] [aria-current="true"]').count(), 1)
-    await page.getByRole('button', { name: '翻译与通话', exact: true }).click()
+    await page.getByRole('button', { name: '翻译与通知', exact: true }).click()
     const pairing = page.getByRole('dialog', { name: 'Google Voice 设置' })
     await pairing.getByRole('checkbox', {name:'通话麦克风'}).waitFor()
     await pairing.getByRole('checkbox', {name:'通话麦克风'}).check()
@@ -332,6 +374,7 @@ try {
     assert.ok(calls.some(call => call[0] === 'setOverlayOpen' && call[1] === true))
     assert.ok(calls.some(call => call[0] === 'setOverlayOpen' && call[1] === false))
     results.push({ position, width, height, passed: true, embeddedViewSimulated: true, signalDraftRetained: true, googleWindowCountAfterAdd: 1, proxyUi: ['create dialog precedes window creation', 'proxy disabled by default', 'HTTP credentials edit test save', 'busy detection prevents edits and save', 'configuration changes clear old test result', 'failed check retry recovers without losing input', 'failed save retains previous configuration and editable input', 'saved password never returned or redisplayed', 'replacement password cancels old clear-password flag', 'credential input lengths match backend constraints', 'four-part credential import preserves selected SOCKS5, fills all fields and clears paste without IPC mutations', 'invalid import keeps filled configuration and shows adjacent safe error', 'empty import is disabled and success is adjacent to the field', 'authenticated SOCKS5 URL imported, tested and partial credentials rejected', 'HTTPS URL decoded and import field cleared', 'cancelled secret input is discarded', 'current window IP status and failure recovery', 'opaque narrow dark dialog without overflow and actions remain scrollable'], accountMutations: calls.filter(call => ['addAccount', 'updateAccount', 'removeAccount', 'reorderAccounts'].includes(call[0])).length })
+    results.at(-1).httpResponseDiagnostics = { statuses: [401, 403, 429, 503], exactNumericStatus: true, failuresStayFailed: true, distinctFromNetworkFailure: true }
     await page.evaluate(() => window.__dispose()); await page.close()
   }
 } finally { await browser.close() }

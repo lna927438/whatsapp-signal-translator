@@ -1,4 +1,4 @@
-import { ADAPTER, digest, isVoiceUrl, validToken, translationPayload, statusValue, translatedValue, validId, textValue, draftTextValue, mediaValue } from './protocol.mjs'
+import { ADAPTER, digest, isVoiceUrl, validToken, translationPayload, statusValue, translatedValue, translatedTextValue, validId, textValue, draftTextValue, mediaValue } from './protocol.mjs'
 
 /** Pairing credentials never leave this trusted extension context. */
 export class ExtensionBridge {
@@ -64,8 +64,8 @@ export class ExtensionBridge {
     if (message.type === 'voice.translate') { op = 'translate'; payload = translationPayload(value) }
     else if (message.type === 'voice.authorize') {
       if (!validId(value.id) || typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId)) throw new Error('发送回执无效。')
-      op = 'authorize'; payload = { id: value.id, conversationId, text: draftTextValue(value.text, media), translated: draftTextValue(value.translated, media), requestId: value.requestId, ...mediaPayload }
-    } else if (message.type === 'voice.dispatch-status') { op = 'dispatch-status'; payload = { conversationId, text: draftTextValue(value.text, media), ...mediaPayload } }
+      op = 'authorize'; payload = { id: value.id, conversationId, text: draftTextValue(value.text, media), translated: translatedTextValue(value.translated, media), requestId: value.requestId, ...mediaPayload }
+    } else if (message.type === 'voice.dispatch-status') { op = 'dispatch-status'; payload = { conversationId, text: translatedTextValue(value.text, media), ...mediaPayload } }
     else if (message.type === 'voice.dispatch-resolve') {
       if (typeof value.requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,200}$/.test(value.requestId) || !['sent', 'not-sent'].includes(value.outcome) || value.confirmed !== true || !Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new Error('请先明确核对发送结果。')
       op = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true, ...mediaPayload }

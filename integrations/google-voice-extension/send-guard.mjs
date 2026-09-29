@@ -1,9 +1,10 @@
-import { draftTextValue, mediaValue, recipientContextValue, translatedValue, translationPayload } from './protocol.mjs'
+import { draftTextValue, translatedTextValue, mediaValue, recipientContextValue, translatedValue, translationPayload } from './protocol.mjs'
 
 const hasForbiddenHan = (text, language) => !/^(zh|ja)(?:-|$)/i.test(language) && /\p{Script=Han}/u.test(text)
 const sameTarget = (a, b) => a && b && a.conversationId === b.conversationId && JSON.stringify(a.context) === JSON.stringify(b.context) && a.composer === b.composer && a.sendButton === b.sendButton
 const sameMedia = (a, b) => JSON.stringify(a?.media) === JSON.stringify(b?.media) && a?.mediaRevision === b?.mediaRevision
 const sameDraft = (a, b) => sameTarget(a, b) && sameMedia(a, b) && a.text === b.text && a.revision === b.revision
+const assertSendReady = original => { if (original.sendButton?.disabled || original.sendButton?.getAttribute?.('aria-disabled') === 'true') throw new Error('Google Voice 发送按钮暂不可用。请保留草稿，等待图片或网络恢复后重新预览。') }
 const mediaFields = original => ({ ...(original.media ? { media: mediaValue(original.media) } : {}), ...(original.context ? { context: recipientContextValue(original.context) } : {}) })
 
 /**
@@ -36,7 +37,10 @@ export class SendGuard {
     if (['preparing', 'authorizing'].includes(this.state)) throw new Error('当前请求处理中，不可重复发送。')
     const original = this.adapter.snapshot()
     if (!original) throw new Error('无法确认当前对话和输入框，已阻止翻译发送。')
-    draftTextValue(original.text, mediaValue(original.media))
+    // A draft may contain an expanded, already-paid translation after an
+    // interrupted send. Reconcile that receipt before applying the narrower
+    // source limit to any NEW translation request.
+    translatedTextValue(original.text, mediaValue(original.media))
     if (this.state === 'uncertain') {
       if (this.job && this.job.original.conversationId === original.conversationId && sameMedia(this.job.original, original) && [this.job.original.text, this.job.translated?.text].includes(original.text)) throw new Error('当前请求待确认，不可重复发送。')
       this.state = 'idle'; this.job = null
@@ -58,6 +62,8 @@ export class SendGuard {
         }
         if (pending.state !== 'clear') throw new Error('无法核对此前发送状态。')
       }
+      draftTextValue(original.text, mediaValue(original.media))
+      assertSendReady(original)
       if (this.bridge.logicalId) {
         const result = await this.bridge.logicalId({ conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
         this.assertPreviewCurrent(revision)
@@ -65,6 +71,7 @@ export class SendGuard {
         job.id = result.id
       }
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('草稿或会话已变化，未提交翻译。')
+      assertSendReady(original)
       const payload = translationPayload({ id: job.id, direction: 'outgoing', conversationId: original.conversationId, text: original.text, ...mediaFields(original) })
       const translated = translatedValue(await this.bridge.translate(payload))
       this.assertPreviewCurrent(revision)
@@ -81,6 +88,7 @@ export class SendGuard {
     if (this.state !== 'preview' || !this.job?.translated) throw new Error('请先成功翻译并确认预览。')
     const job = this.job, original = job.original, revision = this.previewRevision
     if (!sameDraft(original, this.adapter.snapshot())) { this.state = 'failed'; throw new Error('草稿已变化，已阻止发送。') }
+    assertSendReady(original)
     this.state = 'authorizing'
     try {
       // Host must validate current owner/record/language/wallet/settled translation.

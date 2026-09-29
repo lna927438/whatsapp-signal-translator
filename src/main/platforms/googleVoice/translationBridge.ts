@@ -26,6 +26,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     // Preserve the old namespace exactly for existing text-only receipts.
     const conversationId='google-voice:'+raw.conversationId+(media?':media:'+googleVoiceMediaKey(media):'')
     const validSource=(value:unknown):value is string=>typeof value==='string' && (!!value.trim() || !!media) && !value.includes('\0') && Array.from(value).length<=10000
+    const validTranslated=(value:unknown):value is string=>typeof value==='string' && (!!value.trim() || !!media) && !value.includes('\0') && value.length<=20000
     const recover=async(known?:{id:string;requestId:string})=>{
       if(!validSource(raw.text))throw new Error('草稿无效。')
       if(media && !raw.text.trim())return undefined
@@ -40,7 +41,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
       return restored?{state:'recovered',id:restored.id,requestId:restored.requestId}:{state:'new'}
     }
     if(operation==='dispatch-status'){
-      if(!validSource(raw.text))throw new Error('草稿无效。')
+      if(!validTranslated(raw.text))throw new Error('草稿无效。')
       return dispatch.status(owner,accountId,conversationId,raw.text,authorized,mediaKey)
     }
     if(operation==='dispatch-resolve'){
@@ -54,7 +55,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
       sourceLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,quality:preferences.translationQuality,providerPreference:preferences.providerPreference}
     const plainAllowed=!!media && !raw.text.trim() || !preferences.sendAutoTranslate || alreadyInTargetLanguage(plainRequest)
     if(operation==='authorize'){
-      if(typeof raw.requestId!=='string' || !/^send-[\w-]{1,150}$/.test(raw.requestId) || typeof raw.translated!=='string' || raw.translated.length>20000)throw new Error('发送记录无效。')
+      if(typeof raw.requestId!=='string' || !/^send-[\w-]{1,150}$/.test(raw.requestId) || !validTranslated(raw.translated))throw new Error('发送记录无效。')
       if(raw.requestId.startsWith('send-gv-plain-')){
         if(!plainAllowed || raw.requestId!==plainRequest.requestId || raw.translated!==raw.text || hasBlockedChinese(raw.text,preferences.targetLanguage))throw new Error('原文或发送设置已变化，已阻止发送。')
         requireIdentity()

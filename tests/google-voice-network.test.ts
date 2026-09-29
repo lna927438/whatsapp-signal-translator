@@ -12,7 +12,7 @@ function harness(run?: (request: any) => void, setupFailure: boolean | 'stall' =
     end() { queueMicrotask(() => run?.(this)); return this }
   }
   const h = mainHarness({
-    net: { request(input: any) { options.push(input); const r = new Request(); requests.push(r); return r } },
+    net: { request(input: any) { options.push(input); const r = Object.assign(new Request(), { options: input }); requests.push(r); return r } },
     session: { fromPartition(partition: string, config: any) {
       const calls: any[] = []
       const ses = { partition, config, calls,
@@ -66,13 +66,17 @@ test('manual proxy settings reject reinterpreted numeric hosts and invalid HTTP 
   }
 })
 
-test('IP check uses the supplied window session with cookies off and redirects disabled', async () => {
+test('explicit endpoint checks share the supplied session, omit cookies and never follow redirects', async () => {
   const h = harness(reply), existing = {} as Electron.Session
   const result = await h.module.checkGoogleVoiceSession(existing)
-  assert.equal(h.options[0].session, existing)
-  assert.equal(h.options[0].redirect, 'error'); assert.equal(h.options[0].useSessionCookies, false)
-  assert.equal(h.options[0].cache, 'no-store'); assert.equal(h.options[0].referrerPolicy, 'no-referrer')
+  assert.deepEqual(h.options.map(option => option.url), ['https://api.ipify.org?format=json', 'https://voice.google.com/u/0/', 'https://accounts.google.com/'])
+  for (const option of h.options) {
+    assert.equal(option.session, existing); assert.equal(option.method, 'GET')
+    assert.equal(option.redirect, 'manual'); assert.equal(option.useSessionCookies, false)
+    assert.equal(option.cache, 'no-store'); assert.equal(option.referrerPolicy, 'no-referrer'); assert.equal(option.credentials, undefined)
+  }
   assert.equal(result.ip, '203.0.113.25'); assert.ok(result.latencyMs >= 0); assert.ok(result.checkedAt > 0)
+  assert.equal(result.reachable, true); assert.ok(Object.values(result.checks).every(check => check.status === 'reachable'))
   assert.equal(h.sessions.length, 0, 'a current window check must not create or replace its session')
 })
 
@@ -122,16 +126,17 @@ test('IP check supplies credentials only to one matching proxy challenge', async
     request.emit('login', info, (...args: any[]) => replies.push(args))
     reply(request)
   })
-  await assert.rejects(h.module.checkGoogleVoiceSession({} as Electron.Session, proxy as any, 'fixture-secret'), /代理认证失败/)
-  assert.deepEqual(replies, [['fixture-user', 'fixture-secret'], []])
+  const result = await h.module.checkGoogleVoiceSession({} as Electron.Session, proxy as any, 'fixture-secret')
+  assert.equal(result.reachable, false); assert.ok(Object.values(result.checks).every(check => check.code === 'proxy-auth'))
+  assert.deepEqual(replies, Array.from({ length: 3 }, () => [['fixture-user', 'fixture-secret'], []]).flat())
   assert.equal(h.requests[0].aborted, 1)
 })
 
 test('IP check never sends proxy credentials to origin or foreign proxy challenges', async () => {
   for (const info of [{ isProxy: false, host: proxy.host, port: proxy.port }, { isProxy: true, host: 'evil.test', port: proxy.port }, { isProxy: true, host: proxy.host, port: 80 }]) {
     const replies: any[] = [], h = harness(request => request.emit('login', info, (...args: any[]) => replies.push(args)))
-    await assert.rejects(h.module.checkGoogleVoiceSession({} as Electron.Session, proxy as any, 'fixture-secret'), /认证失败/)
-    assert.deepEqual(replies, [[]])
+    const result = await h.module.checkGoogleVoiceSession({} as Electron.Session, proxy as any, 'fixture-secret')
+    assert.ok(Object.values(result.checks).every(check => check.code === 'proxy-auth')); assert.deepEqual(replies, [[], [], []])
   }
 })
 
@@ -141,7 +146,9 @@ test('redirect, invalid response, oversized body and network errors are bounded 
     (request: any) => reply(request, '{}', 407), (request: any) => request.emit('error', new Error('private-credentials-here')),
     (request: any) => request.emit('abort')]) {
     const h = harness(run)
-    await assert.rejects(h.module.checkGoogleVoiceSession({} as Electron.Session), (error: any) => !/private|fixture|credentials-here/.test(error.message))
+    const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+    assert.equal(result.reachable, false); assert.equal(result.checks.exitIp.status, 'failed')
+    assert.doesNotMatch(JSON.stringify(result), /private|fixture|credentials-here/)
     assert.equal(h.requests[0].aborted, 1)
   }
 })
@@ -149,10 +156,75 @@ test('redirect, invalid response, oversized body and network errors are bounded 
 test('stalled IP check times out and aborts the request', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const h = harness(), pending = h.module.checkGoogleVoiceSession({} as Electron.Session)
-  const rejected = assert.rejects(pending, /超时/)
   t.mock.timers.tick(12_000)
-  await rejected
-  assert.equal(h.requests[0].aborted, 1)
+  const result = await pending
+  assert.ok(Object.values(result.checks).every(check => check.code === 'timeout')); assert.ok(h.requests.every(request => request.aborted === 1))
+})
+
+test('IP-provider failure is separate from Voice and sign-in reachability and does not claim account capability', async () => {
+  const h = harness(request => request.options.url.includes('ipify') ? request.emit('error', Error('ip service unavailable')) :
+    request.emit('redirect', 302, 'GET', 'https://accounts.google.com/ServiceLogin?private-fixture=not-returned'))
+  const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+  assert.equal(result.ip, undefined); assert.equal(result.reachable, false); assert.equal(result.checks.exitIp.code, 'network-error')
+  assert.equal(result.checks.voice.status, 'reachable'); assert.equal(result.checks.signIn.status, 'reachable')
+  assert.doesNotMatch(JSON.stringify(result), /private-fixture|loggedIn|sms|upload|not-returned/)
+})
+
+test('account reachability uses the public root and never enters a cookie-dependent login transaction', async () => {
+  const h = harness(request => {
+    const url = new URL(request.options.url)
+    if (url.hostname !== 'accounts.google.com') reply(request)
+    else if (url.pathname === '/') request.emit('redirect', 302, 'GET', 'https://accounts.google.com/ServiceLogin?continue=private-fixture')
+    else reply(request, 'login transaction requires browser context', 401)
+  })
+  const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+  assert.equal(result.reachable, true)
+  assert.equal(result.checks.signIn.httpStatus, 302)
+  assert.equal(h.requests.length, 3, 'do not follow the authentication redirect')
+  assert.doesNotMatch(JSON.stringify(result), /private-fixture|ServiceLogin|browser context/)
+})
+
+test('HTTP refusal retains only the numeric status and never becomes a successful check', async () => {
+  for (const status of [401, 403, 429, 500, 503]) {
+    const h = harness(request => request.options.url.includes('accounts.google.com') ? reply(request, 'private account page body', status) : reply(request))
+    const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+    assert.equal(result.reachable, false)
+    assert.deepEqual({ status: result.checks.signIn.status, code: result.checks.signIn.code, httpStatus: result.checks.signIn.httpStatus }, { status: 'failed', code: 'http-error', httpStatus: status })
+    assert.equal(result.checks.exitIp.status, 'reachable')
+    assert.doesNotMatch(JSON.stringify(result), /private account/)
+  }
+})
+
+test('malformed status codes cannot enter diagnostics or falsely prove reachability', async () => {
+  for (const status of [undefined, NaN, 99, 600, '200']) {
+    const h = harness(request => request.emit('response', Object.assign(new EventEmitter(), { statusCode: status })))
+    const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+    assert.ok(Object.values(result.checks).every(probe => probe.code === 'invalid-response' && probe.httpStatus === undefined))
+  }
+})
+
+test('foreign login redirects are rejected without following them; official HTTP failure is not hidden by a working IP', async () => {
+  const h = harness(request => request.options.url.includes('ipify') ? reply(request) : request.options.url.includes('voice.google') ?
+    reply(request, 'private page content', 403) : request.emit('redirect', 302, 'GET', 'https://accounts.google.com.attacker.invalid/'))
+  const result = await h.module.checkGoogleVoiceSession({} as Electron.Session)
+  assert.equal(result.ip, '203.0.113.25'); assert.equal(result.reachable, false)
+  assert.equal(result.checks.voice.code, 'http-error'); assert.equal(result.checks.signIn.code, 'redirect-blocked'); assert.doesNotMatch(JSON.stringify(result), /private page/)
+})
+
+test('closing a window cancels all pending endpoint probes without waiting for the deadline', async () => {
+  const h = harness(), controller = new AbortController()
+  const pending = h.module.checkGoogleVoiceSession({} as Electron.Session, undefined, '', { signal: controller.signal })
+  assert.equal(h.requests.length, 3); controller.abort()
+  const result = await pending; assert.ok(Object.values(result.checks).every(check => check.code === 'cancelled')); assert.ok(h.requests.every(request => request.aborted === 1))
+  const again = await h.module.checkGoogleVoiceSession({} as Electron.Session, undefined, '', { signal: controller.signal })
+  assert.equal(h.requests.length, 3); assert.ok(Object.values(again.checks).every(check => check.code === 'cancelled'))
+})
+
+test('SOCKS route diagnostics distinguish authentication rejection per endpoint without exposing secrets', async () => {
+  const h = harness(request => request.emit('error', Error('ERR_TUNNEL_CONNECTION_FAILED private-password')))
+  const route = { password: 'private-password', async close() {}, failureFor: (host: string) => host === 'voice.google.com' ? 'proxy-auth' as const : undefined }
+  const result = await h.module.checkGoogleVoiceSession({} as Electron.Session, proxy as any, 'fixture-secret', { route })
+  assert.equal(result.checks.voice.code, 'proxy-auth'); assert.equal(result.checks.exitIp.code, 'proxy-connect'); assert.doesNotMatch(JSON.stringify(result), /password|secret/)
 })
 
 test('per-window auth uses the current Electron signature and revokes itself on destruction', () => {

@@ -60,3 +60,34 @@ test('a first-send route change cannot unlock retry under a new paid identity af
   assert.equal((await final.resolve('owner','window','server-thread','request',2,'sent',()=>true)).resolved,true)
   assert.equal((await final.status('owner','window','server-thread','Hello',()=>true)).state,'clear')
 })
+
+test('malformed persistent rows fail closed on every journal path without rewriting evidence', async () => {
+  let data: GoogleVoiceDispatchData = { records: [] }, writes = 0
+  const store = { read: async () => structuredClone(data), write: async (value: GoogleVoiceDispatchData) => { data = structuredClone(value); writes++ } }
+  await new GoogleVoiceDispatchLedger(store).reserve('owner', 'window', 'conv', 'request', 'source', 'translated', () => true)
+  const original = structuredClone(data.records[0])
+  const invalidRows = [null, [], {}, ...Object.entries({
+    owner: '', windowId: 'bad\0window', conversationId: null, requestId: undefined,
+    originalHash: 'broken', translatedHash: undefined, state: 'unknown', attempts: 0,
+    createdAt: NaN, resolvedAt: -1, migratedTextHash: 'broken', mediaKey: 'broken', newRecipient: 'true'
+  }).map(([field, value]) => ({ ...original, [field]: value }))]
+  for (const row of invalidRows) {
+    data = { records: [row] } as GoogleVoiceDispatchData
+    const before = structuredClone(data), priorWrites = writes, ledger = new GoogleVoiceDispatchLedger(store)
+    await assert.rejects(ledger.status('owner', 'window', 'conv', 'source', () => true), /发送记录暂时无法核对/)
+    await assert.rejects(ledger.snapshot('owner', 'window', 'conv', () => true), /发送记录暂时无法核对/)
+    await assert.rejects(ledger.reserve('owner', 'window', 'conv', 'new-request', 'source', 'translated', () => true), /发送记录暂时无法核对/)
+    await assert.rejects(ledger.resolve('owner', 'window', 'conv', 'request', 1, 'not-sent', () => true), /发送记录暂时无法核对/)
+    assert.deepEqual(data, before); assert.equal(writes, priorWrites)
+  }
+})
+
+test('ambiguous duplicate request rows cannot hide a previous uncertain attempt', async () => {
+  let data: GoogleVoiceDispatchData = { records: [] }, writes = 0
+  const store = { read: async () => structuredClone(data), write: async (value: GoogleVoiceDispatchData) => { data = structuredClone(value); writes++ } }
+  const ledger = new GoogleVoiceDispatchLedger(store)
+  await ledger.reserve('owner', 'window', 'conv', 'request', 'source', 'translated', () => true)
+  data.records.unshift({ ...data.records[0], state: 'not-sent' })
+  await assert.rejects(new GoogleVoiceDispatchLedger(store).reserve('owner', 'window', 'conv', 'request', 'source', 'translated', () => true), /发送记录暂时无法核对/)
+  assert.equal(data.records.length, 2); assert.equal(writes, 1)
+})

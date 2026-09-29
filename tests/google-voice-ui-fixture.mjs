@@ -8,7 +8,7 @@ export async function googleVoiceAppBundle(extraComponents = []) {
   const websiteRequire = createRequire(new URL('../website/package.json', import.meta.url))
   const { build } = createRequire(websiteRequire.resolve('wrangler'))('esbuild')
   const directory = fileURLToPath(new URL('../src/renderer/src/', import.meta.url))
-  const realComponents = new Set(['App.vue', 'AccountNavigation.vue', 'UiIcon.vue', 'GoogleVoiceLauncher.vue', 'GoogleVoiceNavigation.vue', 'GoogleVoiceContent.vue', 'GoogleVoiceTranslationSetup.vue', 'GoogleVoiceWindowSetup.vue'])
+  const realComponents = new Set(['App.vue', 'AccountNavigation.vue', 'UiIcon.vue', 'GoogleVoiceLauncher.vue', 'GoogleVoiceNavigation.vue', 'GoogleVoiceContent.vue', 'GoogleVoiceTranslationSetup.vue', 'GoogleVoiceWindowSetup.vue', 'GoogleVoiceNetworkStatus.vue'])
   for (const component of extraComponents) realComponents.add(component)
   const result = await build({
     stdin: { sourcefile: 'voice-app-fixture.ts', resolveDir: directory, contents: `import {createApp} from 'vue';import App from './App.vue';import {uiLanguage} from './lib/uiLocale';window.__language=value=>uiLanguage.value=value;const app=createApp(App,{userId:'synthetic-voice-owner'});app.mount('#app');window.__dispose=()=>app.unmount();` },

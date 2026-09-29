@@ -19,8 +19,21 @@ export function voiceTranscript(value: unknown): string {
  * disk after completion. The only accepted input format is canonical PCM WAV. */
 export class VoiceRecognition {
   private running = false
+  private disposed = false
+  private active?: { cancelled: boolean; interrupt?: () => void; finished: Promise<void>; finish: () => void }
   private verified?: Promise<VoiceManifest>
   constructor(private resources: string, private temporaryRoot: string) {}
+  get busy(): boolean { return this.running }
+  /** Final window/app shutdown must stop the native child immediately and wait
+   * for its close plus temporary-file cleanup, not a later polling interval. */
+  dispose(): Promise<void> {
+    this.disposed = true
+    const active = this.active
+    if (!active) return Promise.resolve()
+    active.cancelled = true
+    active.interrupt?.()
+    return active.finished
+  }
   private manifest() {
     return this.verified ||= (async () => {
       // This manifest is embedded in the packaged application bundle, not read
@@ -37,32 +50,42 @@ export class VoiceRecognition {
     })().catch(error => {this.verified=undefined;throw error})
   }
   async recognize(input: unknown, authorized: () => boolean): Promise<string> {
+    if (this.disposed) throw new Error('语音组件已关闭，请重新打开 HelloDog。')
     if (this.running) throw new Error('上一条语音正在识别，请完成后重试。')
     if (!authorized()) throw new Error('登录状态已变化，请重新打开当前聊天。')
     const bytes=validateVoiceWav(input); this.running=true
+    let finish!: () => void
+    const active: NonNullable<VoiceRecognition['active']> = { cancelled: false, finished: new Promise<void>(resolve => { finish = resolve }), finish: () => finish() }
+    this.active = active
+    const current = () => !active.cancelled && !this.disposed && authorized()
     let directory=''
     try {
       this.verified=undefined
       const manifest=await this.manifest()
-      if (!authorized()) throw new Error('登录状态已变化。')
+      if (!current()) throw new Error('登录状态已变化。')
       await mkdir(this.temporaryRoot,{recursive:true}); directory=await mkdtemp(join(this.temporaryRoot,'voice-'))
+      if (!current()) throw new Error('登录状态已变化。')
       const wav=join(directory,'input.wav'), output=join(directory,'result')
       await writeFile(wav,bytes,{mode:0o600})
+      if (!current()) throw new Error('登录状态已变化。')
       await new Promise<void>((fulfill,reject)=>{
         const child=spawn(join(this.resources,manifest.executable),['-m',join(this.resources,manifest.model),'-f',wav,'-l','auto','-t','2','-ng','-oj','-of',output,'-np'],{windowsHide:true,stdio:'ignore',cwd:this.resources,shell:false})
         let reason='',ended=false
         const timeout=setTimeout(()=>{reason='语音识别超时，请选择较短的语音再试。';child.kill()},180000)
-        const check=setInterval(()=>{if(!authorized()){reason='登录状态已变化，已停止语音识别。';child.kill()}},250)
-        const done=(error?:Error)=>{if(ended)return;ended=true;clearTimeout(timeout);clearInterval(check);error?reject(error):fulfill()}
+        const check=setInterval(()=>{if(!current()){reason='登录状态已变化，已停止语音识别。';child.kill()}},250)
+        const done=(error?:Error)=>{if(ended)return;ended=true;active.interrupt=undefined;clearTimeout(timeout);clearInterval(check);error?reject(error):fulfill()}
         child.once('error',()=>done(new Error('无法启动语音组件，请重新安装最新版。')))
         child.once('close',code=>done(reason?new Error(reason):code===0?undefined:new Error('语音识别未完成，请重试。')))
+        active.interrupt=()=>{if(!ended){reason='登录状态已变化，已停止语音识别。';child.kill()}}
       })
-      if (!authorized()) throw new Error('登录状态已变化。')
-      const text=await readFile(output+'.json','utf8');if(!authorized())throw new Error('登录状态已变化。');if(text.length>2_000_000)throw new Error('语音识别结果过大。')
+      if (!current()) throw new Error('登录状态已变化。')
+      const text=await readFile(output+'.json','utf8');if(!current())throw new Error('登录状态已变化。');if(text.length>2_000_000)throw new Error('语音识别结果过大。')
       return voiceTranscript(JSON.parse(text))
     } finally {
       if(directory){const relativePath=relative(resolve(this.temporaryRoot),resolve(directory));if(/^voice-[a-zA-Z0-9]+$/.test(relativePath))await rm(directory,{recursive:true,force:true}).catch(()=>undefined)}
       this.running=false
+      if(this.active===active)this.active=undefined
+      active.finish()
     }
   }
 }

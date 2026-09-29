@@ -18,7 +18,7 @@ async function listen(server) { await new Promise(resolve => server.listen(0, '1
 function trustFixture(ses) {
   ses.setCertificateVerifyProc((details, callback) => {
     let matching = false
-    try { matching = ['api.ipify.org', 'voice.google.com', '127.0.0.1'].includes(details.hostname) && new X509Certificate(details.certificate.data).fingerprint256 === fingerprint } catch {}
+    try { matching = ['api.ipify.org', 'voice.google.com', 'accounts.google.com', '127.0.0.1'].includes(details.hostname) && new X509Certificate(details.certificate.data).fingerprint256 === fingerprint } catch {}
     callback(matching ? 0 : -3)
   })
 }
@@ -26,19 +26,33 @@ function isolated(label, trust = true) {
   const ses = session.fromPartition('voice-network-fixture-' + label + '-' + randomUUID(), { cache: false })
   if (trust) trustFixture(ses)
   // Exclude Chromium component-update traffic from per-request auth counters.
-  ses.webRequest.onBeforeRequest((details, callback) => { let allowed = false; try { allowed = ['api.ipify.org', 'voice.google.com', '127.0.0.1'].includes(new URL(details.url).hostname) } catch {} callback({ cancel: !allowed }) })
+  ses.webRequest.onBeforeRequest((details, callback) => { let allowed = false; try { allowed = ['api.ipify.org', 'voice.google.com', 'accounts.google.com', '127.0.0.1'].includes(new URL(details.url).hostname) } catch {} callback({ cancel: !allowed }) })
   return ses
 }
 async function makeProxy(ip, username, password) {
-  const stats = { challenges: 0, supplied: 0, accepted: 0, requests: 0, cookieHeaders: 0, originAuthHeaders: 0, foreignTargets: 0 }
+  const stats = { challenges: 0, supplied: 0, accepted: 0, requests: 0, cookieHeaders: 0, originAuthHeaders: 0, foreignTargets: 0, signInRootRequests: 0, legacySignInRequests: 0, followedSignInRedirects: 0 }
   const backend = track(https.createServer(identity, (request, response) => {
     stats.requests++; if (request.headers.cookie) stats.cookieHeaders++; if (request.headers.authorization) stats.originAuthHeaders++
-    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', connection: 'close' }); response.end(JSON.stringify({ ip }))
+    if (request.headers.host === 'accounts.google.com') {
+      // Reproduce the real cookie-free Electron distinction: the transaction
+      // endpoint refuses the probe, while the public entry redirects normally.
+      const target = new URL(request.url, 'https://accounts.google.com')
+      if (target.pathname === '/') {
+        stats.signInRootRequests++
+        response.writeHead(302, { location: 'https://accounts.google.com/ServiceLogin?fixture=must-not-follow', 'cache-control': 'no-store', 'set-cookie': 'synthetic-google=must-not-overwrite; Secure; HttpOnly; Path=/', connection: 'close' }); response.end(); return
+      }
+      if (target.pathname === '/ServiceLogin') {
+        stats.legacySignInRequests++
+        if (target.search) stats.followedSignInRedirects++
+        response.writeHead(401, { 'content-type': 'text/plain', 'cache-control': 'no-store', connection: 'close' }); response.end('Synthetic transaction endpoint requires browser state'); return
+      }
+    }
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': 'synthetic-only=must-not-overwrite; Secure; HttpOnly; Path=/', connection: 'close' }); response.end(JSON.stringify({ ip }))
   }))
   const backendPort = await listen(backend)
   const proxy = track(http.createServer((_request, response) => { response.writeHead(400, { connection: 'close' }); response.end() }))
   const expected = 'Basic ' + Buffer.from(username + ':' + password).toString('base64')
-  const localTargets = new Set(['api.ipify.org:443'])
+  const localTargets = new Set(['api.ipify.org:443', 'voice.google.com:443', 'accounts.google.com:443'])
   proxy.on('connect', (request, socket, head) => {
     if (!localTargets.has(request.url)) { stats.foreignTargets++; console.log('fixture refused unrelated CONNECT', request.url); socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
     const supplied = request.headers['proxy-authorization']; if (supplied) stats.supplied++
@@ -64,6 +78,23 @@ async function requestJson(ses, url) {
     }); request.end()
   })
 }
+async function legacySignInStatus(ses, fixture) {
+  return new Promise((resolve, reject) => {
+    const request = net.request({ session: ses, url: 'https://accounts.google.com/ServiceLogin', method: 'GET', redirect: 'error', useSessionCookies: false })
+    const timer = setTimeout(() => { request.abort(); reject(new Error('Synthetic legacy sign-in request timed out')) }, 5000)
+    let supplied = false
+    request.on('login', (info, callback) => {
+      if (!supplied && info.isProxy && info.host === fixture.config.host && info.port === fixture.config.port) { supplied = true; callback(fixture.config.username, fixture.password) }
+      else callback()
+    })
+    request.on('error', error => { clearTimeout(timer); reject(error) })
+    request.on('response', response => {
+      response.on('data', () => {})
+      response.on('end', () => { clearTimeout(timer); resolve(response.statusCode) })
+      response.on('error', error => { clearTimeout(timer); reject(error) })
+    }); request.end()
+  })
+}
 app.whenReady().then(async () => {
   const originalRequest = net.request.bind(net)
   net.request = options => {
@@ -84,19 +115,34 @@ app.whenReady().then(async () => {
   const sesA = isolated('a'), sesB = isolated('b')
   await Promise.all([configureProxySession(sesA, a.config), configureProxySession(sesB, b.config)])
   await sesA.cookies.set({ url: 'https://api.ipify.org', name: 'synthetic-only', value: 'never-send-this-cookie', secure: true })
+  await sesA.cookies.set({ url: 'https://accounts.google.com', name: 'synthetic-google', value: 'never-send-google-cookie', secure: true })
+  assert.equal(await legacySignInStatus(sesA, a), 401)
+  assert.equal(a.stats.legacySignInRequests, 1)
   const [ipA, ipB] = await Promise.all([checkGoogleVoiceSession(sesA, a.config, a.password), checkGoogleVoiceSession(sesB, b.config, b.password)])
   assert.equal(ipA.ip, '203.0.113.21'); assert.equal(ipB.ip, '203.0.113.22')
   assert.ok(a.stats.accepted > 0 && b.stats.accepted > 0)
-  checks.push('Actual Electron checkGoogleVoiceSession follows each supplied Session through a distinct localhost CONNECT proxy')
+  assert.equal(ipA.reachable, true); assert.equal(ipB.reachable, true)
+  assert.ok(Object.values(ipA.checks).every(value => value.status === 'reachable'))
+  assert.equal(ipA.checks.signIn.httpStatus, 302); assert.equal(ipB.checks.signIn.httpStatus, 302)
+  assert.equal(a.stats.signInRootRequests, 1); assert.equal(b.stats.signInRootRequests, 1)
+  assert.equal(a.stats.legacySignInRequests, 1); assert.equal(b.stats.legacySignInRequests, 0)
+  assert.equal(a.stats.followedSignInRedirects + b.stats.followedSignInRedirects, 0)
+  checks.push('Actual Electron diagnostics use each isolated CONNECT proxy and accept the cookie-free official 302 entry without following it, even when legacy ServiceLogin returns 401')
   assert.equal(a.stats.cookieHeaders + b.stats.cookieHeaders, 0); assert.equal(a.stats.originAuthHeaders + b.stats.originAuthHeaders, 0)
-  checks.push('Actual HTTPS IP checks omit cookies and never forward proxy credentials as origin Authorization')
+  const storedCookies = await sesA.cookies.get({ url: 'https://api.ipify.org' })
+  assert.equal(storedCookies.find(value => value.name === 'synthetic-only')?.value, 'never-send-this-cookie')
+  const storedGoogleCookies = await sesA.cookies.get({ url: 'https://accounts.google.com' })
+  assert.equal(storedGoogleCookies.length, 1); assert.equal(storedGoogleCookies[0].name, 'synthetic-google'); assert.equal(storedGoogleCookies[0].value, 'never-send-google-cookie')
+  assert.deepEqual(await sesB.cookies.get({ url: 'https://accounts.google.com' }), [])
+  checks.push('Actual three-endpoint HTTPS checks omit cookies, do not store Set-Cookie, preserve existing cookies and never forward proxy credentials as origin Authorization')
   const wrong = isolated('wrong'), beforeSupplied = a.stats.supplied, beforeRequests = a.stats.requests
   await configureProxySession(wrong, a.config)
-  await assert.rejects(checkGoogleVoiceSession(wrong, a.config, 'synthetic-wrong-password'), /认证失败|连接检测失败/)
-  assert.equal(a.stats.supplied - beforeSupplied, 1); assert.equal(a.stats.requests, beforeRequests)
-  checks.push('Actual 407 rejection supplies the wrong synthetic credentials once and never reaches the origin')
+  const wrongResult = await checkGoogleVoiceSession(wrong, a.config, 'synthetic-wrong-password')
+  assert.ok(Object.values(wrongResult.checks).every(value => value.code === 'proxy-auth'))
+  assert.equal(a.stats.supplied - beforeSupplied, 3); assert.equal(a.stats.requests, beforeRequests)
+  checks.push('Actual 407 rejection supplies wrong credentials at most once per fixed endpoint and never reaches the origin')
   const untrusted = isolated('untrusted-tls', false); await configureProxySession(untrusted, b.config)
-  await assert.rejects(checkGoogleVoiceSession(untrusted, b.config, b.password), /连接检测失败/)
+  assert.equal((await checkGoogleVoiceSession(untrusted, b.config, b.password)).reachable, false)
   checks.push('A session without fixture trust rejects the self-signed TLS certificate; product TLS verification remains enabled')
   const browserSession = isolated('webcontents'), seen = []
   await configureProxySession(browserSession, a.config)
@@ -130,8 +176,11 @@ app.whenReady().then(async () => {
   await new Promise(resolve => a.proxy.close(resolve))
   const beforeDirect = directRequests
   await assert.rejects(requestJson(sesA, directUrl))
+  const stoppedProxy = await checkGoogleVoiceSession(sesA, a.config, a.password)
+  assert.equal(stoppedProxy.reachable, false)
+  assert.ok(Object.values(stoppedProxy.checks).every(value => value.status === 'failed' && value.code === 'proxy-connect'))
   assert.equal(directRequests, beforeDirect)
-  checks.push('After the configured proxy stops, Chromium fails closed and does not hit a separately proven reachable direct origin')
+  checks.push('After the configured proxy stops, all three production diagnostic probes fail closed and Chromium never reaches the proven direct origin')
   const socksExit = async ip => {
     const server = track(https.createServer(identity, (_request, response) => { response.writeHead(200, { 'content-type': 'application/json', connection: 'close' }); response.end(JSON.stringify({ ip })) }))
     return listen(server)
@@ -144,21 +193,23 @@ app.whenReady().then(async () => {
   const routeA = await prepareGoogleVoiceNetwork(socksA, 'socks-pass-a'), routeB = await prepareGoogleVoiceNetwork(socksB, 'socks-pass-b'); socksRoutes.push(routeA, routeB)
   const socksSessionA = isolated('socks-a'), socksSessionB = isolated('socks-b')
   await Promise.all([configureProxySession(socksSessionA, routeA.proxy), configureProxySession(socksSessionB, routeB.proxy)])
-  const socksIPs = await Promise.all([checkGoogleVoiceSession(socksSessionA, routeA.proxy, routeA.password), checkGoogleVoiceSession(socksSessionB, routeB.proxy, routeB.password)])
+  const socksIPs = await Promise.all([checkGoogleVoiceSession(socksSessionA, routeA.proxy, routeA.password, { route: routeA }), checkGoogleVoiceSession(socksSessionB, routeB.proxy, routeB.password, { route: routeB })])
   assert.deepEqual(socksIPs.map(value => value.ip), ['203.0.113.31', '203.0.113.32'])
-  assert.ok(peerA.stats.targets.some(value => value.type === 3 && value.host === 'api.ipify.org'))
+  for (const host of ['api.ipify.org', 'voice.google.com', 'accounts.google.com']) assert.ok(peerA.stats.targets.some(value => value.type === 3 && value.host === host))
+  assert.ok(socksIPs.every(value => value.reachable))
   assert.notEqual(routeA.proxy.port, routeB.proxy.port); assert.notEqual(routeA.password, routeB.password)
   checks.push('Two actual Electron Sessions tunnel HTTPS through independently authenticated SOCKS5 peers with remote target DNS')
   const badSocksRoute = await prepareGoogleVoiceNetwork(socksA, 'socks-wrong-password'); socksRoutes.push(badSocksRoute)
   const badSocksSession = isolated('socks-wrong'), beforeBad = peerA.stats.authAttempts
   await configureProxySession(badSocksSession, badSocksRoute.proxy)
-  await assert.rejects(checkGoogleVoiceSession(badSocksSession, badSocksRoute.proxy, badSocksRoute.password), /连接检测失败/)
-  assert.equal(peerA.stats.authAttempts - beforeBad, 1)
+  const badSocks = await checkGoogleVoiceSession(badSocksSession, badSocksRoute.proxy, badSocksRoute.password, { route: badSocksRoute })
+  assert.ok(Object.values(badSocks.checks).every(value => value.code === 'proxy-auth'))
+  assert.equal(peerA.stats.authAttempts - beforeBad, 3)
   await socksSessionA.closeAllConnections(); await socksSessionA.clearAuthCache()
   const beforeCross = peerA.stats.authAttempts
-  await assert.rejects(checkGoogleVoiceSession(socksSessionA, routeB.proxy, routeB.password), /认证失败|连接检测失败/)
+  assert.equal((await checkGoogleVoiceSession(socksSessionA, routeB.proxy, routeB.password)).reachable, false)
   assert.equal(peerA.stats.authAttempts, beforeCross)
-  checks.push('Actual SOCKS wrong-password requests fail once and another window local capability cannot reach the peer')
+  checks.push('Actual SOCKS wrong-password requests fail once per fixed endpoint and another window local capability cannot reach the peer')
   // Trust only our generated certificate in the isolated fixture process. The
   // production test function still creates/configures/closes its own session.
   app.on('session-created', trustFixture)
@@ -188,9 +239,16 @@ app.whenReady().then(async () => {
   finally { app.off('session-created', trustFixture) }
   const deadline = Date.now() + 15000
   while (!states.some(state => state.status === 'ready')) { if (Date.now() > deadline) throw new Error('Managed SOCKS view did not finish loading'); await new Promise(resolve => setTimeout(resolve, 30)) }
+  const managedPage = pages[0]
+  await managedPage.loadURL('https://voice.google.com/u/0/messages?itemId=synthetic-only')
+  const reloaded = new Promise(resolve => managedPage.once('did-finish-load', resolve))
+  manager.reload('synthetic-network-owner', managedId); await reloaded
+  assert.equal(pages[0], managedPage)
+  assert.equal(managedPage.getURL(), 'https://voice.google.com/u/0/messages?itemId=synthetic-only')
+  checks.push('Actual healthy refresh preserves the same view, session and selected conversation URL')
   const actualState = await manager.checkNetwork('synthetic-network-owner', managedId)
   assert.equal(actualState.status, 'checked'); assert.equal(actualState.ip, '203.0.113.32')
-  assert.equal(pages[0].getURL(), 'https://voice.google.com/u/0/')
+  assert.equal(pages[0].getURL(), 'https://voice.google.com/u/0/messages?itemId=synthetic-only')
   const actualRoute = await pages[0].session.resolveProxy('https://voice.google.com/u/0/'), managedPort = Number(/127\.0\.0\.1:(\d+)/.exec(actualRoute)?.[1])
   assert.ok(managedPort > 0)
   manager.close('synthetic-network-owner', managedId); manager.destroy(); host.destroy()

@@ -72,3 +72,36 @@ test('unauthenticated SOCKS and IPv6 targets use the same isolated bridge withou
     assert.deepEqual(upstream.stats.targets, [{ type: 4, host: '20010db8000000000000000000000001', port: 443 }])
   } finally { await route.close(); await upstream.close(); await end.close() }
 })
+
+test('authentication failures are scoped to a route and clear only after that target recovers', async () => {
+  const end = await backend(), upstream = await makeSocksFixture(end.port, 'fixture-user', 'fixture-secret', { rejectAuth: true })
+  const settings = { enabled: true, protocol: 'socks5' as const, host: '127.0.0.1', port: upstream.port, username: 'fixture-user' }
+  const a = await prepareGoogleVoiceNetwork(settings, 'fixture-secret'), b = await prepareGoogleVoiceNetwork(settings, 'fixture-secret'), before = Date.now()
+  try {
+    const rejected = await tunnel(a); assert.equal(rejected.status, 502); rejected.socket.destroy()
+    assert.equal(a.failureFor?.('voice.google.com', before), 'proxy-auth'); assert.equal(a.failureFor?.('accounts.google.com', before), undefined)
+    assert.equal(b.failureFor?.('voice.google.com', before), undefined); assert.equal(a.failureFor?.('voice.google.com', Date.now() + 1), undefined)
+    assert.equal(upstream.stats.targets.length, 0)
+    upstream.setRejectAuth(false)
+    const recovered = await tunnel(a); assert.equal(recovered.status, 200); recovered.socket.destroy()
+    assert.equal(a.failureFor?.('voice.google.com', before), undefined); assert.equal(a.isClosed?.(), false)
+    const independent = await tunnel(b); assert.equal(independent.status, 200); independent.socket.destroy()
+    await a.close(); assert.equal(a.isClosed?.(), true); assert.equal(b.isClosed?.(), false)
+  } finally { await Promise.all([a.close(), b.close()]); await upstream.close(); await end.close() }
+})
+
+test('an interrupted tunnel releases its sockets and reconnects through the same proxy with no route replacement', async () => {
+  const end = await backend(), upstream = await makeSocksFixture(end.port, 'fixture-user', 'fixture-secret')
+  const route = await prepareGoogleVoiceNetwork({ enabled: true, protocol: 'socks5', host: '127.0.0.1', port: upstream.port, username: 'fixture-user' }, 'fixture-secret')
+  try {
+    const first = await tunnel(route); assert.equal(first.status, 200)
+    const closed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('Disconnected tunnel remained open')), 2000)
+      first.socket.once('end', () => { clearTimeout(timer); first.socket.destroy(); resolve() }); first.socket.resume()
+    })
+    upstream.dropConnections(); await closed
+    const recovered = await tunnel(route); assert.equal(recovered.status, 200); recovered.socket.destroy()
+    assert.equal(upstream.stats.authenticated, 2); assert.equal(route.isClosed?.(), false)
+    assert.ok(upstream.stats.targets.every((target: any) => target.type === 3 && target.host === 'voice.google.com'))
+  } finally { await route.close(); await upstream.close(); await end.close() }
+})

@@ -2,11 +2,14 @@ import { createServer } from 'node:http'
 import { connect, isIP, type Socket } from 'node:net'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { AccountProxy } from '../../network/accountProxy'
+import type { GoogleVoiceProbeCode } from '../../../shared/googleVoiceNetwork'
 
 export interface GoogleVoiceNetworkRoute {
   proxy?: AccountProxy
   password: string
   close(): Promise<void>
+  isClosed?(): boolean
+  failureFor?(host: string, since: number): GoogleVoiceProbeCode | undefined
 }
 
 function readBytes(socket: Socket, length: number): Promise<Buffer> {
@@ -51,6 +54,11 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
   const authenticated = username.length > 0 || secret.length > 0
   if (authenticated && (!username.length || !secret.length || username.length > 255 || secret.length > 255)) throw new Error('SOCKS5 账号和密码需要同时填写，且各不超过 255 个 UTF-8 字节。')
   let closed = false, closing: Promise<void> | undefined
+  const failures = new Map<string, { code: GoogleVoiceProbeCode; at: number }>()
+  const failed = (host: string, code: GoogleVoiceProbeCode) => {
+    failures.delete(host); failures.set(host, { code, at: Date.now() })
+    if (failures.size > 32) failures.delete(failures.keys().next().value!)
+  }
   const sockets = new Set<Socket>()
   const localUser = randomBytes(24).toString('hex'), localPassword = randomBytes(32).toString('base64url')
   const capability = Buffer.from('Basic ' + Buffer.from(localUser + ':' + localPassword).toString('base64'))
@@ -75,7 +83,8 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
     if (client.destroyed || sockets.size >= 256) { client.destroy(); return }
     const upstream = connect({ host: proxyHost, port: proxyPort }); track(upstream)
     client.once('close', () => upstream.destroy())
-    const timer = setTimeout(() => upstream.destroy(new Error('SOCKS5 握手超时。')), 10_000)
+    let failure: GoogleVoiceProbeCode = 'proxy-connect'
+    const timer = setTimeout(() => { failure = 'timeout'; upstream.destroy(new Error('SOCKS5 握手超时。')) }, 10_000)
     void (async () => {
       try {
         await new Promise<void>((resolve, reject) => {
@@ -86,10 +95,10 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
         if (closed || client.destroyed) throw new Error()
         upstream.write(Buffer.from([5, 1, authenticated ? 2 : 0]))
         const method = await readBytes(upstream, 2)
-        if (method[0] !== 5 || method[1] !== (authenticated ? 2 : 0)) throw new Error()
+        if (method[0] !== 5 || method[1] !== (authenticated ? 2 : 0)) { if (authenticated) failure = 'proxy-auth'; throw new Error() }
         if (authenticated) {
           const packet = Buffer.concat([Buffer.from([1, username.length]), username, Buffer.from([secret.length]), secret])
-          try { upstream.write(packet); const auth = await readBytes(upstream, 2); if (auth[0] !== 1 || auth[1] !== 0) throw new Error() }
+          try { upstream.write(packet); const auth = await readBytes(upstream, 2); if (auth[0] !== 1 || auth[1] !== 0) { failure = 'proxy-auth'; throw new Error() } }
           finally { packet.fill(0) }
         }
         const port = Buffer.alloc(2); port.writeUInt16BE(target.port)
@@ -101,6 +110,7 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
         await readBytes(upstream, length + 2)
         if (closed || client.destroyed) throw new Error()
         clearTimeout(timer); client.setTimeout(0); upstream.setTimeout(0)
+        failures.delete(target.host)
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
         if (head.length) upstream.write(head)
         // Any bytes coalesced after the SOCKS reply stay in the readable buffer
@@ -109,6 +119,7 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
         upstream.once('close', () => { if (!client.destroyed && !client.writableEnded) client.end() })
         client.pipe(upstream); upstream.pipe(client)
       } catch {
+        if (!closed && !client.destroyed) failed(target.host, failure)
         upstream.destroy()
         if (!client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       } finally { clearTimeout(timer) }
@@ -116,9 +127,11 @@ export async function createGoogleVoiceSocksBridge(proxy: AccountProxy, password
   })
   const route: GoogleVoiceNetworkRoute = {
     proxy: undefined, password: localPassword,
+    isClosed: () => closed,
+    failureFor: (host, since) => { const value = failures.get(host); return value && value.at >= since ? value.code : undefined },
     close() {
       if (closing) return closing
-      closed = true; route.password = ''; username.fill(0); secret.fill(0); capability.fill(0)
+      closed = true; route.password = ''; username.fill(0); secret.fill(0); capability.fill(0); failures.clear()
       for (const socket of sockets) socket.destroy()
       closing = new Promise<void>(resolve => server.close(() => resolve()))
       return closing

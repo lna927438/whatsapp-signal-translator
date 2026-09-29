@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 
 const root = fileURLToPath(new URL('../', import.meta.url)), require = createRequire(resolve(root, 'package.json'))
 const esbuild = createRequire(require.resolve('vite'))('esbuild')
-const output = resolve(root, 'verification/google-voice-network-20260920')
+const output = resolve(root, 'verification/google-voice-network-20260924')
 const runId = randomUUID()
 await mkdir(output, { recursive: true })
 const syntax = spawnSync(process.execPath, ['--check', resolve(root, 'tests/google-voice-network-electron.cjs')], { windowsHide: true, encoding: 'utf8' })
@@ -25,7 +25,7 @@ now = datetime.datetime.now(datetime.timezone.utc)
 cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
  .serial_number(x509.random_serial_number()).not_valid_before(now-datetime.timedelta(minutes=5))
  .not_valid_after(now+datetime.timedelta(days=1))
- .add_extension(x509.SubjectAlternativeName([x509.DNSName('api.ipify.org'),x509.DNSName('voice.google.com'),x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]), critical=False)
+ .add_extension(x509.SubjectAlternativeName([x509.DNSName('api.ipify.org'),x509.DNSName('voice.google.com'),x509.DNSName('accounts.google.com'),x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]), critical=False)
  .sign(key,hashes.SHA256()))
 (out/'fixture-key.pem').write_bytes(key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
 (out/'fixture-cert.pem').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -43,6 +43,6 @@ const exit = await new Promise((resolve, reject) => { child.once('error', reject
 clearTimeout(timer); await writeFile(resolve(output, 'network-fixture.log'), log)
 await unlink(resolve(output, 'fixture-key.pem'))
 const result = exit === 0 ? JSON.parse(await readFile(resolve(output, 'results.json'), 'utf8')) : undefined
-if (result && (result.runId !== runId || result.passed !== 13)) throw new Error('Electron fixture did not produce current complete evidence')
+if (result && (result.runId !== runId || result.passed !== 14)) throw new Error('Electron fixture did not produce current complete evidence')
 console.log(JSON.stringify({ exitCode: exit, passed: result?.passed, evidence: output })); if (exit !== 0) console.log(log.slice(-7500))
 process.exitCode = exit ?? 1

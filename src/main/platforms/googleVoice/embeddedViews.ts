@@ -6,8 +6,12 @@ import { configureProxySession, type AccountProxy } from '../../network/accountP
 import { attachGoogleVoiceProxyAuth, checkGoogleVoiceSession, prepareGoogleVoiceNetwork, type GoogleVoiceNetworkRoute } from './network'
 import { installGoogleVoiceContextMenu } from './contextMenu'
 import type { GoogleVoicePage } from '../../../shared/googleVoicePage'
+import type { GoogleVoiceNetworkState } from '../../../shared/googleVoiceNetwork'
+import { parseGoogleVoiceRuntimeHealth, type GoogleVoiceRuntimeHealth } from '../../../shared/googleVoiceRuntimeHealth'
+export type { GoogleVoiceNetworkState } from '../../../shared/googleVoiceNetwork'
 
 const START_URL = 'https://voice.google.com/u/0/'
+const PAGE_ZOOM_FACTOR = 0.9
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 // A closed view and its replacement can share a persistent Chromium session.
 // Serialize setup/cleanup so an older completion never changes the new route.
@@ -71,10 +75,7 @@ export interface GoogleVoiceEmbeddedState {
   selected: boolean
   canGoBack: boolean
   network?: GoogleVoiceNetworkState
-}
-export interface GoogleVoiceNetworkState {
-  mode: 'proxy' | 'system'; status: 'unchecked' | 'checking' | 'checked' | 'error'
-  ip?: string; latencyMs?: number; checkedAt?: number; message?: string
+  runtimeHealth?: GoogleVoiceRuntimeHealth
 }
 export interface GoogleVoiceConnection { proxy?: AccountProxy; password: string }
 export interface GoogleVoiceEmbeddedBlocked {
@@ -91,13 +92,14 @@ export interface GoogleVoiceEmbeddedOptions {
   authorizeOwner?: (owner: string) => boolean
 }
 export interface GoogleVoiceTrustedPage { owner: string; accountId: string; url: string; authorized: () => boolean }
-interface Page { view: WebContentsView; status: GoogleVoiceEmbeddedStatus; origin: string; epoch: number; leavingVoice: boolean; detachAuth?: () => void; detachMenu?: () => void }
+interface Page { view: WebContentsView; status: GoogleVoiceEmbeddedStatus; origin: string; epoch: number; leavingVoice: boolean; runtimeHealth?: GoogleVoiceRuntimeHealth; healthTimer?: ReturnType<typeof setTimeout>; detachAuth?: () => void; detachMenu?: () => void }
 interface Record {
   key: string; owner: string; ownerHash: string; windowId: string; session: Session; pages: Page[]; audioConsent: boolean; notificationsConsent: boolean
   downloads: Map<DownloadItem, Page>
   downloadHandler?: (event: Electron.Event, item: DownloadItem, webContents: WebContents) => void
   connection?: GoogleVoiceConnection; route?: GoogleVoiceNetworkRoute; networkReady: boolean; configuring?: Promise<void>
   networkTimer?: ReturnType<typeof setTimeout>
+  checkAbort?: AbortController
   checking?: Promise<GoogleVoiceNetworkState>; network: GoogleVoiceNetworkState
 }
 const originOf = (value: string) => {
@@ -107,7 +109,7 @@ const securePreferences = (partition: string, preload?: string): WebPreferences 
   partition, ...(preload ? { preload } : {}), sandbox: true, nodeIntegration: false, nodeIntegrationInWorker: false,
   nodeIntegrationInSubFrames: false, contextIsolation: true, webSecurity: true,
   allowRunningInsecureContent: false, webviewTag: false, devTools: false,
-  navigateOnDragDrop: false, spellcheck: true
+  navigateOnDragDrop: false, spellcheck: true, zoomFactor: PAGE_ZOOM_FACTOR
 })
 
 /**
@@ -199,6 +201,7 @@ export class GoogleVoiceEmbeddedViews {
     const record = this.record(owner, windowId), page = this.top(record)
     if (record.configuring && record.network.status === 'error') throw new Error(record.network.message || '窗口网络尚未恢复，请退出 HelloDog 后重试。')
     this.revoke(page); page.status = 'loading'; this.layout(); this.emit(record)
+    if (record.route?.isClosed?.()) { record.networkReady = false; this.releaseNetworkRoute(record) }
     if (!record.networkReady) this.startNetwork(record)
     else page.view.webContents.reload()
   }
@@ -230,8 +233,11 @@ export class GoogleVoiceEmbeddedViews {
         current.detachAuth = attachGoogleVoiceProxyAuth(current.view.webContents, route.proxy, route.password)
       }
       record.networkReady = true
-      void page.view.webContents.loadURL(START_URL).catch(() => undefined)
-      if (record.connection?.proxy?.enabled) void this.checkNetwork(record.owner, record.windowId).catch(() => undefined)
+      const current = this.top(record).view.webContents
+      if (isGoogleVoiceEmbeddedUrl(current.getURL())) current.reload()
+      else void current.loadURL(START_URL).catch(() => undefined)
+      // Diagnostics are explicit user actions. Opening/reloading a window must
+      // not send extra IP-service or sign-in probes in the background.
     }).catch(() => {
       this.releaseNetworkRoute(record)
       if (!this.alive(record, page) || timedOut) return
@@ -246,16 +252,19 @@ export class GoogleVoiceEmbeddedViews {
     if (!record.networkReady || record.connection && !record.route) throw new Error(record.network.message || '窗口网络正在配置，请稍后检测。')
     if (record.checking) return record.checking
     const route = record.route
+    const controller = new AbortController(); record.checkAbort = controller
     record.network = { mode: record.network.mode, status: 'checking' }; this.emit(record)
-    const operation = checkGoogleVoiceSession(record.session, route?.proxy, route?.password || '').then(result => {
+    const operation = checkGoogleVoiceSession(record.session, route?.proxy, route?.password || '', { route, signal: controller.signal }).then(result => {
       if (this.records.get(record.key) !== record || record.route !== route || !record.networkReady) throw new Error('窗口已关闭或网络配置已变化，请重新检测。')
-      record.network = { mode: record.network.mode, status: 'checked', ...result }; this.emit(record)
+      const authenticationFailed = Object.values(result.checks).some(check => check.code === 'proxy-auth')
+      record.network = { mode: record.network.mode, status: result.reachable ? 'checked' : 'error', ...result,
+        ...(!result.reachable ? { message: authenticationFailed ? '代理认证失败，请核对账号和密码。' : '部分网络端点未通过检测；请查看各项结果。此检测不验证登录、短信或图片发送。' } : {}) }; this.emit(record)
       return { ...record.network }
     }).catch(() => {
       if (this.records.get(record.key) !== record || record.route !== route || !record.networkReady) throw new Error('窗口已关闭或网络配置已变化，请重新检测。')
-      record.network = { mode: record.network.mode, status: 'error', message: '出口 IP 暂时无法核实，请检查网络或代理后重试。' }; this.emit(record)
+      record.network = { mode: record.network.mode, status: 'error', message: '网络检测未完成，请检查网络或代理后重试。' }; this.emit(record)
       return { ...record.network }
-    }).finally(() => { if (record.checking === operation) record.checking = undefined })
+    }).finally(() => { if (record.checking === operation) record.checking = undefined; if (record.checkAbort === controller) record.checkAbort = undefined })
     record.checking = operation
     return operation
   }
@@ -302,6 +311,18 @@ export class GoogleVoiceEmbeddedViews {
     return { owner: record.owner, accountId: record.windowId, url, authorized }
   }
 
+  observeRuntimeHealth(event: IpcMainInvokeEvent, input: unknown): boolean {
+    const health = parseGoogleVoiceRuntimeHealth(input)
+    if (!health) return false
+    const trusted = this.trustedPage(event), record = this.record(trusted.owner, trusted.accountId), page = this.top(record)
+    if (!trusted.authorized() || page.view.webContents !== event.sender) return false
+    if (JSON.stringify(page.runtimeHealth) === JSON.stringify(health)) return true
+    page.runtimeHealth = health
+    clearTimeout(page.healthTimer); page.healthTimer = undefined
+    this.watchRuntimeHealth(record, page); this.emit(record)
+    return true
+  }
+
   close(owner: string, windowId: string): void { this.removeRecord(this.record(owner, windowId)) }
 
   destroy(): void {
@@ -337,7 +358,8 @@ export class GoogleVoiceEmbeddedViews {
       ownerHash: record.ownerHash, windowId: record.windowId, status: live ? page.status : 'closed',
       page: live && page.status === 'ready' ? googleVoicePage(page.view.webContents.getURL()) : 'unknown',
       origin: live ? page.origin : '', popupDepth: Math.max(0, record.pages.length - 1), selected: this.selected === record.key,
-      canGoBack: Boolean(live && (record.pages.length > 1 || page.view.webContents.navigationHistory.canGoBack())), network: { ...record.network }
+      canGoBack: Boolean(live && (record.pages.length > 1 || page.view.webContents.navigationHistory.canGoBack())), network: { ...record.network },
+      runtimeHealth: live && page.status === 'ready' && page.origin === 'https://voice.google.com' && page.runtimeHealth ? { ...page.runtimeHealth } : undefined
     }
   }
 
@@ -360,6 +382,13 @@ export class GoogleVoiceEmbeddedViews {
     record.pages.push(page); view.setVisible(false); view.setBackgroundColor('#ffffff')
     this.parent.contentView.addChildView(view)
     const wc = view.webContents
+    // Native page zoom keeps Chromium's layout and pointer hit testing aligned.
+    // Isolate it from the HelloDog shell and other webContents, including guests
+    // adopted from window.open. Reapply after navigation when Chromium restores
+    // the destination origin's saved page settings.
+    wc.setZoomMode('isolated')
+    const applyPageZoom = () => { if (this.alive(record, page)) wc.setZoomFactor(PAGE_ZOOM_FACTOR) }
+    applyPageZoom()
     page.detachMenu = installGoogleVoiceContextMenu(wc, () => this.alive(record, page) && page.status !== 'failed' && this.selected === record.key && this.top(record) === page && !this.overlayOpen && (this.options.authorizeOwner?.(record.owner) ?? true))
     if (record.connection) {
       wc.setWebRTCIPHandlingPolicy(record.connection.proxy?.enabled ? 'disable_non_proxied_udp' : 'default')
@@ -378,18 +407,24 @@ export class GoogleVoiceEmbeddedViews {
         // Reject fresh calls from the outgoing document before Chromium has
         // replaced its URL/frame with an official login or help destination.
         page.leavingVoice = originOf(event.url || url) !== 'https://voice.google.com'
-        if (!(event.isSameDocument ?? inPlace)) { page.status = 'loading'; this.emit(record) }
+        if (!(event.isSameDocument ?? inPlace)) { page.runtimeHealth = undefined; page.status = 'loading'; this.emit(record) }
       }
     })
-    wc.on('did-navigate', (_event, url) => { if (this.alive(record, page)) { page.origin = originOf(url); this.emit(record) } })
+    wc.on('did-navigate', (_event, url) => { if (this.alive(record, page)) { applyPageZoom(); page.origin = originOf(url); this.emit(record) } })
     wc.on('did-navigate-in-page', (_event, url, isMain) => { if (isMain && this.alive(record, page)) { page.origin = originOf(url); this.emit(record) } })
     const documentReady = () => {
-      if (record.networkReady && this.alive(record, page)) { page.status = 'ready'; page.origin = originOf(wc.getURL()); page.leavingVoice = page.origin !== 'https://voice.google.com'; this.layout(); this.emit(record) }
+      if (record.networkReady && this.alive(record, page)) { applyPageZoom(); page.status = 'ready'; page.origin = originOf(wc.getURL()); page.leavingVoice = page.origin !== 'https://voice.google.com'; this.layout(); this.emit(record) }
     }
     // A hung analytics/image request must not leave an interactive official page
     // behind a permanent loading indicator. Subresource loads never reset this.
     wc.on('dom-ready', documentReady)
     wc.on('did-finish-load', documentReady)
+    wc.on('preload-error', () => {
+      if (!this.alive(record, page)) return
+      clearTimeout(page.healthTimer); page.healthTimer = undefined
+      page.runtimeHealth = { phase: 'error', code: 'preload-failed', messageCount: 0 }
+      this.emit(record)
+    })
     wc.on('did-fail-load', (_event, code, _description, _url, isMain) => {
       if (isMain && code !== -3 && this.alive(record, page)) {
         this.revoke(page); page.status = 'failed'
@@ -498,7 +533,27 @@ export class GoogleVoiceEmbeddedViews {
       if (page.view.webContents.isDestroyed()) continue
       page.view.setVisible(this.visible(record) && this.top(record) === page && page.status !== 'failed' && bounds.width > 0 && bounds.height > 0)
       page.view.setBounds({ ...bounds, width: Math.max(1, bounds.width), height: Math.max(1, bounds.height) })
+      this.watchRuntimeHealth(record, page)
     }
+  }
+
+  private watchRuntimeHealth(record: Record, page: Page): void {
+    if (!this.visible(record) || this.top(record) !== page || page.status !== 'ready' || page.origin !== 'https://voice.google.com') {
+      clearTimeout(page.healthTimer); page.healthTimer = undefined; return
+    }
+    // Even 'waiting' proves that the runtime booted: the official message list
+    // can legitimately have no selected conversation for an unlimited time.
+    if (!this.options.preloadPath || page.healthTimer || page.runtimeHealth) return
+    const epoch = page.epoch
+    page.healthTimer = setTimeout(() => {
+      page.healthTimer = undefined
+      // Hidden/covered pages can be throttled. Report only while this document
+      // remains visible and current; never reload it or change send permissions.
+      if (!this.alive(record, page) || page.epoch !== epoch || !this.visible(record) || this.top(record) !== page ||
+        page.status !== 'ready' || page.origin !== 'https://voice.google.com' || page.runtimeHealth) return
+      page.runtimeHealth = { phase: 'error', code: 'runtime-unavailable', messageCount: 0 }; this.emit(record)
+    }, 15000)
+    page.healthTimer.unref?.()
   }
 
   private removePage(record: Record, page: Page): void {
@@ -537,6 +592,7 @@ export class GoogleVoiceEmbeddedViews {
   }
 
   private revoke(page: Page): void {
+    clearTimeout(page.healthTimer); page.healthTimer = undefined
     page.epoch++
     if (!page.view.webContents.isDestroyed()) {
       try { page.view.webContents.send('google-voice:context-changed') } catch { /* closing renderer */ }
@@ -550,6 +606,7 @@ export class GoogleVoiceEmbeddedViews {
   }
 
   private releaseNetworkRoute(record: Record): void {
+    record.checkAbort?.abort(); record.checkAbort = undefined
     const route = record.route; record.route = undefined
     for (const page of record.pages) { page.detachAuth?.(); page.detachAuth = undefined }
     if (route) this.closeNetworkRoute(route)

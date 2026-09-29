@@ -3,10 +3,16 @@ import { isIP } from 'node:net'
 import { net, session, type Session, type WebContents } from 'electron'
 import { configureProxySession, normalizeProxy, proxyAuthMatches, type AccountProxy } from '../../network/accountProxy'
 import { createGoogleVoiceSocksBridge, type GoogleVoiceNetworkRoute } from './socksBridge'
+import { isOfficialGoogleAccountsHost } from './googleAccountDomains'
+import type { GoogleVoiceNetworkCheck, GoogleVoiceNetworkProbe, GoogleVoiceProbeCode, GoogleVoiceProbeName } from '../../../shared/googleVoiceNetwork'
 export type { GoogleVoiceNetworkRoute } from './socksBridge'
+export type { GoogleVoiceNetworkCheck } from '../../../shared/googleVoiceNetwork'
 
-export type GoogleVoiceNetworkCheck = { ip: string; latencyMs: number; checkedAt: number }
-const CHECK_URL = 'https://api.ipify.org?format=json'
+// Test the public account-service entry, not the authentication transaction.
+// Cookie-free Electron requests to /ServiceLogin can return 401 even while a
+// normal browser can open the sign-in page. A verified first-hop redirect from
+// the service root proves network reachability without claiming a valid login.
+const CHECK_URLS = { exitIp: 'https://api.ipify.org?format=json', voice: 'https://voice.google.com/u/0/', signIn: 'https://accounts.google.com/' } as const
 const CHECK_TIMEOUT_MS = 12_000
 const CHECK_MAX_BYTES = 4096
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -97,47 +103,67 @@ export function attachGoogleVoiceProxyAuth(contents: WebContents, proxy: Account
   return dispose
 }
 
-/** Check the existing window's route without changing it or clearing its cookies. */
-export async function checkGoogleVoiceSession(ses: Session, proxy?: AccountProxy, password = ''): Promise<GoogleVoiceNetworkCheck> {
-  const configured = proxy ? normalizeGoogleVoiceProxy({ ...proxy, password }) : undefined
-  const started = Date.now()
-  return new Promise((resolve, reject) => {
-    let settled = false, authSupplied = false, bytes = 0, body = ''
+interface CheckOptions { signal?: AbortSignal; route?: GoogleVoiceNetworkRoute }
+function allowedDiagnosticRedirect(value: string): boolean {
+  try {
+    const url = new URL(value), authority = /^https:\/\/([a-z0-9.-]+)(?::443)?(?:[/?#]|$)/i.exec(value)
+    return !url.username && !url.password && !url.port && authority?.[1].toLowerCase() === url.hostname &&
+      (['voice.google.com', 'support.google.com', 'workspace.google.com'].includes(url.hostname) || isOfficialGoogleAccountsHost(url.hostname))
+  } catch { return false }
+}
+
+function checkEndpoint(ses: Session, name: GoogleVoiceProbeName, configured: AccountProxy | undefined, password: string, options: CheckOptions): Promise<{ probe: GoogleVoiceNetworkProbe; ip?: string }> {
+  const started = Date.now(), host = new URL(CHECK_URLS[name]).hostname
+  return new Promise(resolve => {
+    let settled = false, authSupplied = false, bytes = 0, body = '', httpStatus: number | undefined
     let request: Electron.ClientRequest | undefined
-    const finish = (error?: string, result?: GoogleVoiceNetworkCheck) => {
+    const finish = (code?: GoogleVoiceProbeCode, ip?: string, abort = true) => {
       if (settled) return
-      settled = true; clearTimeout(timer)
-      if (error) { reject(new Error(error)); request?.abort() }
-      else resolve(result!)
+      settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', cancel)
+      const checkedAt = Date.now()
+      resolve({ probe: { status: code ? 'failed' : 'reachable', latencyMs: Math.max(0, checkedAt - started), checkedAt, ...(code ? { code } : {}), ...(httpStatus ? { httpStatus } : {}) }, ...(ip ? { ip } : {}) })
+      if (abort) { try { request?.abort() } catch { /* already closed */ } }
     }
-    const fail = () => finish('连接检测失败，请检查网络、代理地址和账号密码。')
-    const timer = setTimeout(() => finish('连接检测超时，请检查网络、代理地址和账号密码。'), CHECK_TIMEOUT_MS)
+    const cancel = () => finish('cancelled')
+    const fail = (error?: Error) => {
+      const bridgeFailure = options.route?.failureFor?.(host, started)
+      const code = bridgeFailure || (/ERR_(?:PROXY_AUTH|INVALID_AUTH)/.test(error?.message || '') ? 'proxy-auth' : configured?.enabled ? 'proxy-connect' : 'network-error')
+      finish(code)
+    }
+    const timer = setTimeout(() => finish('timeout'), CHECK_TIMEOUT_MS)
+    options.signal?.addEventListener('abort', cancel, { once: true })
+    if (options.signal?.aborted) { cancel(); return }
     try {
-      request = net.request({
-        url: CHECK_URL, session: ses, method: 'GET', redirect: 'error', cache: 'no-store',
-        // Omit cookies but retain proxy authentication. credentials:'omit' would
-        // disable authentication; the session's Google cookies never go here.
-        useSessionCookies: false, referrerPolicy: 'no-referrer'
-      })
+      request = net.request({ url: CHECK_URLS[name], session: ses, method: 'GET', redirect: 'manual', cache: 'no-store',
+        // Keep proxy authentication but omit Google cookies. No login page body,
+        // personal URL, messages or uploaded media enter the diagnostic result.
+        useSessionCookies: false, referrerPolicy: 'no-referrer' })
       request.on('login', (info, callback) => {
         if (!settled && !authSupplied && configured && proxyAuthMatches(configured, info)) {
           authSupplied = true; callback(configured.username || '', password)
-        } else { callback(); finish('代理认证失败，请核对账号和密码后重新检测。') }
+        } else { callback(); finish('proxy-auth') }
       })
-      request.on('redirect', () => finish('出口 IP 检测服务发生跳转，已停止检测。'))
-      request.on('error', fail)
-      request.on('abort', fail)
-      // Electron 44's writable side can emit close immediately after end(),
-      // before Chromium delivers proxy auth or the response. The request/error,
+      request.on('redirect', (status, _method, url) => {
+        if (Number.isInteger(status) && status >= 300 && status <= 399) httpStatus = status
+        finish(httpStatus && name !== 'exitIp' && allowedDiagnosticRedirect(url) ? undefined : 'redirect-blocked')
+      })
+      request.on('error', fail); request.on('abort', () => fail())
+      // Electron's writable close can precede its network response; the error,
       // response/aborted and deadline paths determine completion instead.
       request.on('response', response => {
-        response.on('error', fail)
-        response.on('aborted', fail)
-        if (response.statusCode !== 200) { fail(); return }
+        response.on('error', fail); response.on('aborted', () => fail())
+        if (settled) return
+        if (!Number.isInteger(response.statusCode) || response.statusCode < 100 || response.statusCode > 599) { finish('invalid-response'); return }
+        httpStatus = response.statusCode
+        if (response.statusCode === 407) { finish('proxy-auth'); return }
+        if (response.statusCode < 200 || response.statusCode >= 300) { finish('http-error'); return }
+        // Headers from the fixed official endpoint prove reachability only. Stop
+        // before collecting the body or following a login/consent redirect.
+        if (name !== 'exitIp') { finish(); return }
         response.on('data', chunk => {
           if (settled) return
           bytes += Buffer.byteLength(chunk)
-          if (bytes > CHECK_MAX_BYTES) { finish('出口 IP 检测响应无效，已停止检测。'); return }
+          if (bytes > CHECK_MAX_BYTES) { finish('invalid-response'); return }
           body += chunk.toString()
         })
         response.on('end', () => {
@@ -145,14 +171,22 @@ export async function checkGoogleVoiceSession(ses: Session, proxy?: AccountProxy
           try {
             const ip = JSON.parse(body).ip
             if (typeof ip !== 'string' || !isIP(ip)) throw new Error()
-            const checkedAt = Date.now()
-            finish(undefined, { ip, latencyMs: Math.max(0, checkedAt - started), checkedAt })
-          } catch { finish('出口 IP 检测响应无效，请稍后重试。') }
+            finish(undefined, ip, false)
+          } catch { finish('invalid-response') }
         })
       })
       request.end()
     } catch { fail() }
   })
+}
+
+/** Explicit, cookie-free reachability check over one route. Never tests SMS or uploads. */
+export async function checkGoogleVoiceSession(ses: Session, proxy?: AccountProxy, password = '', options: CheckOptions = {}): Promise<GoogleVoiceNetworkCheck> {
+  const configured = proxy ? normalizeGoogleVoiceProxy({ ...proxy, password }) : undefined
+  const started = Date.now()
+  const [exitIp, voice, signIn] = await Promise.all((['exitIp', 'voice', 'signIn'] as const).map(name => checkEndpoint(ses, name, configured, password, options)))
+  const checkedAt = Date.now(), checks = { exitIp: exitIp.probe, voice: voice.probe, signIn: signIn.probe }
+  return { reachable: Object.values(checks).every(check => check.status === 'reachable'), ...(exitIp.ip ? { ip: exitIp.ip } : {}), latencyMs: Math.max(0, checkedAt - started), checkedAt, checks }
 }
 
 /** Test supplied settings in an isolated non-persistent session; no direct retry. */
@@ -165,7 +199,7 @@ export async function testGoogleVoiceProxy(input: any, password: string): Promis
     route = await prepareGoogleVoiceNetwork(proxy, password)
     try { await withTimeout(configureProxySession(ses, route.proxy), CHECK_TIMEOUT_MS, '代理设置超时。') }
     catch { throw new Error('代理设置未成功，已停止检测；请检查地址和端口。') }
-    return await checkGoogleVoiceSession(ses, route.proxy, route.password)
+    return await checkGoogleVoiceSession(ses, route.proxy, route.password, { route })
   } finally {
     // Only the temporary test session is cleaned. Never touch a logged-in window.
     await withTimeout(Promise.allSettled([

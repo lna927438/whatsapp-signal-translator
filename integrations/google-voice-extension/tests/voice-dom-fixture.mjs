@@ -152,7 +152,7 @@ try {
     const entry = document.querySelector('gv-message-entry'), form = document.createElement('form'); entry.before(form); form.append(entry)
     const event = new Event('submit', { bubbles: true, cancelable: true }); form.dispatchEvent(event); return event.defaultPrevented
   })
-  assert.equal(submitBlocked, true); await panelHas('当前短信编辑器尚未识别'); assert.equal(outgoingCount(), formCalls)
+  assert.equal(submitBlocked, true); await panelHas('当前短信编辑器或发送按钮未识别'); assert.equal(outgoingCount(), formCalls)
   await page.evaluate(() => { const entry = document.querySelector('gv-message-entry'), form = entry.closest('form'); form.before(entry); form.remove() })
   checks.push('unexpected enclosing form submission is intercepted and rejected before provider')
   preferences.sendAutoTranslate = true; quotaDenied = true; const beforeDenied = outgoing.size; await prepare('余额不足样例'); await panelHas('fixture host rejected'); assert.equal(outgoing.size, beforeDenied)

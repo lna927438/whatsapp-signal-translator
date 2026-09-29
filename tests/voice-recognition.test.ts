@@ -17,10 +17,16 @@ function wav(seconds=.15,amplitude=.2){
 function safeRemove(directory:string){assert.match(relative(resolve(process.env.TEMP||''),resolve(directory)),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(directory,{recursive:true,force:true})}
 function fixture(){
  const manifest={executable:'whisper-cli.exe',model:'ggml-base.bin',files:{'whisper-cli.exe':createHash('sha256').update('test-executable').digest('hex'),'ggml-base.bin':createHash('sha256').update('test-model').digest('hex')}},calls:any[]=[],children:any[]=[]
- let mode='success',holdRead=false,readingResult=false,finishRead:()=>void=()=>{}
+ let mode='success',holdRead=false,readingResult=false,finishRead:()=>void=()=>{},holdWrite=false,writing=false,finishWrite:()=>void=()=>{},holdCleanup=false,cleaning=false,finishCleanup:()=>void=()=>{}
  const h=mainHarness(undefined,undefined,{'../../../resources/voice/manifest.json':{default:manifest},'fs/promises':{...fsPromises,readFile:async(...args:any[])=>{
   const result=await (fsPromises.readFile as any)(...args)
   if(holdRead&&String(args[0]).endsWith('result.json')){readingResult=true;await new Promise<void>(resolve=>finishRead=resolve)}return result
+ },writeFile:async(...args:any[])=>{
+  await (fsPromises.writeFile as any)(...args)
+  if(holdWrite){writing=true;await new Promise<void>(resolve=>finishWrite=resolve)}
+ },rm:async(...args:any[])=>{
+  if(holdCleanup){cleaning=true;await new Promise<void>(resolve=>finishCleanup=resolve)}
+  await (fsPromises.rm as any)(...args)
  }},child_process:{spawn:(command:string,args:string[],options:any)=>{
   calls.push({command,args,options});const child:any=new EventEmitter();children.push(child);child.kill=()=>{child.killed=true;setImmediate(()=>child.emit('close',null));return true}
   const output=args[args.indexOf('-of')+1]
@@ -29,7 +35,7 @@ function fixture(){
  }}}),resources=join(h.directory,'bin'),temporary=join(h.directory,'temporary')
  mkdirSync(resources);writeFileSync(join(resources,manifest.executable),'test-executable');writeFileSync(join(resources,manifest.model),'test-model')
  const {VoiceRecognition,voiceTranscript}=h.load('src/main/translation/voiceRecognition.ts'),{validateVoiceWav}=h.load('src/shared/voiceAudio.ts')
- return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),close:()=>safeRemove(h.directory)}
+ return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
 }
 async function until(predicate:()=>boolean){for(let i=0;i<100&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(predicate(),'fixture operation started')}
 
@@ -103,4 +109,38 @@ test('native timeout terminates the job, removes audio and releases the busy sta
   context.mock.timers.tick(180001);await rejected;assert.equal(h.children[0].killed,true);assert.deepEqual(readdirSync(h.temporary),[])
   h.setMode('success');await h.voice.recognize(wav(),()=>true);assert.equal(h.calls.length,2)
  }finally{context.mock.timers.reset();h.close()}
+})
+
+test('final disposal kills the native child synchronously and waits for temporary cleanup before allowing exit',async()=>{
+ const h=fixture()
+ try{
+  h.setMode('hold');h.holdCleanup()
+  const pending=h.voice.recognize(wav(),()=>true),rejected=assert.rejects(pending,/登录状态已变化/)
+  await until(()=>h.calls.length===1);assert.equal(h.voice.busy,true)
+  const stopped=h.voice.dispose();let completed=false;void stopped.then(()=>{completed=true})
+  assert.equal(h.children[0].killed,true,'do not wait for the 250ms authorization poll')
+  assert.equal(h.voice.dispose(),stopped,'repeated shutdown shares one completion')
+  await until(()=>h.cleaning);assert.equal(completed,false);assert.equal(h.voice.busy,true);assert.equal(readdirSync(h.temporary).length,1)
+  h.finishCleanup();await stopped;await rejected
+  assert.equal(completed,true);assert.equal(h.voice.busy,false);assert.deepEqual(readdirSync(h.temporary),[])
+  await assert.rejects(h.voice.recognize(wav(),()=>true),/已关闭/);assert.equal(h.calls.length,1)
+ }finally{h.finishCleanup();h.close()}
+})
+
+test('disposal during asynchronous WAV creation cleans it and never starts a child afterward',async()=>{
+ const h=fixture()
+ try{
+  h.holdWrite();const pending=h.voice.recognize(wav(),()=>true),rejected=assert.rejects(pending,/登录状态已变化/)
+  await until(()=>h.writing);const stopped=h.voice.dispose();h.finishWrite();await stopped;await rejected
+  assert.equal(h.calls.length,0);assert.deepEqual(readdirSync(h.temporary),[]);assert.equal(h.voice.busy,false)
+ }finally{h.finishWrite();h.close()}
+})
+
+test('disposal during final result reading cannot return the transcript and still waits for cleanup',async()=>{
+ const h=fixture()
+ try{
+  h.holdRead();const pending=h.voice.recognize(wav(),()=>true),rejected=assert.rejects(pending,/登录状态已变化/)
+  await until(()=>h.readingResult);const stopped=h.voice.dispose();h.finishRead();await stopped;await rejected
+  assert.deepEqual(readdirSync(h.temporary),[]);assert.equal(h.voice.busy,false)
+ }finally{h.finishRead();h.close()}
 })

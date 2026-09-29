@@ -10,6 +10,7 @@ const accountId = accountArg?.slice('--rt-account-id='.length)
 
 contextBridge.exposeInMainWorld('realtimeTranslator', {
   recognizeVoice: (bytes: Uint8Array) => ipcRenderer.invoke('voice:recognize',accountId,bytes),
+  translateVoiceMessage: (value: import('../shared/voiceTranslation').VoiceMessageAudio) => ipcRenderer.invoke('voice:translate-message',accountId,value),
   getDraft: (target: any) => ipcRenderer.invoke('draft:get', { ...target, accountId }),
   saveDraft: (target: any, text: string) => ipcRenderer.invoke('draft:save', { ...target, accountId }, text),
   editComposer: (value: any) => ipcRenderer.invoke('whatsapp:edit-composer', accountId, value),

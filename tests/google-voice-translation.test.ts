@@ -51,6 +51,20 @@ test('image captions preserve translation billing and cannot authorize a changed
   await h.run('owner','window','translate',other,h.authorized);assert.equal(h.providerCalls,2)
 })
 
+test('a long translated editor can recover its uncertain send without translating or charging again', async () => {
+  const h = harness(), payload = { ...h.payload, text: '你好，'.repeat(2000) }
+  const translated = 'Hello, '.repeat(2000).trim()
+  h.setResult(translated)
+  const answer: any = await h.run('owner', 'window', 'translate', payload, h.authorized)
+  await h.run('owner', 'window', 'authorize', { ...payload, translated: answer.text, requestId: answer.requestId }, h.authorized)
+  const status: any = await h.run('owner', 'window', 'dispatch-status', { conversationId: payload.conversationId, text: translated }, h.authorized)
+  assert.equal(status.state, 'uncertain'); assert.equal(status.requestId, answer.requestId); assert.equal(status.attempt, 1)
+  assert.equal(h.providerCalls, 1)
+  await assert.rejects(h.run('owner', 'window', 'dispatch-status', { conversationId: payload.conversationId, text: 'x'.repeat(20001) }, h.authorized), /草稿无效/)
+  await assert.rejects(h.run('owner', 'window', 'translate', { ...payload, text: translated }, h.authorized), /翻译请求无效/)
+  assert.equal(h.providerCalls, 1)
+})
+
 test('media metadata is bounded and cannot smuggle filenames, URLs, unsupported files or incoming draft data',async()=>{
   const h=harness()
   for(const media of [null,{}, {...mediaFixture,count:0},{...mediaFixture,count:2},{...mediaFixture,types:['audio/mp3']},{...mediaFixture,totalBytes:20*1024*1024+1},{...mediaFixture,filename:'private'},{...mediaFixture,fingerprint:'bad'}]) {

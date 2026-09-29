@@ -25,7 +25,7 @@ export async function voiceAudioWav(url: string): Promise<Uint8Array> {
     label(0, 'RIFF'); view.setUint32(4, output.length - 8, true); label(8, 'WAVE'); label(12, 'fmt '); view.setUint32(16, 16, true)
     view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, 16000, true); view.setUint32(28, 32000, true)
     view.setUint16(32, 2, true); view.setUint16(34, 16, true); label(36, 'data'); view.setUint32(40, count * 2, true)
-    for (let i = 0; i < count; i++) { const sample = Number.isFinite(samples[i]) ? Math.max(-1, Math.min(1, samples[i])) : 0; view.setInt16(44 + i * 2, Math.round(sample * (sample < 0 ? 32768 : 32767)), true) }
+    for (let i = 0; i < count; i++) { const value = samples[i] ?? 0; const sample = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0; view.setInt16(44 + i * 2, Math.round(sample * (sample < 0 ? 32768 : 32767)), true) }
     return output
   } finally { await decoder.close() }
 }

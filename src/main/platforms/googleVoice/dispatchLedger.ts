@@ -10,6 +10,33 @@ type DispatchRow = {
 export type GoogleVoiceDispatchData = { records: DispatchRow[] }
 type Storage = { read(): Promise<GoogleVoiceDispatchData>; write(value: GoogleVoiceDispatchData): Promise<void> }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
+const validIdentity = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512 && !value.includes('\0')
+const validDigest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+const validTime = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
+
+function validatedData(value: unknown): GoogleVoiceDispatchData {
+  const invalid = () => new Error('发送记录暂时无法核对，请保留草稿并检查本机记录；未授权重新发送。')
+  if (!value || typeof value !== 'object' || !Array.isArray((value as GoogleVoiceDispatchData).records)) throw invalid()
+  const data = value as GoogleVoiceDispatchData
+  const identities = new Set<string>()
+  // An incomplete row must never look like a clear journal: that would permit
+  // another click after a lost reply. Preserve the file for recovery instead.
+  for (const row of data.records) {
+    if (!row || typeof row !== 'object' || Array.isArray(row) ||
+      ![row.owner, row.windowId, row.conversationId, row.requestId].every(validIdentity) ||
+      !validDigest(row.originalHash) || !validDigest(row.translatedHash) ||
+      !['uncertain', 'sent', 'not-sent'].includes(row.state) ||
+      !validTime(row.createdAt) || !Number.isSafeInteger(row.attempts) || row.attempts < 1 ||
+      row.resolvedAt !== undefined && !validTime(row.resolvedAt) ||
+      row.migratedTextHash !== undefined && !validDigest(row.migratedTextHash) ||
+      row.mediaKey !== undefined && !validDigest(row.mediaKey) ||
+      row.newRecipient !== undefined && typeof row.newRecipient !== 'boolean') throw invalid()
+    const key = JSON.stringify([row.owner, row.windowId, row.conversationId, row.requestId])
+    if (identities.has(key)) throw invalid()
+    identities.add(key)
+  }
+  return data
+}
 
 export class GoogleVoiceDispatchScopeError extends Error {
   constructor() { super('请返回“发送新短信”，重新选择原来的收件人并恢复原草稿，核对为未发送后重试。当前会话无法恢复原翻译回执，已保留待确认记录，未新增扣费。') }
@@ -25,8 +52,9 @@ export class GoogleVoiceDispatchLedger {
   private transact<T>(authorized: () => boolean, operation: (data: GoogleVoiceDispatchData) => T): Promise<T> {
     const work = this.writes.catch(() => undefined).then(async () => {
       if (!authorized()) throw new Error('登录状态已变化。')
-      const data = await this.storage.read()
-      if (!authorized() || !Array.isArray(data.records)) throw new Error('发送记录暂时无法核对。')
+      const stored = await this.storage.read()
+      if (!authorized()) throw new Error('登录状态已变化。')
+      const data = validatedData(stored)
       const result = operation(data)
       await this.storage.write(data)
       if (!authorized()) throw new Error('登录状态已变化；请核对发送记录。')
@@ -38,14 +66,17 @@ export class GoogleVoiceDispatchLedger {
   async snapshot(owner: string, windowId: string, conversationId: string, authorized: () => boolean) {
     await this.writes.catch(() => undefined)
     if (!authorized()) throw new Error('登录状态已变化。')
-    const data = await this.storage.read()
-    if (!authorized() || !Array.isArray(data.records)) throw new Error('发送记录暂时无法核对。')
+    const stored = await this.storage.read()
+    if (!authorized()) throw new Error('登录状态已变化。')
+    const data = validatedData(stored)
     return structuredClone(data.records.filter(row => row.owner === owner && row.windowId === windowId && row.conversationId === conversationId))
   }
   async status(owner: string, windowId: string, conversationId: string, text: string, authorized: () => boolean, mediaKey?: string) {
     await this.writes.catch(() => undefined)
-    const data = await this.storage.read()
-    if (!authorized() || !Array.isArray(data.records)) throw new Error('发送记录暂时无法核对。')
+    if (!authorized()) throw new Error('登录状态已变化。')
+    const stored = await this.storage.read()
+    if (!authorized()) throw new Error('登录状态已变化。')
+    const data = validatedData(stored)
     const originalHash = digest(text)
     const row = data.records.find(row => row.owner === owner && row.windowId === windowId &&
       (row.conversationId === conversationId || row.newRecipient === true && row.mediaKey === mediaKey) &&

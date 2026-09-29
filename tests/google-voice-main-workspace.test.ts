@@ -28,6 +28,9 @@ function fixture() {
     constructor(options: any = {}) { super(); this.session = options.session || fromPartition(options.partition); const wc = this; this.mainFrame = { get url() { return wc.url }, detached: false } }
     getURL() { return this.url } isDestroyed() { return this.destroyed }
     setWebRTCIPHandlingPolicy() {}
+    pageZoom = 1; zoomMode = 'default'
+    setZoomFactor(value: number) { this.pageZoom = value }
+    setZoomMode(value: string) { this.zoomMode = value }
     loadURL(url: string) { this.url = url; calls.push(['load', url]); return Promise.resolve() }
     setWindowOpenHandler(callback: any) { this.open = callback }
     focus() { this.focused = true }
@@ -86,8 +89,11 @@ test('changing one proxy invalidates its old view and keeps other accounts and l
   assert.equal(a.destroyed, true); assert.equal(b.destroyed, false); assert.equal(h.views[1].visible, true)
   await h.workspace.focus(A); const replacement = h.views[2].webContents
   assert.equal(replacement.session, session)
-  await h.workspace.refresh(A); assert.equal(replacement.destroyed, true)
-  assert.equal(h.views[3].webContents.session, session); assert.equal(b.destroyed, false)
+  replacement.url = 'https://voice.google.com/u/0/messages?itemId=synthetic-conversation'
+  await h.workspace.refresh(A); assert.equal(replacement.destroyed, false)
+  assert.equal(replacement.reloads, 1); assert.equal(h.views.length, 3)
+  assert.equal(replacement.session, session); assert.equal(b.destroyed, false)
+  assert.equal(replacement.url, 'https://voice.google.com/u/0/messages?itemId=synthetic-conversation')
 })
 
 test('disabled proxy never decrypts an obsolete password, and a slow refresh cannot steal another selection', async () => {
@@ -97,6 +103,31 @@ test('disabled proxy never decrypts an obsolete password, and a slow refresh can
   const gate = deferred(); h.getGates.set(A, gate.promise)
   const late = h.workspace.refresh(A); await h.workspace.focus(B); gate.resolve()
   assert.equal((await late).state, 'cancelled'); assert.equal(h.views[1].visible, true)
+})
+
+test('saving unchanged proxy settings preserves the live page, attachments and login session', async () => {
+  const h = fixture(), proxy = { enabled: true, protocol: 'http', host: 'proxy.invalid', port: 3128, username: 'user', hasPassword: true }
+  h.data[0].proxy = { ...proxy }; await h.workspace.focus(A)
+  const contents = h.views[0].webContents
+  contents.url = 'https://voice.google.com/u/0/messages?itemId=synthetic-draft'
+  await h.workspace.update(A, { label: 'Renamed', proxy: { ...proxy, password: '', clearPassword: false } })
+  assert.equal(contents.destroyed, false); assert.equal(h.views.length, 1)
+  assert.equal(contents.url, 'https://voice.google.com/u/0/messages?itemId=synthetic-draft')
+  assert.equal(contents.reloads, 0); assert.equal(h.data[0].label, 'Renamed')
+})
+
+test('editing saved but disabled proxy details preserves the current system-network page', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  await h.workspace.update(A, { proxy: { enabled: false, protocol: 'socks5', host: 'unused.invalid', port: 1080 } })
+  assert.equal(h.views[0].webContents.destroyed, false); assert.equal(h.views.length, 1)
+})
+
+test('credential replacement reconnects only its own window even with identical proxy endpoint', async () => {
+  const h = fixture(), proxy = { enabled: true, protocol: 'http', host: 'proxy.invalid', port: 3128, username: 'user', hasPassword: true }
+  h.data[0].proxy = { ...proxy }; await h.workspace.focus(A); await h.workspace.focus(B)
+  await h.workspace.update(A, { proxy: { ...proxy, password: 'synthetic-new-password' } })
+  assert.equal(h.views[0].webContents.destroyed, true); assert.equal(h.views[1].webContents.destroyed, false)
+  assert.equal(h.views[1].visible, true)
 })
 
 test('a late record lookup cannot restore an earlier selection or create an abandoned view', async () => {
@@ -126,7 +157,10 @@ test('CSS bounds use main UI zoom exactly once without monitor DPI scaling', asy
   const h = fixture(); h.setZoom(1.25); await h.workspace.focus(A)
   assert.equal(h.views[0].bounds.x, 63); assert.equal(h.views[0].bounds.y, 125)
   assert.equal(h.views[0].bounds.width, 1125); assert.equal(h.views[0].bounds.height, 813)
+  assert.equal(h.window.webContents.getZoomFactor(), 1.25, 'Voice must not change the shell zoom')
+  assert.equal(h.views[0].webContents.pageZoom, 0.9); assert.equal(h.views[0].webContents.zoomMode, 'isolated')
   h.setZoom(1); assert.equal(h.views[0].bounds.width, 900)
+  assert.equal(h.views[0].webContents.pageZoom, 0.9, 'Shell resizing must not compound or reset Voice page zoom')
   h.workspace.setBounds({ x: 0, y: 0, width: 0, height: 0 }); assert.equal(h.views[0].visible, false)
 })
 
@@ -279,6 +313,19 @@ test('Voice unread uses trusted page identity and local notification consent, su
   assert.throws(() => h.workspace.observeUnread({sender:{},senderFrame:wc.mainFrame},sample(9,7)))
   assert.throws(() => h.workspace.observeUnread({sender:wc,senderFrame:{}},sample(9,7)))
   wc.url = 'https://accounts.google.com/'; assert.throws(() => h.workspace.observeUnread(event,sample(9,7)))
+})
+
+test('runtime health reaches the shell and reselect result only for its authenticated window', async () => {
+  const h = fixture(); await h.workspace.focus(A)
+  const wc = h.views[0].webContents, event = { sender: wc, senderFrame: wc.mainFrame }
+  wc.url = 'https://voice.google.com/u/0/messages'; wc.emit('dom-ready')
+  const health = { phase: 'ready', code: 'translations-hidden', messageCount: 3 }
+  assert.equal(h.workspace.observeRuntimeHealth(event, health), true)
+  const state = h.calls.filter(call => call[0] === 'send' && call[1] === 'google-voice:state').at(-1)[2]
+  assert.equal(state.id, A); assert.equal(state.runtimeHealth.code, 'translations-hidden')
+  const result = await h.workspace.focus(A); assert.equal(result.runtimeHealth.code, 'translations-hidden')
+  h.setOwner('another-owner'); assert.throws(() => h.workspace.observeRuntimeHealth(event, health))
+  await h.workspace.detachAll()
 })
 
 test('Voice notification choice persists independently while microphone consent resets; closing clears only its activity', async () => {

@@ -57,6 +57,12 @@ function text(value: unknown, media?: GoogleVoiceMessageMedia): string {
   if (typeof value !== 'string' || !value.trim() && !media || value.includes('\0') || Array.from(value).length > 8000) throw invalid()
   return value
 }
+function translatedText(value: unknown, media?: GoogleVoiceMessageMedia): string {
+  // Translation can expand beyond the source limit. Match the translator's
+  // output/authorization boundary so a paid receipt remains usable in preview.
+  if (typeof value !== 'string' || !value.trim() && !media || value.includes('\0') || value.length > 20000) throw invalid()
+  return value
+}
 function statusValue(value: unknown): Record<string, unknown> {
   if (!object(value) || typeof value.connected !== 'boolean') throw invalid()
   const result: Record<string, unknown> = { connected: value.connected }
@@ -72,7 +78,7 @@ function translatedValue(value: unknown, media?: GoogleVoiceMessageMedia): Recor
     const received = googleVoiceMessageMedia(value.media)
     if (!received || googleVoiceMediaKey(received) !== googleVoiceMediaKey(media)) throw invalid()
   } else if (value.media !== undefined) throw invalid()
-  return { enabled: true, text: text(value.text, media), requestId: value.requestId, ...(value.untranslated === true ? { untranslated: true } : {}), ...(media ? { media } : {}) }
+  return { enabled: true, text: translatedText(value.text, media), requestId: value.requestId, ...(value.untranslated === true ? { untranslated: true } : {}), ...(media ? { media } : {}) }
 }
 
 /** Main-only replacement for the extension's transport and draft-ID storage.
@@ -99,7 +105,7 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
       if (typeof page.owner !== 'string' || !page.owner || page.owner.length > 512 || typeof page.accountId !== 'string' || !/^gv-[a-f0-9-]{36}$/.test(page.accountId)) throw invalid()
       const url = new URL(page.url)
       if (url.origin !== 'https://voice.google.com' || url.username || url.password || url.port) throw invalid()
-      if (!object(input) || input.v !== 1 || typeof input.type !== 'string' || !supported.has(input.type) || Buffer.byteLength(JSON.stringify(input), 'utf8') > 65536) throw invalid()
+      if (!object(input) || input.v !== 1 || typeof input.type !== 'string' || !supported.has(input.type) || Buffer.byteLength(JSON.stringify(input), 'utf8') > 131072) throw invalid()
       message = input
     } catch (error) { return this.failure(error) }
 
@@ -214,9 +220,11 @@ export class GoogleVoiceEmbeddedTranslation<Event = unknown> {
       if (payload.direction === 'incoming' && payload.manual !== true) this.incomingHistory.attest(scopeHash, payload, value.newMessage, page)
     } else if (message.type === 'voice.authorize') {
       if (!uuid(value.id) || !requestId(value.requestId)) throw invalid()
-      operation = 'authorize'; payload = { id: value.id, conversationId, text: text(value.text, media), translated: text(value.translated, media), requestId: value.requestId, ...mediaPayload }
+      operation = 'authorize'; payload = { id: value.id, conversationId, text: text(value.text, media), translated: translatedText(value.translated, media), requestId: value.requestId, ...mediaPayload }
     } else if (message.type === 'voice.dispatch-status') {
-      operation = 'dispatch-status'; payload = { conversationId, text: text(value.text, media), ...mediaPayload }
+      // A lost send reply can leave the expanded translation in the editor.
+      // Looking up its fingerprint must not reapply the smaller source limit.
+      operation = 'dispatch-status'; payload = { conversationId, text: translatedText(value.text, media), ...mediaPayload }
     } else if (message.type === 'voice.dispatch-resolve') {
       if (!requestId(value.requestId) || !['sent', 'not-sent'].includes(String(value.outcome)) || value.confirmed !== true || !Number.isSafeInteger(value.attempt) || Number(value.attempt) < 1) throw invalid()
       operation = 'dispatch-resolve'; payload = { conversationId, requestId: value.requestId, attempt: value.attempt, outcome: value.outcome, confirmed: true, ...mediaPayload }

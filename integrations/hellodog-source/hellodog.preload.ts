@@ -12,6 +12,7 @@ import { checkSockets } from '../textsecure/WebAPI.preload.ts';
 import { RecordingState } from '../types/AudioRecorder.std.ts';
 import type { QuickReplyDetail } from './hellodog.quick-reply.dom.ts';
 import { getSelectedConversationId } from '../state/selectors/nav.std.ts';
+import { startHelloDogVoiceMessages } from './hellodog.voice.preload.ts';
 
 const enabled = process.env.HELLODOG_EMBEDDED === '1' && process.env.HELLODOG_BRIDGE_ACTIVE === '1';
 type Translation = { original: string; translated: string; requestId: string };
@@ -136,6 +137,7 @@ export async function translateHelloDogMessage(message: MessageModel, conversati
 
 export function startHelloDogMessages(): void {
   if (!enabled) return;
+  startHelloDogVoiceMessages();
   window.addEventListener('hellodog-notification',event=>ipcRenderer.send('hellodog:notification',{silent:(event as CustomEvent).detail?.silent === true}));
   const pending = new Set<string>();
   const results = new Map<string,{body:string;result:any;revision:number}>();

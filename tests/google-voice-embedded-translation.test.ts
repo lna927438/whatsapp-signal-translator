@@ -246,9 +246,50 @@ test('corrupted persistent IDs fail closed instead of silently generating new bi
   assert.equal(Object.keys(h.data().records)[0], 'invalid'); assert.equal(h.calls.length, 0)
 })
 
+test('expanded paid translation reaches preview and authorization without changing source identity', async () => {
+  const h = fixture(), source = '原'.repeat(8000), id = await h.id(source)
+  const translated = '译'.repeat(20000), requestId = 'send-gv-' + 'a'.repeat(64)
+  h.setHandler(async call => call.op === 'translate' ? { enabled: true, text: translated, requestId } : { authorized: true, requestId, attempt: 1 })
+  const payload = { id, conversationId, text: source, direction: 'outgoing' }
+  const preview = await h.request('translate', payload)
+  assert.equal(preview.ok, true); assert.equal(preview.result.text, translated)
+  h.restart()
+  assert.equal(await h.id(source), id)
+  const authorization = await h.request('authorize', { ...payload, translated, requestId })
+  assert.equal(authorization.ok, true)
+  assert.equal(h.calls.at(-1)?.payload.translated, translated)
+  assert.equal(h.calls.at(-1)?.payload.id, id)
+  assert.ok(Buffer.byteLength(JSON.stringify({ v: 1, type: 'voice.authorize', payload: { ...payload, translated, requestId } }), 'utf8') > 65536)
+})
+
+test('translation expansion retains a separate bounded output contract including UTF-16 and NUL checks', async () => {
+  const h = fixture(), id = await h.id(), requestId = 'send-gv-' + 'a'.repeat(64)
+  const payload = { id, conversationId, text: '你好', direction: 'outgoing' }
+  for (const translated of ['x'.repeat(20001), '😀'.repeat(10001), 'Hello\0world', '']) {
+    h.setHandler(async () => ({ enabled: true, text: translated, requestId }))
+    assert.equal((await h.request('translate', payload)).code, 'invalid')
+    const before = h.calls.length
+    assert.equal((await h.request('authorize', { ...payload, translated, requestId })).code, 'invalid')
+    assert.equal(h.calls.length, before, 'invalid output cannot reserve another send')
+  }
+  h.setHandler(async () => ({ enabled: true, text: '😀'.repeat(10000), requestId }))
+  assert.equal((await h.request('translate', payload)).ok, true)
+  assert.equal(await h.id(), id)
+})
+
+test('a translated editor remains eligible for dispatch lookup but cannot become an oversized new source', async () => {
+  const h = fixture(), translated = '译'.repeat(20000)
+  h.setHandler(async () => ({ state: 'uncertain', requestId: 'send-fixture', attempt: 1 }))
+  assert.equal((await h.request('dispatch-status', { conversationId, text: translated })).result.state, 'uncertain')
+  const before = h.calls.length
+  assert.equal((await h.request('outgoing-id', { conversationId, text: translated })).code, 'invalid')
+  assert.equal((await h.request('dispatch-status', { conversationId, text: translated + 'x' })).code, 'invalid')
+  assert.equal(h.calls.length, before)
+})
+
 test('oversized, unknown and malformed operations never reach storage or engine', async () => {
   const h = fixture()
-  for (const input of [null, [], { v: 1, type: 'pair' }, { v: 2, type: 'voice.status' }, { v: 1, type: 'voice.status', junk: 'x'.repeat(65536) }]) assert.equal((await h.raw(input)).ok, false)
+  for (const input of [null, [], { v: 1, type: 'pair' }, { v: 2, type: 'voice.status' }, { v: 1, type: 'voice.status', junk: 'x'.repeat(131072) }]) assert.equal((await h.raw(input)).ok, false)
   assert.equal((await h.request('outgoing-id', { conversationId, text: 'x'.repeat(8001) })).code, 'invalid')
   assert.equal((await h.request('outgoing-id', { conversationId, text: 'nul\0text' })).code, 'invalid')
   assert.equal(h.calls.length, 0); assert.equal(Object.keys(h.data().records).length, 0)

@@ -1,3 +1,4 @@
+import './stdioGuard'
 import { t, onUiLanguageChanged } from './uiLocale'
 import { SettingsStore } from './storage/settingsStore'
 import { retireLegacyNotes } from './storage/retireLegacyNotes'

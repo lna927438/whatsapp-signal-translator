@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('../', import.meta.url)), require = createReq
 const esbuild = createRequire(require.resolve('vite'))('esbuild')
 const baselineRef = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length)
 if (baselineRef && !/^[a-f0-9]{40}$/.test(baselineRef)) throw new Error('Baseline must be a full commit ID')
-const output = resolve(root, 'verification/google-voice-unread-electron-20260920' + (baselineRef ? '-baseline-' + baselineRef.slice(0, 12) : ''))
+const output = resolve(root, 'verification/google-voice-unread-electron-20260924' + (baselineRef ? '-baseline-' + baselineRef.slice(0, 12) : ''))
 await mkdir(output, { recursive: true })
 const common = { bundle: true, platform: 'node', format: 'cjs', external: ['electron'], target: 'node24' }
 // Optional red/green proof changes only the fixture bundle's parser; source,
@@ -25,7 +25,7 @@ const timer = setTimeout(() => child.kill(), 75000)
 const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
 clearTimeout(timer); await writeFile(resolve(output, 'unread-electron.log'), log)
 const report = await readFile(resolve(output, 'unread-electron.json'), 'utf8').then(JSON.parse).catch(() => null)
-const passed = exit === 0 && report?.runId === runId && report.passed === true && report.checks?.length === 9
+const passed = exit === 0 && report?.runId === runId && report.passed === true && report.checks?.length === 11
 console.log(JSON.stringify({ exitCode: exit, passed, checks: report?.checks?.length, evidence: output }))
 if (!passed) console.log(log.slice(-6000))
 process.exitCode = passed ? 0 : 1

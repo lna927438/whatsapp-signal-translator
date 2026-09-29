@@ -1,10 +1,15 @@
 import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { patchSignalSendStatus } from './patch-signal-send-status.mjs';
-const root=resolve(import.meta.dirname,'..'), upstream=resolve(root,'integrations/signal-desktop');
+const root=resolve(import.meta.dirname,'..'), checkoutArg=process.argv.find(value=>value.startsWith('--checkout=')), upstream=checkoutArg?resolve(checkoutArg.slice('--checkout='.length)):resolve(root,'integrations/signal-desktop');
 async function replace(file,oldValue,newValue){const path=resolve(upstream,file);let value=(await readFile(path,'utf8')).replace(/\r\n/g,'\n');if(value.includes(newValue))return;if(!value.includes(oldValue))throw new Error('Upstream anchor changed: '+file);await writeFile(path,value.replace(oldValue,newValue));}
 for(const [from,to] of [['hellodog.main.ts','app/hellodog.main.ts'],['hellodog.preload.ts','ts/hellodog/hellodog.preload.ts'],['hellodog.recovery.preload.ts','ts/hellodog/hellodog.recovery.preload.ts'],['hellodog.focus.preload.ts','ts/hellodog/hellodog.focus.preload.ts'],['fs-xattr.d.ts','ts/hellodog/fs-xattr.d.ts']]){const path=resolve(upstream,to);await mkdir(dirname(path),{recursive:true});await copyFile(resolve(root,'integrations/hellodog-source',from),path);}
 await copyFile(resolve(root,'resources/brand/hellodog-icon.png'),resolve(upstream,'images/hellodog-icon.png'));
+for(const name of ['hellodog.voice.preload.ts','hellodog.voice.dom.ts']) await copyFile(resolve(root,'integrations/hellodog-source',name),resolve(upstream,'ts/hellodog',name));
+await copyFile(resolve(root,'src/shared/voiceAudio.ts'),resolve(upstream,'ts/hellodog/hellodog.voice-audio.std.ts'));
+// Voice attachments are decrypted locally, then decoded from an in-memory Blob.
+// Keep Signal's other page restrictions intact and permit only that local read.
+await replace('background.html', "connect-src 'self' https: wss: attachment: bundles:;", "connect-src 'self' https: wss: attachment: bundles: blob:;");
 await replace('app/user_config.main.ts',"if (config.has('storagePath')) {", "if (process.env.HELLODOG_EMBEDDED === '1' && process.env.HELLODOG_SIGNAL_USER_DATA) {\n  userData = process.env.HELLODOG_SIGNAL_USER_DATA;\n} else if (config.has('storagePath')) {");
 if (!(await readFile(resolve(upstream,'app/main.main.ts'),'utf8')).includes("import { attachHelloDog, helloDogEmbedded } from './hellodog.main.ts';")) await replace('app/main.main.ts',"import * as bounce from '../ts/services/bounce.main.ts';", "import { attachHelloDog, helloDogEmbedded } from './hellodog.main.ts';\nimport * as bounce from '../ts/services/bounce.main.ts';");
 {const file=resolve(upstream,'app/main.main.ts');let seen=false;const value=(await readFile(file,'utf8')).replace(/^import \{ attachHelloDog, helloDogEmbedded \} from '.\/hellodog.main.ts';\r?\n/gm,line=>{if(seen)return '';seen=true;return line});await writeFile(file,value);}

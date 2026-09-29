@@ -21,6 +21,15 @@ const cssImageToken = value => {
   return match ? match[1].toLowerCase() + ';' + match[2] : null
 }
 const identicalPreviewTokens = (a, b) => a.length === b.length && a.every((value, index) => value === b[index])
+const actionSelector = 'button,[role="button"],input[type="submit"],input[type="image"],input[type="button"]'
+const attachmentControl = control => control.matches('gv-send-attachment-list span.close-icon-overlay[role="button"]') ||
+  control.matches('button') && /^(?:Add image|添加图片|新增圖片|Remove image|移除图片|删除图片|移除圖片|刪除圖片)$/i.test(control.getAttribute('aria-label') || '')
+const actionableControl = control => {
+  if (control.closest('[hidden],[inert]') || control.matches(':disabled') || !control.getClientRects().length) return false
+  const style = control.ownerDocument.defaultView.getComputedStyle(control)
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+}
+const visibleProgress = entry => [...entry.querySelectorAll('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')].some(node => node.getClientRects().length > 0)
 const recipientNumber = text => {
   const value = (text || '').replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim()
   if (!/^[+()\d\s.\-]+$/.test(value)) return null
@@ -135,7 +144,7 @@ export class GoogleVoiceDomAdapter {
     const previews = css.previews
     if (!previews.length) return null
     if (!record || record.cleared || !record.knownFiles?.length) return { error: '图片未能与所选文件核对，请移除草稿图片后重新选择。' }
-    if (previews.some(preview => preview.pending) || entry.querySelector('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')) return { error: Date.now() <= record.deadline ? '图片仍在准备，请等官方预览完成。' : '图片预览未能完成，请移除后重新选择较小图片。' }
+    if (previews.some(preview => preview.pending) || visibleProgress(entry)) return { error: Date.now() <= record.deadline ? '图片仍在准备，请等官方预览完成。' : '图片预览未能完成，请移除后重新选择较小图片。' }
     const tokens = previews.map(preview => preview.token)
     const mapped = tokens.map(token => record.knownFiles.find(file => file.token === token))
     if (mapped.some(file => !file)) return { error: '图片预览与所选文件无法核对，请移除后重新选择较小图片。' }
@@ -167,7 +176,7 @@ export class GoogleVoiceDomAdapter {
     const files = [...entry.querySelectorAll('input[type="file"]')].flatMap(input => [...input.files || []])
     if (!record && imageFiles(files)) { this.captureFiles(entry, files); record = this.attachments.get(entry) }
     const css = this.cssPreviews(entry)
-    const hasProgress = [...entry.querySelectorAll('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')].some(node => node.getClientRects().length)
+    const hasProgress = visibleProgress(entry)
     const previewsRemoved = !previews.length && !css?.error && !css?.previews?.length && !hasProgress
     if (record && !record.cleared && previewsRemoved && (record.removeRequested || record.seenPreview && !record.selectionPending)) record = this.clearAttachments(entry, record)
     if (record?.error) return { error: record.error }
@@ -178,7 +187,7 @@ export class GoogleVoiceDomAdapter {
       return { mediaRevision: record?.revision || 0 }
     }
     if (!record?.media || record.cleared || previews.length !== record.media.count) return { error: '无法核实全部图片，请移除草稿图片后重新选择。' }
-    if (entry.querySelector('[role="progressbar"],mat-progress-spinner,mat-spinner,progress')) return { error: '图片仍在准备，请等官方预览完成。' }
+    if (hasProgress) return { error: '图片仍在准备，请等官方预览完成。' }
     if (previews.some(image => !image.getClientRects().length || !image.complete || image.naturalWidth < 1)) return { error: '图片预览尚未加载完成，请稍候。' }
     const signature = JSON.stringify(previews.map(image => image.currentSrc || image.getAttribute('src') || ''))
     if (!record.seenPreview && record.initialPreviews.length && record.previousFingerprint !== record.media.fingerprint && previews.every(image => record.initialPreviews.some(before => before.image === image && before.src === (image.currentSrc || image.getAttribute('src') || '')))) return { error: '正在等待所选图片的官方预览，请稍候。' }
@@ -218,10 +227,14 @@ export class GoogleVoiceDomAdapter {
     const recipients = this.recipients(), route = recipients ? JSON.stringify([recipients.path, 'draft', recipients.signature]) : this.route(), thread = one(this.document, 'gv-thread-details'), entry = one(this.document, 'gv-message-entry')
     if (!route || !thread || !entry || !recipients && this.document.querySelector('gv-message-party-picker')) { this.reason = '请先选择短信会话，或完整选定 1–7 位收件人；待输入号码与未识别收件人不会发送。'; return null }
     const composer = one(entry, 'textarea.message-input'), sendButton = one(entry, 'button.send-button')
-    if (!composer || !sendButton || composer.disabled || composer.readOnly || composer.getAttribute('aria-readonly') !== 'false' || composer.closest('form')) return null
+    if (!composer || !sendButton || composer.closest('form')) { this.reason = '当前短信编辑器或发送按钮未识别，已阻止发送；请保留草稿。'; return null }
+    // Native readOnly/disabled properties are authoritative. ARIA is optional
+    // on a textarea; its absence must not make an otherwise valid editor fail.
+    const ariaReadOnly = composer.getAttribute('aria-readonly')
+    if (composer.disabled || composer.readOnly || ariaReadOnly !== null && ariaReadOnly !== 'false') { this.reason = '短信编辑器暂不可输入，请等待页面恢复后重试。'; return null }
     // Stable custom element/class selectors identify the send surface across
     // localized labels. Image controls remain inside the native actions area.
-    if ([...entry.querySelectorAll('button')].some(button => button !== sendButton && !button.closest('gv-message-actions') && !/^(?:Add image|添加图片|新增圖片|Remove image|移除图片|删除图片|移除圖片|刪除圖片)$/i.test(button.getAttribute('aria-label') || ''))) { this.reason = '当前编辑器有未识别的操作控件，请保留草稿。'; return null }
+    if ([...entry.querySelectorAll(actionSelector)].some(control => control !== sendButton && actionableControl(control) && !attachmentControl(control))) { this.reason = '当前编辑器有未识别的操作控件，已阻止发送；请保留草稿。'; return null }
     const attachment = this.attachmentSnapshot(entry)
     if (entry.querySelector('video,audio')) { this.reason = '当前仅支持官方图片短信，视频和音频附件不能在此发送。'; return null }
     if (attachment.error) { this.reason = attachment.error; return null }
@@ -254,10 +267,21 @@ export class GoogleVoiceDomAdapter {
       this.captureFiles(entry, files)
       return null
     }
-    if (event.type === 'click' && target.closest('button.send-button')) return target.closest('button.send-button') === this.allowedButton ? null : 'send'
+    const control = target.closest(actionSelector)
+    if (control && (event.type === 'click' || ['keydown', 'keyup', 'keypress'].includes(event.type) && ['Enter', ' '].includes(event.key))) {
+      if (control.matches('button.send-button')) return control === this.allowedButton ? null : 'send'
+      if (!attachmentControl(control)) return 'unrecognized-control'
+    }
     if (event.type === 'submit') return 'send'
-    if (!target.matches('textarea.message-input')) return null
-    if ((event.key === 'Enter' && (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey)) || event.type === 'beforeinput' && event.inputType === 'insertParagraph') return 'send'
+    // A renamed editor must still be intercepted. Only inspect() may decide
+    // whether its target is known well enough to prepare or confirm a send.
+    const editor = target.closest('textarea,[contenteditable]:not([contenteditable="false"])')
+    if (!editor) return null
+    if ((event.key === 'Enter' && (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey)) || event.type === 'beforeinput' && event.inputType === 'insertParagraph') {
+      // Catch an unknown input without substituting another known draft. An
+      // event from a second editor is never intent to send the primary one.
+      return editor === one(entry, 'textarea.message-input') ? 'send' : 'unrecognized-editor'
+    }
     return null
   }
   isSendEvent(event) { return this.eventIntent(event) === 'send' }
@@ -291,7 +315,7 @@ export class GoogleVoiceDomAdapter {
   }
   dispatch(current) {
     const now = this.snapshot()
-    if (!now || now.conversationId !== current.conversationId || now.composer !== current.composer || now.sendButton !== current.sendButton || now.text !== current.text || !sameAdapterMedia(current, now) || now.sendButton.disabled) throw new Error('发送前页面已变化，请核对草稿。')
+    if (!now || now.conversationId !== current.conversationId || now.composer !== current.composer || now.sendButton !== current.sendButton || now.text !== current.text || !sameAdapterMedia(current, now) || now.sendButton.disabled || now.sendButton.getAttribute('aria-disabled') === 'true') throw new Error('发送前页面已变化，请核对草稿。')
     this.allowedButton = now.sendButton
     try { now.sendButton.click() } finally { this.allowedButton = null }
   }

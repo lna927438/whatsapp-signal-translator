@@ -3,6 +3,7 @@ import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 import { uiPreference } from '../lib/uiLocale'
 import UiLanguagePicker from './UiLanguagePicker.vue'
 import SettingsUpdates from './SettingsUpdates.vue'
+import VoiceFileTool from './VoiceFileTool.vue'
 import { channelsFromHealth, translationModelLabel, type TranslationChannel } from '../../../shared/translationChannels'
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -18,10 +19,25 @@ onUnmounted(prepareBeforeRestart(() => writes))
 async function restoreBackup() { try { if (await window.desktopAPI.restoreSettingsBackup()) { settings.value = await window.desktopAPI.getSettings(); settings.value.translationQuality ||= {}; savedSnapshot.value = JSON.parse(JSON.stringify(settings.value)); syncText(); emit('updated'); apiMessage.value = t('设置备份已恢复。') } } catch (e:any) { apiMessage.value = e.message } }
 async function exportBackup() { try { if (await window.desktopAPI.exportSettingsBackup()) apiMessage.value = t('设置备份已导出，不含密钥或聊天内容。') } catch (e:any) { apiMessage.value = e.message } }
 function syncText() { glossaryText.value = (settings.value.translationQuality?.glossary || []).map((item:any) => item.source + ' = ' + item.target).join('\n'); repliesText.value = (settings.value.quickReplies || []).join('\n') }
-const validTabs = ['translation','connection','notifications','appearance','runtime','data','updates']
+const validTabs = ['translation','voice','connection','notifications','appearance','runtime','data','updates']
 const tab = ref(validTabs.includes(props.initialTab || '') ? props.initialTab! : 'translation')
 watch(() => props.initialTab, value => { if (value && validTabs.includes(value)) tab.value = value })
-const sections = computed(() => ([{id:'translation',label:t('翻译')},{id:'connection',label:t('连接')},{id:'notifications',label:t('通知')},{id:'appearance',label:t('外观')},{id:'runtime',label:t('运行')},{id:'data',label:t('数据')},{id:'updates',label:t('版本与更新')}]))
+const sections = computed(() => ([{id:'translation',label:t('翻译')},{id:'voice',label:t('语音翻译')},{id:'connection',label:t('连接')},{id:'notifications',label:t('通知')},{id:'appearance',label:t('外观')},{id:'runtime',label:t('运行')},{id:'data',label:t('数据')},{id:'updates',label:t('版本与更新')}]))
+const voiceAccounts=ref<Array<{id:string;label:string;platform:string}>>([]),voiceAccountsLoading=ref(false),voiceAccountsError=ref('')
+let voiceAccountsRevision=0
+async function refreshVoiceAccounts(){
+ const revision=++voiceAccountsRevision;voiceAccountsLoading.value=true;voiceAccountsError.value=''
+ const results=await Promise.allSettled([window.desktopAPI.listAccounts(),window.desktopAPI.listGoogleVoiceWindows()])
+ if(revision!==voiceAccountsRevision)return
+ const known=new Set<string>(),items:Array<{id:string;label:string;platform:string}>=[]
+ results.forEach((result,index)=>{if(result.status!=='fulfilled'||!Array.isArray(result.value))return
+  for(const item of result.value){const platform=index===1?'google-voice':item?.platform;if(!item||typeof item.id!=='string'||!item.id||known.has(item.id)||!['whatsapp','signal','google-voice'].includes(platform))continue;known.add(item.id);items.push({id:item.id,platform,label:(platform==='whatsapp'?'WhatsApp':platform==='signal'?'Signal':'Google Voice')+' · '+String(item.label||item.id)})}
+ })
+ voiceAccounts.value=items;voiceAccountsLoading.value=false
+ if(results.some(result=>result.status==='rejected'||!Array.isArray(result.value)))voiceAccountsError.value=t('部分窗口暂时无法读取，请刷新后重试。')
+}
+watch(tab,value=>{if(value==='voice')void refreshVoiceAccounts()})
+onUnmounted(()=>{voiceAccountsRevision++})
 const cacheInfo = ref<any>(null), confirmClear = ref(false), clearing = ref(false)
 const sidebarSmall = ref(localStorage.getItem('hellodog:sidebar-collapsed') === 'true')
 async function refreshCache() { try { cacheInfo.value = await window.desktopAPI.getCacheInfo() } catch (e: any) { apiMessage.value = e.message } }
@@ -110,6 +126,7 @@ async function syncCloudSession() {
 }
 
 onMounted(async () => {
+  if(tab.value==='voice')void refreshVoiceAccounts()
   settings.value = await window.desktopAPI.getSettings()
   if (settings.value.blockChineseSend === undefined) settings.value.blockChineseSend = true
   settings.value.translationProvider ||= 'deepseek'
@@ -195,6 +212,11 @@ async function undo() {
 
       <nav class="settings-tabs" :aria-label="t('设置分类')"><button v-for="section in sections" :key="section.id" :aria-pressed="tab === section.id" @click="tab = section.id">{{ section.label }}</button></nav>
       <div class="settings-scroll" @change="save(false)" tabindex="0" :aria-label="t('设置内容，可滚动')">
+      <section v-if="tab==='voice'" @change.stop>
+        <button class="secondary" :disabled="voiceAccountsLoading" @click="refreshVoiceAccounts">{{t(voiceAccountsLoading?'读取中…':'刷新窗口列表')}}</button>
+        <p v-if="voiceAccountsError" role="alert">{{uiError(voiceAccountsError)}}</p>
+        <VoiceFileTool :accounts="voiceAccounts" />
+      </section>
       <div v-show="tab === 'connection'" class="connection-detail">
         <h3>{{ t('连接诊断') }}</h3>
         <div class="route-picker"><select v-model="settings.cloudRoute" :aria-label="t('翻译线路')" @change="selectRoute"><option value="auto">{{ t('自动切换线路') }}</option><option value="primary">{{ t('主线路 · api.hellodog.net') }}</option><option value="backup">{{ t('备用线路 · workers.dev') }}</option></select><button class="secondary" :disabled="checking" @click="checkConnection">{{ checking ? t('检测中…') : t('重新检测') }}</button></div>
@@ -255,9 +277,9 @@ async function undo() {
       <section v-show="tab === 'runtime'" class="settings-group"><h3>{{ t('桌面运行') }}</h3><label class="setup-toggle"><span>{{ t('开机启动（Windows / macOS）') }}</span><input v-model="settings.autoStart" type="checkbox" /></label><label class="setup-toggle"><span>{{ t('启动后最小化') }}</span><input v-model="settings.startMinimized" type="checkbox" /></label><label class="setup-toggle"><span>{{ t('点击右上角 X 后在后台运行（推荐）') }}</span><input v-model="settings.closeToTray" type="checkbox" /></label><p>{{ t('默认关闭窗口不退出、不停止后台翻译；通过系统托盘菜单“退出 HelloDog”完全退出。关闭此选项后，X 将退出窗口。启动最小化将在下次启动生效。') }}</p></section>
       <section v-show="tab === 'data'" class="settings-group"><h3>{{ t('翻译缓存') }}</h3><p>{{ cacheInfo ? t('当前账号缓存：') + cacheInfo.translations + t(' 条，约 ') + (cacheInfo.bytes / 1024).toFixed(1) + t(' KB；缓存文件合计 ') + (cacheInfo.totalBytes / 1024).toFixed(1) + ' KB' : t('读取中…') }}</p><button class="secondary" @click="refreshCache">{{ t('刷新统计') }}</button><button class="secondary" @click="confirmClear = true">{{ t('清理我的翻译缓存…') }}</button><div v-if="confirmClear" role="alert"><p>{{ t('仅清理当前账号的译文缓存。保留登录、代理、草稿和请求防重记录。确定清理？') }}</p><button :disabled="clearing" class="secondary" @click="clearCache">{{ t('确认清理') }}</button><button class="secondary" @click="confirmClear = false">{{ t('取消') }}</button></div><h3>{{ t('设置备份与恢复') }}</h3><p>{{ t('备份语言、术语、快捷回复和应用偏好。不含密钥、登录、账号会话、聊天内容或发送任务。请求防重记录和草稿仍保存在本机，不随清缓存删除。') }}</p><button class="secondary" @click="exportBackup">{{ t('导出设置备份') }}</button><button class="secondary" @click="restoreBackup">{{ t('选择备份并预览恢复…') }}</button></section>
       <SettingsUpdates v-if="tab === 'updates'" />
-      <p v-if="apiMessage && !['connection','updates'].includes(tab)" role="status">{{ uiError(apiMessage) }}</p>
+      <p v-if="apiMessage && !['connection','updates','voice'].includes(tab)" role="status">{{ uiError(apiMessage) }}</p>
       </div>
-      <footer><button class="secondary" :disabled="!undoSnapshot || saving" @click="undo">{{ t('撤销上次修改') }}</button><button class="secondary" @click="emit('close')">{{ t('关闭') }}</button><button class="primary" :disabled="saving" @click="save(true)">{{ saving ? t('保存中…') : t('保存设置') }}</button></footer>
+      <footer><button v-if="tab!=='voice'" class="secondary" :disabled="!undoSnapshot || saving" @click="undo">{{ t('撤销上次修改') }}</button><button class="secondary" @click="emit('close')">{{ t('关闭') }}</button><button v-if="tab!=='voice'" class="primary" :disabled="saving" @click="save(true)">{{ saving ? t('保存中…') : t('保存设置') }}</button></footer>
     </section>
   </div>
 </template>

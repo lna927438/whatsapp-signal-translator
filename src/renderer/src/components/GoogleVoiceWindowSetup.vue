@@ -3,15 +3,20 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { uiError, uiLanguage } from '../lib/uiLocale'
 import type { GoogleVoiceWindow, GoogleVoiceWindowOptions, GoogleVoiceNetwork } from '../lib/googleVoiceWorkspace'
 import { parseGoogleVoiceProxyImport } from '../../../shared/googleVoiceProxyImport'
+import { googleVoiceProxyConnectionKey, googleVoiceProxyNeedsReconnect } from '../../../shared/googleVoiceWindowConfig'
+import type { GoogleVoiceNetworkCheck } from '../../../shared/googleVoiceNetwork'
+import GoogleVoiceNetworkStatus from './GoogleVoiceNetworkStatus.vue'
 const props = defineProps<{ record?: GoogleVoiceWindow; network?: GoogleVoiceNetwork; save: (value: GoogleVoiceWindowOptions) => Promise<boolean> }>()
 const emit = defineEmits<{ close: [] }>()
 const text = (zh: string, en: string) => uiLanguage.value === 'en' ? en : zh
 const panel = ref<HTMLElement>(), busy = ref(false), testing = ref(false), error = ref(''), pasted = ref('')
-const tested = ref<{ ip: string; latencyMs: number; checkedAt: number }>()
+const tested = ref<GoogleVoiceNetworkCheck>()
 const importError = ref(''), importNotice = ref('')
 const importFeedback = ref<HTMLElement>()
 const draft = reactive({ label: props.record?.label || 'Google Voice', proxy: { enabled: false, protocol: 'http' as 'http'|'https'|'socks5', host: '', port: 8080, username: '', hasPassword: false, ...props.record?.proxy, password: '', clearPassword: false } })
 const locked = computed(() => busy.value || testing.value)
+const reconnects = computed(() => !!props.record && googleVoiceProxyNeedsReconnect(googleVoiceProxyConnectionKey(props.record.proxy), draft.proxy, draft.proxy))
+const currentConnectionMode = computed(() => props.network?.mode || (props.record?.proxy?.enabled ? 'proxy' : 'system'))
 let disposed = false
 watch(() => JSON.stringify(draft.proxy), () => { tested.value = undefined })
 watch(() => draft.proxy.password, value => { if (value) draft.proxy.clearPassword = false })
@@ -92,24 +97,30 @@ onUnmounted(() => { disposed = true; draft.proxy.password = ''; pasted.value = '
           <p id="voice-proxy-import-help" class="hint">{{ text('支持：地址:端口:账号:密码、账号:密码@地址:端口，或完整代理链接。没有协议前缀时使用上方所选协议。', 'Accepts host:port:username:password, username:password@host:port, or a full proxy URL. Without a prefix, the selected protocol is used.') }}</p>
           <p v-if="importError" ref="importFeedback" class="error" role="alert">{{ importError }}</p>
           <p v-else-if="importNotice" ref="importFeedback" class="result" role="status">{{ importNotice }}</p>
-          <button type="button" class="secondary" @click="test">{{ text(testing ? '正在检测…' : '检测此配置', testing ? 'Checking…' : 'Test this configuration') }}</button>
-          <p v-if="tested" class="result" role="status">{{ text('检测出口 IP：','Test exit IP: ') }}{{ tested.ip }} · {{ tested.latencyMs }} ms</p>
-          <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测成功后再保存使用。出口 IP 检测不代表 Google 账号或图片服务可用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test before saving. An exit IP check does not verify access to your Google account or image services.') }}</p>
+          <p class="hint">{{ text('支持带账号密码的 SOCKS5。代理断开时不会自动直连；检测后再保存使用。','Authenticated SOCKS5 is supported. No automatic direct fallback; test before saving.') }}</p>
         </div>
+        <button v-if="draft.proxy.enabled" type="button" class="secondary" @click="test">{{ text(testing ? '正在检测…' : '检测此配置', testing ? 'Checking…' : 'Test this configuration') }}</button>
+        <section v-if="tested" class="configuration-test">
+          <b>{{ text(reconnects ? '待保存配置检测' : '填写配置检测', reconnects ? 'Unsaved configuration check' : 'Entered configuration check') }}</b>
+          <p class="hint">{{ text('此检测仅检查填写的配置，不会切换当前窗口的连接。', 'This checks the entered configuration only. It does not change the current window connection.') }}</p>
+          <GoogleVoiceNetworkStatus :result="tested" />
+        </section>
       </fieldset>
       <section v-if="record" class="current-network">
-        <b>{{ text('当前窗口连接','Current window connection') }}</b>
-        <p v-if="network?.status === 'checked'">{{ network.ip }} · {{ network.latencyMs }} ms <small>{{ text('检测于 ','Checked at ') }}{{ new Date(network.checkedAt!).toLocaleTimeString() }}</small></p>
-        <p v-else>{{ text(network?.status === 'checking' ? '正在核实出口 IP…' : network?.status === 'error' ? '出口 IP 检测未通过' : '尚未核实出口 IP', network?.status === 'checking' ? 'Checking exit IP…' : network?.status === 'error' ? 'Exit IP check failed' : 'Exit IP has not been checked') }}</p>
-        <button type="button" class="secondary" :disabled="locked" @click="checkCurrent">{{ text('刷新当前 IP','Refresh current IP') }}</button>
+        <div class="network-heading"><b>{{ text('当前窗口连接','Current window connection') }}</b><span class="network-mode">{{ text(currentConnectionMode === 'proxy' ? '已保存代理' : '系统网络', currentConnectionMode === 'proxy' ? 'Saved proxy' : 'System network') }}</span></div>
+        <p v-if="reconnects" class="hint">{{ text('当前窗口仍使用已保存连接；点击“保存并重连”后，请再次检测当前连接。', 'The current window still uses its saved connection. After Save and reconnect, check the current connection again.') }}</p>
+        <p v-if="network?.status === 'checking'">{{ text('正在检测当前连接…', 'Checking the current connection…') }}</p>
+        <GoogleVoiceNetworkStatus v-else :result="network || {}" />
+        <button type="button" class="secondary" :disabled="locked" @click="checkCurrent">{{ text('检测当前连接','Check current connection') }}</button>
       </section>
-      <p class="hint">{{ text('云端翻译继续使用 HelloDog 服务线路。', 'Cloud translation continues through HelloDog services.') }}<span v-if="record"> {{ text('保存将重新连接此窗口，请先结束通话并保存草稿。','Saving reconnects this window. Finish calls and save drafts first.') }}</span></p>
+      <p class="hint">{{ text('云端翻译继续使用 HelloDog 服务线路。', 'Cloud translation continues through HelloDog services.') }}<span v-if="reconnects"> {{ text('连接配置已改变，保存会重新连接此窗口；请先保存草稿，图片可能需要重新添加。','The connection has changed. Saving reconnects this window; save drafts first. Images may need to be reattached.') }}</span><span v-else-if="record"> {{ text('连接配置未改变，保存设置会保留当前页面。','The connection is unchanged. Saving keeps the current page open.') }}</span></p>
       <p v-if="error" role="alert" class="error">{{ error }}</p>
-      <footer><button type="button" class="secondary" :disabled="locked" @click="close">{{ text('取消','Cancel') }}</button><button class="primary" :disabled="locked || !draft.label.trim()" type="submit">{{ text(busy ? '正在保存…' : record ? '保存并重连' : '创建窗口', busy ? 'Saving…' : record ? 'Save and reconnect' : 'Create window') }}</button></footer>
+      <footer><button type="button" class="secondary" :disabled="locked" @click="close">{{ text('取消','Cancel') }}</button><button class="primary" :disabled="locked || !draft.label.trim()" type="submit">{{ text(busy ? '正在保存…' : record ? reconnects ? '保存并重连' : '保存设置' : '创建窗口', busy ? 'Saving…' : record ? reconnects ? 'Save and reconnect' : 'Save settings' : 'Create window') }}</button></footer>
     </form>
   </div>
 </template>
 
 <style scoped>
+.configuration-test{font-size:13px}.network-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px}.network-mode{color:var(--muted);font-size:12px}
 .voice-window-setup{width:min(550px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:24px;background:var(--panel,#19232a);color:var(--text);border:1px solid var(--border);border-radius:14px}header{display:flex;align-items:center;justify-content:space-between;padding:0;margin-bottom:20px}h2{margin:0;font-size:20px}header button{background:none;border:0;color:inherit;font-size:24px}fieldset{border:0;padding:0;margin:0;min-width:0;display:grid;gap:20px}label{display:grid;gap:7px;font-size:13px}input:not([type=checkbox]),select{width:100%;min-width:0;box-sizing:border-box;background:var(--field);border:1px solid var(--border);border-radius:7px;color:inherit;padding:10px;font:inherit}.switch{display:flex;justify-content:space-between;align-items:center;gap:20px}.switch small{display:block;margin-top:6px;color:var(--muted);line-height:1.6}.switch input,.clear input{accent-color:#65bc9c;width:18px;height:18px;flex-shrink:0}.proxy-settings{padding:16px;background:var(--field);border:1px solid var(--border);border-radius:10px;display:grid;gap:14px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.import{display:flex;gap:8px}.import button{flex-shrink:0}.clear{display:flex;align-items:center}.hint{font-size:12px;color:var(--muted);line-height:1.7;margin:8px 0 0}.result{color:var(--accent);font-size:13px;overflow-wrap:anywhere;margin:0}.current-network{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);font-size:13px}.current-network small{display:block;color:var(--muted);margin-top:5px}.error{color:#f1a499;font-size:13px;line-height:1.6}footer{display:flex;justify-content:flex-end;gap:10px;padding:0;margin-top:22px}button:disabled{opacity:.5;cursor:default}@media(max-width:480px){.grid{grid-template-columns:1fr}.voice-window-setup{padding:18px}}
 </style>
