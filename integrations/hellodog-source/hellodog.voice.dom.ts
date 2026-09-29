@@ -35,7 +35,9 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
         let panel = Array.from(element.querySelectorAll<HTMLElement>('[data-hellodog-voice]')).find(node => node.dataset.hellodogVoice === id);
         if (!panel) {
           panel = deps.document.createElement('section'); panel.dataset.hellodogVoice = id; panel.dataset.hellodogUi = 'voice';
-          panel.setAttribute('aria-label', '语音转中文'); panel.style.cssText = 'padding:7px 10px;max-width:420px;white-space:normal;overflow-wrap:anywhere;font-size:13px';
+          // Signal's container-outer uses line-height:0 for its media layout.
+          // Reset it for our text so wrapped status/results take up real height.
+          panel.setAttribute('aria-label', '语音转中文'); panel.style.cssText = 'box-sizing:border-box;padding:7px 10px;max-width:420px;min-width:0;white-space:normal;overflow-wrap:anywhere;font-size:13px;line-height:1.5';
           (element.querySelector('.module-message__container') || element).appendChild(panel);
         }
         const view = JSON.stringify([state.busy, state.error, state.result?.translation, item.ready]);

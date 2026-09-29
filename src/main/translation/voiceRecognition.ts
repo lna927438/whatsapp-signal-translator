@@ -69,7 +69,10 @@ export class VoiceRecognition {
       await writeFile(wav,bytes,{mode:0o600})
       if (!current()) throw new Error('登录状态已变化。')
       await new Promise<void>((fulfill,reject)=>{
-        const child=spawn(join(this.resources,manifest.executable),['-m',join(this.resources,manifest.model),'-f',wav,'-l','auto','-t','2','-ng','-oj','-of',output,'-np'],{windowsHide:true,stdio:'ignore',cwd:this.resources,shell:false})
+        // whisper.cpp's Windows model loader cannot reliably open a UTF-8
+        // absolute path containing Chinese characters. cwd is set by Node's
+        // Unicode process API; the verified ASCII basename works from there.
+        const child=spawn(join(this.resources,manifest.executable),['-m',manifest.model,'-f',wav,'-l','auto','-t','2','-ng','-oj','-of',output,'-np'],{windowsHide:true,stdio:'ignore',cwd:this.resources,shell:false})
         let reason='',ended=false
         const timeout=setTimeout(()=>{reason='语音识别超时，请选择较短的语音再试。';child.kill()},180000)
         const check=setInterval(()=>{if(!current()){reason='登录状态已变化，已停止语音识别。';child.kill()}},250)

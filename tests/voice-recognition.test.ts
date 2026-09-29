@@ -15,7 +15,7 @@ function wav(seconds=.15,amplitude=.2){
  return bytes
 }
 function safeRemove(directory:string){assert.match(relative(resolve(process.env.TEMP||''),resolve(directory)),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(directory,{recursive:true,force:true})}
-function fixture(){
+function fixture(resourceName='bin'){
  const manifest={executable:'whisper-cli.exe',model:'ggml-base.bin',files:{'whisper-cli.exe':createHash('sha256').update('test-executable').digest('hex'),'ggml-base.bin':createHash('sha256').update('test-model').digest('hex')}},calls:any[]=[],children:any[]=[]
  let mode='success',holdRead=false,readingResult=false,finishRead:()=>void=()=>{},holdWrite=false,writing=false,finishWrite:()=>void=()=>{},holdCleanup=false,cleaning=false,finishCleanup:()=>void=()=>{}
  const h=mainHarness(undefined,undefined,{'../../../resources/voice/manifest.json':{default:manifest},'fs/promises':{...fsPromises,readFile:async(...args:any[])=>{
@@ -32,7 +32,7 @@ function fixture(){
   const output=args[args.indexOf('-of')+1]
   if(mode!=='hold')setImmediate(()=>{if(mode==='error')child.emit('error',Error('sensitive native error must not escape'));else{writeFileSync(output+'.json',JSON.stringify({transcription:[{text:mode==='silence'?'[BLANK_AUDIO]':'Hello from a local fixture.'}]}));child.emit('close',0)}})
   return child
- }}}),resources=join(h.directory,'bin'),temporary=join(h.directory,'temporary')
+ }}}),resources=join(h.directory,resourceName),temporary=join(h.directory,'temporary')
  mkdirSync(resources);writeFileSync(join(resources,manifest.executable),'test-executable');writeFileSync(join(resources,manifest.model),'test-model')
  const {VoiceRecognition,voiceTranscript}=h.load('src/main/translation/voiceRecognition.ts'),{validateVoiceWav}=h.load('src/shared/voiceAudio.ts')
  return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
@@ -63,6 +63,16 @@ test('local recognition verifies components, uses a hidden shell-free process an
 })
 test('recognition denies logged-out or invalid audio without launching a subprocess',async()=>{
  const h=fixture();try{await assert.rejects(h.voice.recognize(wav(),()=>false),/登录/);await assert.rejects(h.voice.recognize(wav(.15,0),()=>true),/人声|听见/);assert.equal(h.calls.length,0)}finally{h.close()}
+})
+
+test('a Chinese Windows installation path uses a verified relative model name in the Unicode working directory',async()=>{
+ const h=fixture('语音组件 with spaces');try{
+  assert.equal(await h.voice.recognize(wav(),()=>true),'Hello from a local fixture.')
+  const call=h.calls[0],model=call.args[call.args.indexOf('-m')+1]
+  assert.equal(call.options.cwd,h.resources);assert.equal(model,'ggml-base.bin')
+  assert.equal(resolve(call.options.cwd,model),join(h.resources,'ggml-base.bin'))
+  assert.deepEqual(readdirSync(h.temporary),[])
+ }finally{h.close()}
 })
 test('manifest tampering and unlisted native DLLs fail before execution; a repaired directory recovers',async()=>{
  const h=fixture();try{

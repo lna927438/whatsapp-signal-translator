@@ -1,0 +1,4 @@
+Synthetic speech fixture generated with Microsoft Zira locally for HelloDog QA.
+No user recording, account data, or conversation content.
+PCM WAV: mono 16 kHz, 16-bit.
+Text: Can you call me tomorrow morning? I will meet you at the station at nine.

@@ -146,12 +146,15 @@ export function startHelloDogMessages(): void {
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   let lastConversation = '';
   let englishUi = !(window.navigator?.language || 'zh-CN').toLowerCase().startsWith('zh');
+  // Text and voice translators share each message but own separate UI nodes.
+  // Removing a voice panel here makes the two DOM observers recreate/remove it forever.
+  const textUiSelector = '[data-hellodog-ui="action"], [data-hellodog-ui="translation"]';
   async function render(element: HTMLElement, manual = false): Promise<void> {
     const id=element.dataset.hellodogId;
     if(!id||pending.has(id)||(!manual&&(pending.size>=4||(retryAt.get(id)||0)>Date.now()))) return;
     const generation=revision;
     const message=window.MessageCache?.getById(id);
-    const existing=element.querySelector<HTMLElement>('[data-hellodog-ui]');
+    const existing=element.querySelector<HTMLElement>(textUiSelector);
     if(!message||message.get('isErased')||message.get('deletedForEveryone')||message.get('isViewOnce')||(deadline(message)??Infinity)<=Date.now()) {existing?.remove();results.delete(id);return;}
     const body=message.get('body')||'', metadata=extensions(message).helloDogTranslation;
     const saved=metadata?.translated===body&&metadata.original!==body?metadata:undefined;
@@ -207,7 +210,7 @@ export function startHelloDogMessages(): void {
   // cooldown. Keep a lightweight wake-up so a stationary conversation recovers
   // even when no new message, scroll or DOM mutation arrives.
   setInterval(schedule,2000);
-  const refreshTranslations=()=>{revision++;results.clear();retryAt.clear();document.querySelectorAll('[data-hellodog-ui]').forEach(node=>node.remove());schedule();};
+  const refreshTranslations=()=>{revision++;results.clear();retryAt.clear();document.querySelectorAll(textUiSelector).forEach(node=>node.remove());schedule();};
   ipcRenderer.on('hellodog:refresh',refreshTranslations);
   ipcRenderer.on('hellodog:insert-draft',(_event,request:{id:string;text:string})=>{
     void (async()=>{
