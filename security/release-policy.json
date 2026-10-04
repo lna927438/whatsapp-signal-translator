@@ -1,6 +1,6 @@
 {
-  "allowProduction": false,
-  "reason": "0.5.20-beta.1 is a local reliability acceptance candidate. Complete device acceptance and obtain approval of this release before publishing. Existing owner authorization for signed-manifest distribution without paid Windows signing is preserved.",
+  "allowProduction": true,
+  "reason": "The owner explicitly approved publishing this reliability update on 2026-10-04 with the instruction 上线 after reviewing the 0.5.20-beta.1 results. Publish 0.5.20 with the verified translation, admin and recovery fixes; retain rollback artifacts and signed-manifest distribution. Real-account device acceptance remains a separately reported limitation.",
   "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,
