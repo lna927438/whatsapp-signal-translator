@@ -5,7 +5,7 @@ import { ProviderFailure, classifyProviderFailure, providerMessages, checkProvid
 import { normalizeQuality, protectLiterals, type TranslationQuality } from '../../../src/shared/translationPolicy'
 import { wrongTargetLanguage, wrongOutgoingTargetLanguage } from '../../../src/shared/translationResult'
 import { isSemanticTranslationMismatch } from '../../../src/shared/translationSemantics'
-import { normalizeTranslationLayout } from '../../../src/shared/translationLayout'
+import { normalizeTranslationLayout, protectTranslationLayout } from '../../../src/shared/translationLayout'
 import { translationInstructions, translationInput, type TranslationCorrection } from './translationPrompt'
 import { handleAdmin, supabaseAdminServices } from './admin'
 import { noticeReceiptBody } from './clientNotices'
@@ -133,9 +133,11 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   config: ProviderConfig = providerConfig(env), timeoutMs = 20_000, correction?: TranslationCorrection): Promise<{ translation: string; latencyMs: number; model: string }> {
   const started = Date.now()
   const protectedText = protectLiterals(text, body.quality)
+  const outgoing = body.requestId?.startsWith('send-') === true
+  const layout = outgoing ? protectTranslationLayout(protectedText.input) : undefined
   if (!config.key) throw new ProviderFailure('provider_auth')
   const instructions = translationInstructions(body.quality, correction, body.targetLanguage)
-  const input = translationInput(protectedText.input, String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context)
+  const input = translationInput(layout?.input ?? protectedText.input, String(body.sourceLanguage || ''), String(body.targetLanguage || ''), body.context)
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
     // Leave time for settlement before the desktop's 30-second POST timeout.
@@ -184,8 +186,12 @@ async function providerTranslate(env: Env, body: TranslateBody, text: string, re
   }
   if (!output || (payload.status && payload.status !== 'completed')) throw new ProviderFailure('provider_empty')
   if (output === input.trim()) throw new InvalidTranslationFailure('provider_not_translation', payload.status === 'completed')
-  try { output = protectedText.restore(output) } catch { throw new InvalidTranslationFailure('protected_literal_mismatch', payload.status === 'completed') }
-  if (body.requestId?.startsWith('send-')) output = normalizeTranslationLayout(text, output, protectedText.values)
+  try {
+    // Remove only model-authored spacing before restoring the user's exact
+    // separators. Then restore literal data, which may itself contain spaces.
+    if (layout) output = layout.restore(normalizeTranslationLayout(layout.input, output, protectedText.values))
+    output = protectedText.restore(output)
+  } catch { throw new InvalidTranslationFailure('protected_literal_mismatch', payload.status === 'completed') }
   let languageSample = output
   for (const literal of [...protectedText.values].sort((a, b) => b.length - a.length)) languageSample = languageSample.split(literal).join(' ')
   const target = String(body.targetLanguage || '')
@@ -275,7 +281,8 @@ function translationBounds(body: ReturnType<typeof normalizeBody>, allowCorrecti
     .map(code => translationInstructions(body.quality, allowCorrection ? code as TranslationCorrection | undefined : undefined, body.targetLanguage))
     .sort((a, b) => new TextEncoder().encode(b).byteLength - new TextEncoder().encode(a).byteLength)[0]
   return providerTokenBounds(body.text, instructions + translationInput(
-    protectLiterals(body.text, body.quality).input, body.sourceLanguage, body.targetLanguage, body.context))
+    body.requestId?.startsWith('send-') ? protectTranslationLayout(protectLiterals(body.text, body.quality).input).input : protectLiterals(body.text, body.quality).input,
+    body.sourceLanguage, body.targetLanguage, body.context))
 }
 
 async function repairTranslation(body: ReturnType<typeof normalizeBody>, env: Env, user: User, deadline: number,

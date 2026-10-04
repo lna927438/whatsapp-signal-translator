@@ -12,6 +12,7 @@ export interface TranslationRepairReceipt extends CloudReceipt { chargedCharacte
 export class TranslationOutcomeError extends Error {
   constructor(message: string, readonly confirmedFailure = false) { super(message) }
 }
+class TranslationStatusUnavailableError extends TranslationOutcomeError {}
 export const quarantinedTranslationMessage = '译文偏离原文，已停止显示和发送。请在“记录与恢复”中为此条记录免费修正；原结算记录保留。'
 const terminalFailures = new Set(['translation_failed', 'translation_outcome_unknown', 'provider_auth', 'provider_quota', 'provider_rate_limit', 'provider_model', 'provider_permission', 'provider_request', 'provider_timeout', 'provider_unavailable', 'provider_empty', 'protected_literal_mismatch', 'provider_wrong_language', 'provider_not_translation'])
 export function translationFailureMessage(code?: string) {
@@ -22,6 +23,15 @@ export function translationFailureMessage(code?: string) {
 }
 const capabilityChecks = new Map<string, { until: number; work: Promise<boolean> }>()
 export function clearCloudCapabilityCache() { capabilityChecks.clear() }
+async function withinDeadline<T>(work: () => Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    if (Date.now() >= deadline) throw new TranslationOutcomeError('翻译等待超时，原请求与草稿已保留，请稍后核对。')
+    return await Promise.race([work(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new TranslationOutcomeError('翻译等待超时，原请求与草稿已保留，请稍后核对。')), Math.max(1, deadline - Date.now()))
+    })])
+  } finally { if (timer !== undefined) clearTimeout(timer) }
+}
 async function supportsQuality(base: string): Promise<boolean> {
   const cached = capabilityChecks.get(base)
   if (cached && cached.until > Date.now()) return cached.work
@@ -59,7 +69,7 @@ export class CloudflareProvider implements TranslationProvider {
     const deadline = Date.now() + 42000, base = this.apiBase?.replace(/\/$/, '') || cloudBases()[0]
     // Repairs only annotate an existing debit. Capability failures leave that
     // original debit intact and never route the correction to another provider.
-    await this.verifySelectedChannel(request,base)
+    await withinDeadline(() => this.verifySelectedChannel(request,base), deadline)
     const body = { text: request.text.trim(), sourceLanguage: request.sourceLanguage || 'auto', targetLanguage: request.targetLanguage,
       accountId: request.accountId || '', conversationId: request.conversationId || '', context: request.context || [],
       ...(request.quality ? { quality: request.quality } : {}), ...(request.providerPreference ? {providerPreference:request.providerPreference}:{}), requestId }
@@ -74,7 +84,7 @@ export class CloudflareProvider implements TranslationProvider {
     }
     try {
       const response = await authenticatedFetch(this.accessToken, `${base}/api/translation-repair`, { method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-request-id': requestId }, body: JSON.stringify(body) }, 30000)
+        headers: { 'Content-Type': 'application/json', 'x-request-id': requestId }, body: JSON.stringify(body) }, 30000, deadline)
       const payload: any = await response.json().catch(() => null)
       if (response.ok && response.status !== 202) return finish(payload)
       if (response.status !== 202) throw new TranslationOutcomeError(quarantinedTranslationMessage)
@@ -87,7 +97,7 @@ export class CloudflareProvider implements TranslationProvider {
       await new Promise(resolve => setTimeout(resolve, 300 * 2 ** attempt))
       try {
         const response = await authenticatedFetch(this.accessToken, `${base}/api/translation-repair-status?requestId=${encodeURIComponent(requestId)}`,
-          { headers: { Accept: 'application/json' }, cache: 'no-store' }, Math.min(10000, deadline - Date.now()))
+          { headers: { Accept: 'application/json' }, cache: 'no-store' }, Math.min(10000, deadline - Date.now()), deadline)
         const payload: any = await response.json().catch(() => null)
         if (!response.ok || payload?.state === 'none' || payload?.state === 'failed') throw new TranslationOutcomeError(quarantinedTranslationMessage)
         if (payload?.state === 'completed') return finish(payload.response)
@@ -103,16 +113,17 @@ export class CloudflareProvider implements TranslationProvider {
       let response: Response
       try { response = await authenticatedFetch(this.accessToken, `${base}/api/translation-status?requestId=${encodeURIComponent(requestId)}`, {
         headers: { Accept: 'application/json' }, cache: 'no-store'
-      }, Math.min(10000, deadline - Date.now())) } catch (error) { if (error instanceof SessionUnavailableError) throw error; continue }
+      }, Math.min(10000, deadline - Date.now()), deadline) } catch (error) { if (error instanceof SessionUnavailableError) throw error; continue }
       const payload: any = await response.json().catch(() => null)
       if (response.ok && ['completed', 'failed', 'processing', 'not_found'].includes(payload?.state)) {
         if (payload.state === 'completed') payload.response = validateCloudReceipt(payload.response, requestId)
         return payload
       }
       if (response.status === 401) throw new Error('在线登录状态已过期，请重新登录。')
+      if (response.status === 403) throw new TranslationOutcomeError('账号已停用，无法核对原请求。原记录已保留。')
       if (response.status === 404) throw new TranslationOutcomeError('服务端尚未提供结果查询，原请求已保留。请在记录中核对，不要重新创建任务。')
     }
-    throw new TranslationOutcomeError('暂时无法核对原请求。恢复连接后继续查询。')
+    throw new TranslationStatusUnavailableError('暂时无法核对原请求。恢复连接后继续查询。')
   }
   async translate(request: TranslationRequest): Promise<string> {
     const deadline = Date.now() + 42000
@@ -128,7 +139,7 @@ export class CloudflareProvider implements TranslationProvider {
       if (isSemanticTranslationMismatch(body.text, receipt.translation)) throw new TranslationOutcomeError(quarantinedTranslationMessage)
       return receipt.translation
     }
-    try { await this.verifySelectedChannel(request,base) }
+    try { await withinDeadline(() => this.verifySelectedChannel(request,base), deadline) }
     catch(error) {
       if(!(error instanceof TranslationOutcomeError))throw error
       // A disabled channel must not hide an earlier settled response. Never
@@ -139,7 +150,7 @@ export class CloudflareProvider implements TranslationProvider {
     }
     if (qualityKey(request.quality)) {
       let supported: boolean
-      try { supported = await supportsQuality(base) }
+      try { supported = await withinDeadline(() => supportsQuality(base), deadline) }
       catch { throw new TranslationOutcomeError('尚未连通翻译选项服务，本次未发起翻译、未扣费。', true) }
       if (!supported) throw new TranslationOutcomeError('服务端尚未启用语气与术语功能。本次未发起翻译、未扣费。', true)
     }
@@ -148,7 +159,7 @@ export class CloudflareProvider implements TranslationProvider {
     try {
       response = await authenticatedFetch(this.accessToken, `${base}/api/translate`, { method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-request-id': requestId },
-        body: JSON.stringify({ ...body, requestId }) }, Math.min(30000, deadline - Date.now()))
+        body: JSON.stringify({ ...body, requestId }) }, Math.min(30000, deadline - Date.now()), deadline)
       payload = await response.json()
     } catch (error) { if (error instanceof SessionUnavailableError) throw new TranslationOutcomeError(error.message); /* Response lost: only query this ID. */ }
     if (response?.ok && response.status !== 202 && payload?.translation) return finish(payload)
@@ -170,12 +181,21 @@ export class CloudflareProvider implements TranslationProvider {
       throw new TranslationOutcomeError(message + '原消息和草稿已保留。', status.state === 'not_found' || status.state === 'failed')
     }
     if (terminalFailures.has(payload?.error)) throw new TranslationOutcomeError(translationFailureMessage(payload.error), true)
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (Date.now() + 300 * 2 ** attempt >= deadline) break
-      await new Promise(resolve => setTimeout(resolve, 300 * 2 ** attempt))
-      const result = await this.status(requestId, deadline)
-      if (result.state === 'completed') return finish(result.response)
-      if (result.state === 'failed') throw new TranslationOutcomeError(translationFailureMessage(result.error), true)
+    // A duplicate POST can return 202 while the original provider is still
+    // running. Four quick polls used to give up after 4.5 seconds, and one
+    // brief status-network failure stopped recovery entirely. Use the existing
+    // total budget, with bounded, paced GETs only; never submit another POST.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const delay = Math.min(300 * 2 ** attempt, 2000)
+      if (Date.now() + delay >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, delay))
+      try {
+        const result = await this.status(requestId, Math.min(deadline, Date.now() + 5000))
+        if (result.state === 'completed') return finish(result.response)
+        if (result.state === 'failed') throw new TranslationOutcomeError(translationFailureMessage(result.error), true)
+      } catch (error) {
+        if (!(error instanceof TranslationStatusUnavailableError)) throw error
+      }
     }
     throw new TranslationOutcomeError('翻译结果待确认，原请求和草稿已保留。恢复连接后继续核对。')
   }

@@ -7,7 +7,7 @@ import {providerCapabilities,type ProviderEnv} from './providerConfig'
 type JsonObject = Record<string, unknown>
 export interface AdminServices {
   authenticate(token: string): Promise<AdminIdentity>
-  rpc(name: 'admin_read' | 'admin_mutate' | 'admin_security_overview' | 'admin_overview', args: JsonObject): Promise<unknown>
+  rpc(name: 'admin_read' | 'admin_mutate' | 'admin_security_overview' | 'admin_overview' | 'admin_billing_summary', args: JsonObject): Promise<unknown>
   securityEvent?(actor:string,code:string):Promise<void>
   origins: readonly string[]
   providerBalance?():Promise<unknown>
@@ -52,7 +52,7 @@ export const adminErrors: Record<string, [number, string]> = {
 }
 export class AdminError extends Error { constructor(readonly code: string) { super(code) } }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const kinds = ['session','overview','users','user','translations','costs','orders','plans','versions','announcements','roles','audit','operation']
+const kinds = ['session','overview','users','user','translations','costs','billing-summary','orders','plans','versions','announcements','roles','audit','operation']
 const object = (value: unknown): value is JsonObject => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 function fail(): never { throw new AdminError('invalid_request') }
 function string(value: unknown, min: number, max: number) {
@@ -185,7 +185,8 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
     if(request.method==='GET' && kinds.includes(kind)) {
       const filter:Record<string,string>={}
       for(const [key,value] of url.searchParams){if(!['q','status','offset','userId','operationId','from','to','provider','timezone','officialCurrentMonth'].includes(key) || value.length>160)fail();filter[key]=value}
-      if(filter.officialCurrentMonth!==undefined&&(kind!=='costs'||filter.officialCurrentMonth!=='true'||filter.timezone!=='UTC'||filter.userId||filter.provider))fail()
+      if(kind==='billing-summary'&&Object.keys(filter).some(key=>!['from','to','provider','timezone','officialCurrentMonth'].includes(key)))fail()
+      if(filter.officialCurrentMonth!==undefined&&(!['costs','billing-summary'].includes(kind)||filter.officialCurrentMonth!=='true'||filter.timezone!=='UTC'||filter.userId||filter.provider))fail()
       if(filter.timezone&&!['UTC','Asia/Shanghai'].includes(filter.timezone))fail()
       for(const k of ['from','to'])if(filter[k]&&(!/^\d{4}-\d{2}-\d{2}$/.test(filter[k])||!Number.isFinite(Date.parse(filter[k]))))fail()
       if(filter.provider&&!['deepseek','openai'].includes(filter.provider))fail()
@@ -196,6 +197,7 @@ export async function handleAdmin(request:Request, services:AdminServices):Promi
       // Overview needs only its visible counters, not the full cost report.
       // The service-only RPC still applies the same database admin-access check.
       if(kind==='overview')return json(await services.rpc('admin_overview',{p_actor:actor}))
+      if(kind==='billing-summary')return json(await services.rpc('admin_billing_summary',{p_actor:actor,p_filter:filter}))
       return json(await services.rpc('admin_read',{p_actor:actor,p_kind:kind,p_filter:filter}))
     }
     if(request.method==='POST' && kind==='mutate') {
@@ -265,13 +267,14 @@ export function supabaseAdminServices(env:BillingSyncEnv&ProviderEnv&{SUPABASE_P
         if(!object(statement)||(statement.timezone!==undefined&&statement.timezone!==timezone))throw new AdminError('invalid_request')
         return call('record_scoped_official_statement',{p_actor:args.p_actor,p_operation:args.p_operation,p_provider:provider,p_reason:args.p_reason,p_data:{...statement,timezone},p_scope:scopes[provider]})
       }
-      const costFilter=name==='admin_read'&&args.p_kind==='costs'&&object(args.p_filter)?args.p_filter:null
+      const billingRead=name==='admin_billing_summary'||(name==='admin_read'&&args.p_kind==='costs')
+      const costFilter=billingRead&&object(args.p_filter)?args.p_filter:null
       const nativeCurrentMonth=costFilter?.officialCurrentMonth==='true'
       // This is a presentation-only official-bill scope, not a new database
       // statistics filter. Receipts retain the requested UTC reporting range.
       const databaseArgs=nativeCurrentMonth?{...args,p_filter:Object.fromEntries(Object.entries(costFilter!).filter(([key])=>key!=='officialCurrentMonth'))}:args
       const data=await call(name,databaseArgs)
-      if(name==='admin_read'&&args.p_kind==='costs'&&object(data)){
+      if(billingRead&&object(data)){
         // Read current routing metadata without another database/provider call.
         // Non-owner reports must not gain access to official account statements.
         const capabilities=providerCapabilities(env)
@@ -282,12 +285,25 @@ export function supabaseAdminServices(env:BillingSyncEnv&ProviderEnv&{SUPABASE_P
         // Provider statements use their native reporting day boundaries. This
         // is an explicitly labelled calendar-period sum, not one UTC interval.
         const selected=(['openai','deepseek'] as const).filter(provider=>!filter.userId&&(!filter.provider||filter.provider===provider)&&scopes[provider])
-        const bills=await Promise.all(selected.map(provider=>{
+        const reads=await Promise.allSettled(selected.map(provider=>{
           const period=basis.kind==='provider_current_month'?basis.periods[provider]:basis
           return call('read_current_official_bills',{p_actor:args.p_actor,
             p_filter:{from:period.from,to:period.to,provider,timezone:basis.timezones[provider]},p_scopes:scopes})
         }))
-        return {...data,officialBills:bills.flat(),officialBillingBasis:basis,enabledProviders:enabledBillingProviders(env),...capabilities}
+        const bills:unknown[]=[],officialBillReadErrors:Record<string,string>={}
+        for(const [index,result] of reads.entries()){
+          if(result.status==='fulfilled'){
+            if(Array.isArray(result.value))bills.push(...result.value)
+            else officialBillReadErrors[selected[index]]='unavailable'
+          }else{
+            // A transient statement read must not hide independent character
+            // totals or the other provider's bill. Authorization failures still
+            // invalidate the entire response; never turn them into partial data.
+            if(result.reason instanceof AdminError&&result.reason.code!=='unavailable')throw result.reason
+            officialBillReadErrors[selected[index]]='unavailable'
+          }
+        }
+        return {...data,officialBills:bills,officialBillReadErrors,officialBillingBasis:basis,enabledProviders:enabledBillingProviders(env),...capabilities}
       }
       return data
     }

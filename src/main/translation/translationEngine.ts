@@ -6,12 +6,13 @@ import { TranslationCache } from './cache'
 import { deterministicChatTranslation } from './slang'
 import { CloudflareProvider, TranslationOutcomeError, validateCloudReceipt, translationFailureMessage, quarantinedTranslationMessage } from './providers/cloudflare'
 import { TranslationReceipts, type TranslationReceipt } from './receipts'
-import { normalizeQuality, qualityKey } from '../../shared/translationPolicy'
+import { normalizeQuality, qualityKey, protectLiterals } from '../../shared/translationPolicy'
 import {assertCloudChannelTransport} from '../../shared/translationChannels'
 import { isSemanticTranslationMismatch } from '../../shared/translationSemantics'
 import { normalizeTranslationLayout } from '../../shared/translationLayout'
 import type { TranslationProvider } from './providers/provider'
 import { detectLanguageEvidence } from './languageDetection'
+import { hasBlockedChinese } from './outgoingPolicy'
 import { TranslationContentPolicy, type ContentExpiry } from './contentPolicy'
 import { SessionUnavailableError } from '../network/sessionRefresh'
 
@@ -129,7 +130,12 @@ export class TranslationEngine {
    * caches may contain invented paragraphs; normalize only the outgoing copy.
    * Explicit user corrections and source-authored line breaks remain intact. */
   private deliverableTranslation(request: TranslationRequest, text: string, manual = false): string {
-    return request.requestId?.startsWith('send-') && !manual ? normalizeTranslationLayout(request.text, text, request.quality?.glossary?.map(item => item.target)) : text
+    if (!request.requestId?.startsWith('send-')) return text
+    // Recovered receipts and manual corrections must satisfy the same language
+    // boundary as a fresh provider response. Preserve the receipt for repair;
+    // never label an already paid result as an uncharged failed request.
+    if (hasBlockedChinese(text, request.targetLanguage)) throw new TranslationOutcomeError('译文仍含中文，消息未发送。请修正译文或检查目标语言；原翻译记录与草稿已保留。')
+    return !manual ? normalizeTranslationLayout(request.text, text, protectLiterals(request.text, request.quality).values) : text
   }
   private async repairCompletedTranslation(receipt: TranslationReceipt): Promise<TranslationReceipt | undefined> {
     if (receipt.provider !== 'openai' || receipt.state !== 'charged' || receipt.chargedCharacters !== receipt.sourceCharacters
@@ -553,6 +559,9 @@ export class TranslationEngine {
           translated = await provider.translate(normalized)
         }
         finally { if (revision === this.sessionRevision) this.notifyBilling() }
+        // An already dispatched request still keeps its original settlement,
+        // but an account switch must never deliver that old account's text.
+        if (revision !== this.sessionRevision) throw new SessionUnavailableError('登录状态已变化，已取消旧账号的翻译显示。原结算记录保留。')
         if (isSemanticTranslationMismatch(normalized.text, translated)) throw new TranslationOutcomeError(
           quarantinedTranslationMessage)
         const latency = Date.now() - started
@@ -568,6 +577,7 @@ export class TranslationEngine {
         // Both channels settle exclusively on the authenticated cloud ledger.
         await this.sweepContent()
         await this.content.assertAvailable(normalized)
+        if (revision !== this.sessionRevision) throw new SessionUnavailableError('登录状态已变化，已取消旧账号的翻译显示。原结算记录保留。')
         return this.deliverableTranslation(normalized, translated)
       } catch (error: any) {
         const latency = Date.now() - started

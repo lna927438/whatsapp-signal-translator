@@ -103,3 +103,18 @@ test('normalizing a paid send cannot damage a multiline glossary value or make t
     assert.equal(f.calls, 0)
   } finally { f.close() }
 })
+
+test('legacy paid results and manual corrections containing Chinese cannot leave the translation engine for a foreign target', async () => {
+  const f = fixture()
+  try {
+    const engine = f.create(), request = f.request('legacy-chinese', 'openai')
+    await engine.receipts.prepare('owner', 'openai', request)
+    await engine.receipts.update('owner', request.requestId, { state: 'charged', translated: 'Your package is ready. 请查收', chargedCharacters: Array.from(source).length, balanceAfter: 700 })
+    await assert.rejects(engine.translate(request), /仍含中文/)
+    await assert.rejects(engine.cached(request), /仍含中文/)
+    assert.equal((await engine.receipts.get('owner', request.requestId)).state, 'charged')
+    await engine.correct(request.requestId, 'Please confirm. 谢谢')
+    await assert.rejects(engine.translate(request), /仍含中文/)
+    assert.equal(f.calls, 0)
+  } finally { f.close() }
+})

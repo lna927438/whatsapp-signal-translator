@@ -196,3 +196,25 @@ test('first translation save failure cannot roll back a newer same-text annotati
   await assert.rejects(h.translate(message),/disk/);
   assert.equal(message.get('body'),'Translated original text');assert.equal(message.get('helloDogTranslation'),newer);assert.deepEqual(message.get('bodyRanges'),[{start:0,length:3,style:2}]);
 })
+
+
+test('late untranslated authorization cannot release a changed Chinese draft or an erased native message', async () => {
+  for (const change of [{ body: '修改后的中文原文' }, { isErased: true }, { deletedForEveryone: true }, { expirationStartTimestamp: 1, expireTimer: 1 }]) {
+    let finish: (result: unknown) => void = () => {}
+    const h = setup({ translate: () => new Promise(resolve => { finish = resolve }) }), message = h.message('plain-race', 'Hello friend')
+    const work = h.translate(message)
+    message.set(change); finish({ enabled: false })
+    await assert.rejects(work, /changed/)
+    assert.equal(h.saved.length, 0)
+    assert.equal(message.get('body'), change.body || 'Hello friend')
+  }
+})
+
+test('late untranslated edit authorization cannot release replacement edit text', async () => {
+  let finish: (result: unknown) => void = () => {}
+  const h = setup({ translate: () => new Promise(resolve => { finish = resolve }) }), message = h.message('plain-edit-race', 'Hello friend')
+  message.set({ editMessageTimestamp: 200, editHistory: [{ timestamp: 200, body: 'Hello friend' }] })
+  const work = h.translate(message, 200)
+  message.set({ body: '中文', editHistory: [{ timestamp: 200, body: '中文' }] }); finish({ enabled: false })
+  await assert.rejects(work, /changed/); assert.equal(h.saved.length, 0); assert.equal(message.get('body'), '中文')
+})

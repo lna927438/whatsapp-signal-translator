@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url'
 import {adminOverviewBundle} from './admin-overview-fixture.ts'
 import {fundingBalanceFixture,costsFixture} from './admin-costs-fixture.ts'
 const {chromium}=createRequire(import.meta.url)('D:/UserAppData/OpenAI/DevelopmentRuntime/codex-primary-runtime/dependencies/node/node_modules/playwright')
-const directory=fileURLToPath(new URL('../verification/billing-live-20260923/frontend-missing/',import.meta.url))
+const directory=fileURLToPath(new URL('../verification/admin-timeout-20260924/browser-missing/',import.meta.url))
 await mkdir(directory,{recursive:true})
 const bundle=await adminOverviewBundle(),data=costsFixture()
 Object.assign(data,{enabledProviders:['deepseek'],translationProviders:['deepseek'],defaultTranslationProvider:'deepseek',translationModels:{deepseek:{model:'deepseek-v4-pro',displayName:'deepseek-v4-pro'},openai:{model:'gpt-5.6-luna',displayName:'gpt-5.6-luna'}}})
@@ -23,7 +23,13 @@ try{
    window.__calls.push(path)
    if(path==='session')return window.__session
    if(path==='overview')return {users:27,recentClients:16,todayCharacters:362375,pendingTranslations:0,snapshotAt:new Date().toISOString(),costs:{mismatches:0}}
-   if(path.startsWith('costs?')){if(window.__failed)throw Error('合成断网检查');return structuredClone(window.__data)}
+   if(path.startsWith('billing-summary?')){
+    if(window.__failed)throw Error('合成断网检查')
+    const result=structuredClone(window.__data)
+    result.totals={charged_characters:result.totals.charged_characters,refunded_characters:result.totals.refunded_characters}
+    for(const key of ['providers','users','days','providerBalance'])delete result[key]
+    return result
+   }
    if(path==='provider-balance')return structuredClone(balance)
    throw Error('Unexpected fixture route')
   }
@@ -37,20 +43,20 @@ try{
   assert.equal(await grid.locator('[data-provider="deepseek"] .adm-official-amount').innerText(),'待同步官方账单')
   assert.equal(await grid.locator('[data-provider="openai"] .adm-official-amount').innerText(),'待同步官方账单')
   assert.equal(await grid.locator('.adm-overview-cost .adm-official-amount').innerText(),'账单未齐全')
-  assert.doesNotMatch(await grid.innerText(),/536 条费用记录不完整/);assert.match(await page.locator('.adm-receipt-details').textContent(),/536 条费用记录不完整/)
+  assert.doesNotMatch(await grid.innerText(),/536 条费用记录不完整/);assert.match(await page.locator('.adm-receipt-details').textContent(),/历史回执核算按需读取，未加载的明细不会显示为零/)
   assert.equal(await grid.locator('[data-provider="deepseek"] strong').innerText(),'待同步官方账单')
   assert.equal(await grid.locator('[data-provider="openai"] strong').innerText(),'待同步官方账单')
   assert.equal(await grid.locator('.adm-overview-cost strong').innerText(),'账单未齐全')
-  assert.match(await page.locator('.adm-receipt-details').textContent(),/已知费用 · 记录待补齐/)
+  assert.doesNotMatch(await page.locator('.adm-receipt-details').textContent(),/已知费用.*\$0|536 条费用记录不完整/)
   assert.match(await grid.locator('[data-provider="openai"]').innerText(),/未开放选择/)
   assert.equal(await page.locator('.adm-overview-billing-details').evaluate(el=>el.open),false)
-  assert.equal(await page.locator('.adm-overview-funding').isVisible(),false)
+  assert.equal(await page.locator('.adm-overview-funding').isVisible(),true)
+  assert.equal(await page.locator('.adm-overview-funding').locator('xpath=ancestor::details[not(@open)]').count(),0)
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No horizontal overflow at '+width)
   if(width>700){const boxes=await grid.locator('article').evaluateAll(cards=>cards.map(card=>card.getBoundingClientRect().top));assert.ok(Math.max(...boxes)-Math.min(...boxes)<1,'Comparable cards on the same row')}
   await page.screenshot({path:directory+`overview-${width}.png`,fullPage:true})
   checks.push({width,threeCards:true,noHorizontalOverflow:true})
  }
- await page.locator('.adm-overview-billing-details summary').click()
  await page.locator('.adm-overview-funding').waitFor({state:'visible'})
  assert.match(await page.locator('.adm-overview-funding').innerText(),/\$0\.30/)
  await page.evaluate(()=>window.__failed=true)
@@ -59,8 +65,9 @@ try{
  assert.equal(await page.locator('.adm-overview-cost .adm-official-amount').innerText(),'账单未齐全')
  assert.equal(await page.locator('.adm-overview-cost strong').innerText(),'账单未齐全')
  assert.equal(await page.evaluate(()=>window.__data.totals.known_cost_usd_exact),'1.602070596')
+ assert.equal(await page.evaluate(()=>window.__calls.some(path=>path.startsWith('costs?'))),false)
  assert.deepEqual(errors,[]);assert.deepEqual(network,[])
- const report={passed:true,syntheticOnly:true,checks,pageErrors:errors,externalRequests:network.length,unroundedDataPreserved:true,staleAmountsLabeled:true,officialFundsAvailableOnExpand:true,missingOfficialBillsNeverSubstituteReceipts:true}
+ const report={passed:true,at:new Date().toISOString(),syntheticOnly:true,production:false,checks,pageErrors:errors,externalRequests:network.length,unloadedReceiptsNotPresentedAsZero:true,automaticReadsUseLightweightSummary:true,staleAmountsLabeled:true,automaticFundsVisibleWithoutExpanding:true,missingOfficialBillsNeverSubstituteReceipts:true}
  await writeFile(directory+'results.json',JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report))
  await page.evaluate(()=>window.__dispose())
 }finally{await browser.close()}

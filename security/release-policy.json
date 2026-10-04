@@ -1,6 +1,6 @@
 {
-  "allowProduction": true,
-  "reason": "Owner explicitly authorized release without paid Windows code signing or identity verification on 2026-09-14. Ed25519 update signatures and installer integrity verification remain mandatory.",
+  "allowProduction": false,
+  "reason": "0.5.20-beta.1 is a local reliability acceptance candidate. Complete device acceptance and obtain approval of this release before publishing. Existing owner authorization for signed-manifest distribution without paid Windows signing is preserved.",
   "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,

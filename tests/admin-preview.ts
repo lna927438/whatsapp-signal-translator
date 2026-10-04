@@ -58,7 +58,7 @@ function validTestCode(code:string){
   const tick=Math.floor(Date.now()/30000)
   return [-1,0,1].some(delta=>{const counter=Buffer.alloc(8);counter.writeBigUInt64BE(BigInt(tick+delta));const hash=createHmac('sha1',key).update(counter).digest();const offset=hash[19]&15;const expected=String((hash.readUInt32BE(offset)&0x7fffffff)%1000000).padStart(6,'0');return timingSafeEqual(Buffer.from(code),Buffer.from(expected))})
 }
-const signatures={admin_read:['p_actor','p_kind','p_filter'],admin_mutate:['p_actor','p_operation','p_action','p_target','p_reason','p_data'],admin_security_overview:['p_actor'],admin_overview:['p_actor']}
+const signatures={admin_read:['p_actor','p_kind','p_filter'],admin_mutate:['p_actor','p_operation','p_action','p_target','p_reason','p_data'],admin_security_overview:['p_actor'],admin_overview:['p_actor'],admin_billing_summary:['p_actor','p_filter']}
 const services:AdminServices={
   origins:[origin],
   async authenticate(token){const session=tokens.get(token);if(!session||session.expires<Date.now())throw new AdminError('unauthorized');return {id:session.actor,aal:!testMfa||session.mfaAt?'aal2':'aal1',mfaAt:testMfa?session.mfaAt:Date.now()/1000,enrolled:!testMfa||testEnrolled,sessionId:token.slice(0,36)}},

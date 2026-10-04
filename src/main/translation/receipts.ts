@@ -48,7 +48,13 @@ export class TranslationReceipts {
     await this.chain.catch(() => undefined)
     return (await this.store.read()).filter(item => item.owner === owner).sort((a, b) => b.updatedAt - a.updatedAt)
   }
-  async get(owner: string, requestId: string) { return (await this.list(owner)).find(item => item.requestId === requestId) }
+  async get(owner: string, requestId: string) {
+    await this.chain.catch(() => undefined)
+    // A single-message check is on every send/cache/recovery path. Sorting the
+    // entire lifetime ledger for each lookup made large histories expensive.
+    // Keep the same durable read and owner boundary, without the unused sort.
+    return (await this.store.read()).find(item => item.owner === owner && item.requestId === requestId)
+  }
   applySemanticRepair(owner: string, requestId: string, previousTranslation: string, translation: string, authorized: () => boolean) {
     return this.mutate(data => {
       if (!authorized()) throw new Error('登录状态已变化。')

@@ -60,7 +60,7 @@ export function nativeMonthFixture(data:ReturnType<typeof costsFixture>,now:numb
 /** Synthetic equivalent of the existing native-month server route. Only fixture
  * responses use this; malformed periods in production are still rejected. */
 export function costsQueryFixture(path:string,input:ReturnType<typeof costsFixture>,now=Date.now()){
- if(!path.startsWith('costs?')||new URLSearchParams(path.slice(6)).get('officialCurrentMonth')!=='true')return input
+ if(!/^(costs|billing-summary)\?/.test(path)||new URLSearchParams(path.split('?')[1]).get('officialCurrentMonth')!=='true')return input
  const data=structuredClone(input),previous=data.officialBillingBasis
  if(previous.kind==='provider_current_month')return data
  nativeMonthFixture(data,now)

@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 const { whatsappInjectionScript } = createRequire(import.meta.url)('../src/main/platforms/whatsapp/inject/script.ts') as typeof import('../src/main/platforms/whatsapp/inject/script')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function until(check: () => boolean) { for (let n = 0; n < 200; n++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 2)) }; assert.fail('UI did not settle') }
-function harness(options: { modernReceipt?: boolean; delayedMarker?: boolean; receiptStyle?: 'tail' | 'wds' | 'author' | 'quoted'; stallFirstPrepare?: boolean; wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string; historyMode?: 'new' | 'manual' | 'visible'; incomingResult?: string; cachedIncoming?: string; previewSend?: boolean } = {}) {
+function harness(options: { translatedText?: string; writeTransform?: (text: string) => string; modernReceipt?: boolean; delayedMarker?: boolean; receiptStyle?: 'tail' | 'wds' | 'author' | 'quoted'; stallFirstPrepare?: boolean; wrappedReceipt?: boolean; rerender?: boolean; renamedHeader?: boolean; directionalText?: boolean; changedPeer?: boolean; delayTranslation?: boolean; receipt?: boolean; emptyComposer?: boolean; incomingError?: string; historyMode?: 'new' | 'manual' | 'visible'; incomingResult?: string; cachedIncoming?: string; previewSend?: boolean } = {}) {
   const dom = new JSDOM('<div id="sidebar">other chat</div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header><div class="message-in" data-id="false_peer-a@c.us_old"><span class="selectable-text">hello</span></div><footer><div contenteditable="true" role="textbox">原文</div><button aria-label="Send">send</button></footer></div>', { url: 'https://web.whatsapp.com', runScripts: 'outside-only' })
   const win = dom.window as any
   const composer = win.document.querySelector('[contenteditable]')
@@ -27,7 +27,7 @@ function harness(options: { modernReceipt?: boolean; delayedMarker?: boolean; re
     prepareSend: async (payload: any) => {
       prepared.push(payload)
       if (options.stallFirstPrepare && prepared.length === 1) return new Promise(() => {})
-      lastTask = { ...payload, id: 'send-test', state: 'draft', request: { text: payload.text }, translated: 'translation' }
+      lastTask = { ...payload, id: 'send-test', state: 'draft', request: { text: payload.text }, translated: options.translatedText || 'translation' }
       return lastTask
     },
     translateSend: async () => { await translationGate; return { ...lastTask, state: 'ready' } },
@@ -38,7 +38,7 @@ function harness(options: { modernReceipt?: boolean; delayedMarker?: boolean; re
       submits++
       const args = { ...lastTask, original: lastTask.request.text }
       if (!win.__RT_SEND_SELECT__(args)) throw new Error('guard rejected')
-      composer.textContent = lastTask.translated // Models Chromium insertText, not WhatsApp dispatch.
+      composer.textContent = options.writeTransform ? options.writeTransform(lastTask.translated) : lastTask.translated // Models Chromium insertText, not WhatsApp dispatch.
       const result = await win.__RT_SEND_COMMIT__(args)
       await win.__RT_SEND_RELEASE__(lastTask.id, result.dispatched === false)
       if (!result.confirmed) { lastTask.state = 'uncertain'; throw new Error('发送结果未确认') }
@@ -303,4 +303,45 @@ test('cancelling optional preview preserves the original composer without dispat
  try{h.enter();await until(()=>Boolean(h.win.document.querySelector('[data-rt-ui="send-preview"]')))
  h.win.document.querySelectorAll('[data-rt-ui="send-preview"] button')[1].click();await until(()=>h.statuses.some(s=>s.message.includes('已取消发送')));assert.equal(h.nativeClicks,0);assert.equal(h.composer.textContent,'原文')
  }finally{h.dom.window.close()}
+})
+
+
+test('changed hard breaks or doubled spaces cannot pass the last WhatsApp send check', async () => {
+  for (const writeTransform of [(text: string) => text.replace(' ', '\n\n'), (text: string) => text.replace(' ', '  '), () => '中文原文']) {
+    const h = harness({ translatedText: 'Hello friend', writeTransform })
+    try {
+      h.enter(); await until(() => h.task?.state === 'uncertain')
+      assert.equal(h.nativeClicks, 0)
+      assert.equal(h.prepared.length, 1)
+      assert.equal(h.prepared[0].text, '原文')
+    } finally { h.dom.window.close() }
+  }
+})
+
+test('explicit translated paragraphs remain intact and still dispatch exactly once', async () => {
+  const h = harness({ translatedText: 'First line\n\nSecond line' })
+  try {
+    h.composer.textContent = '第一行\n\n第二行'
+    h.enter(); h.enter(); await until(() => h.statuses.some(item => item.state === 'success'))
+    assert.equal(h.prepared[0].text, '第一行\n\n第二行')
+    assert.equal(h.nativeClicks, 1)
+    assert.equal(h.task.translated, 'First line\n\nSecond line')
+  } finally { h.dom.window.close() }
+})
+
+test('attachment caption paragraph-send is guarded while Shift Enter still inserts an authored line', async () => {
+  const h = harness()
+  try {
+    const dialog = h.win.document.createElement('div'); dialog.setAttribute('role', 'dialog')
+    dialog.innerHTML = '<div contenteditable="true" role="textbox">中文说明</div>'
+    h.win.document.body.appendChild(dialog)
+    const caption = dialog.firstElementChild
+    const paragraph = () => new h.win.InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true })
+    let event = paragraph(); caption.dispatchEvent(event); assert.equal(event.defaultPrevented, true)
+    caption.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }))
+    event = paragraph(); caption.dispatchEvent(event); assert.equal(event.defaultPrevented, false)
+    caption.dispatchEvent(new h.win.KeyboardEvent('keyup', { key: 'Enter', shiftKey: true, bubbles: true }))
+    event = paragraph(); caption.dispatchEvent(event); assert.equal(event.defaultPrevented, true)
+    assert.equal(h.nativeClicks, 0); assert.equal(h.prepared.length, 0); assert.equal(caption.textContent, '中文说明')
+  } finally { h.dom.window.close() }
 })

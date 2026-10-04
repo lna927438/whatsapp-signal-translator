@@ -245,7 +245,7 @@ export class WhatsAppAdapter {
   async editComposer(accountId: string, value: any): Promise<boolean> {
     const contents=this.contents(accountId)
     if(!contents||this.activeId!==accountId||this.overlayOpen||!this.mainWindow?.isFocused())return false
-    if(!value||typeof value.text!=='string'||value.text.length>10000||typeof value.expected!=='string'||value.expected.length>10000||! /^[\w-]{1,100}$/.test(value.token||'')||typeof value.targetKey!=='string'||typeof value.conversationId!=='string')return false
+    if(!value||typeof value.text!=='string'||value.text.length>20000||typeof value.expected!=='string'||value.expected.length>20000||! /^[\w-]{1,100}$/.test(value.token||'')||typeof value.targetKey!=='string'||typeof value.conversationId!=='string')return false
     const token=JSON.stringify(value.token)
     try {
       const atomic = await contents.executeJavaScript(`window.__RT_EDIT_ATOMIC__?.(${JSON.stringify(value)})`, true)

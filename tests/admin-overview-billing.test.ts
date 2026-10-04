@@ -28,13 +28,13 @@ async function mount(options:Options={}){
   calls.push(path)
   if(path==='session')return w.__session
   if(path==='overview')return {users:14,recentClients:2,todayCharacters:100,pendingTranslations:0,snapshotAt:new Date(now()).toISOString(),costs:{known_cost_usd_exact:'0.174394544',mismatches:0}}
-  return options.request?options.request(path,body):path.startsWith('costs?')?snapshot(path,now()):path==='provider-balance'?fundingBalanceFixture(now()):{configured:true,message:'已同步'}
+  return options.request?options.request(path,body):path.startsWith('billing-summary?')?snapshot(path,now()):path==='provider-balance'?fundingBalanceFixture(now()):{configured:true,message:'已同步'}
  }
  w.eval(options.mode==='component'?componentBundle:appBundle);await tick()
  return {w,calls,errors,timers,body:()=>w.document.body.textContent as string,official:()=>w.document.querySelector('.adm-overview-funding'),characters:()=>w.document.querySelector('.adm-overview-characters'),run:(ms:number)=>{for(const item of [...timers.values()])if(item.ms===ms)item.fn()},refresh:async()=>{await w.__refreshOverview();await tick()},navigate:async(path:string)=>{await w.__navigate(path);await tick()},close:()=>{w.__dispose?.();dom.window.close()}}
 }
 
-test('overview headlines use official costs exclusively and collapse incomplete receipt history',async()=>{
+test('overview month records remain separate from cumulative funds and link to on-demand receipt history',async()=>{
  let original:any
  const h=await mount({mode:'component',request:path=>{
   if(path==='provider-balance')return fundingBalanceFixture(initialTime)
@@ -52,16 +52,16 @@ test('overview headlines use official costs exclusively and collapse incomplete 
   assert.match(grid.querySelector('[data-provider="deepseek"] .adm-official-amount').textContent,/\$0\.19/)
   assert.match(grid.querySelector('[data-provider="openai"] .adm-official-amount').textContent,/\$0\.05/)
   assert.match(grid.querySelector('.adm-overview-cost .adm-official-amount').textContent,/\$0\.24/)
-  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/已知费用 · 记录待补齐/)
-  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/536 条费用记录不完整/)
-  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/13 条历史记录尚未归属通道/)
+  assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/历史回执核算按需读取/)
+  assert.equal(h.w.document.querySelector('.adm-receipt-details a').getAttribute('href'),'/admin/costs')
+  assert.doesNotMatch(h.w.document.querySelector('.adm-receipt-details').textContent,/536|13 条历史/)
   assert.doesNotMatch(grid.textContent,/次调用待核算/)
   assert.equal(original.totals.known_cost_usd_exact,'1.602070596')
   assert.equal(h.w.document.querySelector('.adm-overview-billing-details').open,false)
  }finally{h.close()}
 })
 
-test('missing provider breakdown is unknown, while a verified empty breakdown means no provider calls',async()=>{
+test('overview never presents unrequested receipt statistics for missing or empty provider breakdowns',async()=>{
  for(const missing of [true,false]){
   const h=await mount({mode:'component',request:path=>{
    if(path==='provider-balance')return fundingBalanceFixture(initialTime)
@@ -71,13 +71,13 @@ test('missing provider breakdown is unknown, while a verified empty breakdown me
   try{for(const name of ['deepseek','openai']){
    const card=h.w.document.querySelector(`[data-provider="${name}"]`)
    assert.equal(card.querySelector('.adm-official-amount').textContent,name==='deepseek'?'$0.19':'$0.05')
-   assert.equal(card.querySelector('strong').textContent,name==='deepseek'?'$0.19':'$0.05');assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,missing?/尚未取得/:/\$0\.00/)
+   assert.equal(card.querySelector('strong').textContent,name==='deepseek'?'$0.19':'$0.05');assert.doesNotMatch(h.w.document.querySelector('.adm-receipt-details').textContent,/\$0\.00/)
   }}
   finally{h.close()}
  }
 })
 
-test('overview missing official bills stay unknown while live receipt costs remain visible and exact imports stay separate',async()=>{
+test('overview missing official bills stay unknown and exact manual records remain separate from receipts',async()=>{
  let phase=0
  const h=await mount({mode:'component',request:path=>{
   if(path==='provider-balance')return fundingBalanceFixture(initialTime)
@@ -99,12 +99,12 @@ test('overview missing official bills stay unknown while live receipt costs rema
  }finally{h.close()}
 })
 
-test('new receipt costs cannot overwrite an older official headline or renew its freshness',async()=>{
+test('summary refresh cannot overwrite an older manual headline or renew its freshness',async()=>{
  let now=initialTime,amount='1.65'
  const importedAt=new Date(now-7200000).toISOString()
  const h=await mount({now:()=>now,request:path=>{
   if(path==='provider-balance')return fundingBalanceFixture(now)
-  if(!path.startsWith('costs?'))return {configured:false}
+  if(!path.startsWith('billing-summary?'))return {configured:false}
   const data=snapshot(path,now);data.totals.known_cost_usd_exact=amount;data.totals.unpriced_requests=0
   data.providers=[{provider:'deepseek',known_cost_usd_exact:amount,unpriced_requests:0},{provider:'openai',known_cost_usd_exact:'0',unpriced_requests:0}] as any
   data.officialBills=[{...officialBillFixture('deepseek','1.658919574',data),fetched_at:importedAt}];return data
@@ -113,11 +113,11 @@ test('new receipt costs cannot overwrite an older official headline or renew its
   const card=()=>h.w.document.querySelector('[data-provider="deepseek"]')
   assert.equal(card().querySelector('strong').textContent,'$1.65')
   amount='1.830000000001';now+=30000;h.run(15000);await tick()
-  assert.equal(card().querySelector('strong').textContent,'$1.65');assert.match(h.w.document.querySelector('.adm-receipt-details').textContent,/\$1\.83/)
+  assert.equal(card().querySelector('strong').textContent,'$1.65');assert.doesNotMatch(h.w.document.querySelector('.adm-receipt-details').textContent,/\$1\.83/)
   assert.equal(card().querySelector('.adm-official-amount').textContent,'$1.65')
-  assert.match(card().textContent,/手动账单不会自动更新.*重新导入/)
-  assert.match(h.body(),/官方账单同步有延迟/)
-  assert.match(h.w.document.querySelector('.adm-cost-freshness').textContent,/自动刷新.*数据更新于/)
+  assert.match(card().textContent,/此金额为手工录入.*不会自动补入新费用.*重新核对/)
+  assert.match(h.body(),/部分账期记录待更新，当前保留上次金额/)
+  assert.match(h.w.document.querySelector('.adm-cost-freshness').textContent,/约每 30 秒重读已保存记录.*手工金额不会自动更新.*页面读取于/)
   assert.equal(h.w.document.querySelector('.adm-overview-cost .adm-official-amount').textContent,'账单未齐全')
  }finally{h.close()}
 })
@@ -125,7 +125,7 @@ test('new receipt costs cannot overwrite an older official headline or renew its
 test('overview requests native current-month official bills and visibly separates DeepSeek next-month dates from UTC receipts',async()=>{
  const now=Date.parse('2026-09-30T17:00:00Z'),h=await mount({now:()=>now})
  try{
-  const query=h.calls.find(path=>path.startsWith('costs?'))!
+  const query=h.calls.find(path=>path.startsWith('billing-summary?'))!
   assert.match(query,/from=2026-09-01&to=2026-09-30&timezone=UTC&provider=&officialCurrentMonth=true/)
   assert.match(h.w.document.querySelector('[data-provider="deepseek"] .adm-bill-period').textContent,/2026-10-01 至 2026-10-01/)
   assert.match(h.w.document.querySelector('[data-provider="openai"] .adm-bill-period').textContent,/2026-09-01 至 2026-09-30/)
@@ -137,11 +137,11 @@ test('overview requests native current-month official bills and visibly separate
 
 test('real parent overview and costs share lifetime 20 / 19.70 / 0.30 funds, independently of monthly historical bills',async()=>{
  const h=await mount();try{
-  assert.match(h.official().textContent,/累计已用（余额核算）\$0\.30/);assert.match(h.characters().textContent,/23,541/);assert.match(h.official().textContent,/累计充值\$20\.00/);assert.match(h.official().textContent,/官方余额\$19\.70/)
+  assert.match(h.official().textContent,/累计充值消耗\$0\.30/);assert.match(h.characters().textContent,/23,541/);assert.match(h.official().textContent,/累计充值\$20\.00/);assert.match(h.official().textContent,/官方余额\$19\.70/)
   assert.doesNotMatch(h.official().textContent,/0\.174394544|0\.2385287|尚缺官方账单/)
-  const query=h.calls.find(path=>path.startsWith('costs?'))!;assert.match(query,/from=2026-09-01&to=2026-09-15&timezone=UTC&provider=/)
+  const query=h.calls.find(path=>path.startsWith('billing-summary?'))!;assert.match(query,/from=2026-09-01&to=2026-09-15&timezone=UTC&provider=/)
   await h.navigate('/admin/costs');assert.match(h.w.document.querySelector('.adm-provider-funding').textContent,/\$0\.30/);assert.ok(h.calls.includes(query));assert.equal(h.official(),null)
-  assert.match(h.w.document.querySelector('.adm-official-breakdown').textContent,/\$0\.19/);assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false)
+  assert.match(h.w.document.querySelector('.adm-official-breakdown').textContent,/\$0\.19/);assert.equal(h.w.document.querySelector('.adm-usage-details').open,false);assert.equal(h.w.document.querySelector('.adm-local-cost-evidence'),null)
   await h.navigate('/admin/overview');assert.match(h.official().textContent,/\$0\.30/);assert.deepEqual(h.errors,[])
  }finally{h.close()}
 })
@@ -154,7 +154,7 @@ test('parent fifteen-second overview refresh checks usage and funds every thirty
   h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(count(),3)
   Object.defineProperty(h.w.document,'visibilityState',{value:'hidden',configurable:true});now+=30000;h.run(15000);await tick();assert.equal(count(),3)
   Object.defineProperty(h.w.document,'visibilityState',{value:'visible',configurable:true});await h.navigate('/admin/costs');const reads=count();now+=30000;h.run(30000);await tick();assert.equal(count(),reads+1)
-  const usage=h.calls.filter(p=>p.startsWith('costs?')).length;now+=30000;h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).length,usage+1)
+  const usage=h.calls.filter(p=>p.startsWith('billing-summary?')).length;now+=30000;h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('billing-summary?')).length,usage+1)
  }finally{h.close()}
 })
 test('missing monthly bills or changed calendar periods never erase current account funds',async()=>{
@@ -168,8 +168,8 @@ test('failure retains prior funds and usage with stale labels; first-read unknow
  let fail=false,now=initialTime
  const h=await mount({mode:'component',now:()=>now,request:path=>{if(fail)throw Error('synthetic offline');return path==='provider-balance'?fundingBalanceFixture(now):snapshot(path,now)}})
  try{
-  fail=true;now+=30000;await h.refresh();await tick();assert.match(h.official().textContent,/\$0\.30/);assert.match(h.official().textContent,/上次核对的资金数据/);assert.match(h.characters().textContent,/保留上次数据/)
-  fail=false;now+=60000;await h.refresh();await tick();assert.doesNotMatch(h.official().textContent,/offline|上次核对/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
+  fail=true;now+=30000;await h.refresh();await tick();assert.match(h.official().textContent,/\$0\.30/);assert.match(h.official().textContent,/保留上次资金数据.*可能过期/);assert.match(h.characters().textContent,/保留上次数据/)
+  fail=false;now+=60000;await h.refresh();await tick();assert.doesNotMatch(h.official().textContent,/offline|可能过期/);assert.doesNotMatch(h.characters().textContent,/读取失败/)
  }finally{h.close()}
  const empty=await mount({mode:'component',request:()=>{throw Error('offline')}});try{assert.match(empty.characters().textContent,/尚未取得/);assert.equal(empty.official().querySelector('.adm-cost-value'),null);assert.doesNotMatch(empty.official().textContent,/\$0/)}finally{empty.close()}
 })
@@ -208,7 +208,7 @@ test('usage refresh requests coalesce without duplicating the balance request',a
 })
 test('unmounted overview late balances cannot overwrite the costs page or a fresh overview instance',async()=>{
  let resolveLate!:(value:unknown)=>void,hold=false
- const h=await mount({request:path=>{if(path==='provider-balance'){if(hold){hold=false;return new Promise(resolve=>{resolveLate=resolve})}return fundingBalanceFixture(initialTime)}return path.startsWith('costs?')?snapshot(path):{configured:true}}})
+ const h=await mount({request:path=>{if(path==='provider-balance'){if(hold){hold=false;return new Promise(resolve=>{resolveLate=resolve})}return fundingBalanceFixture(initialTime)}return path.startsWith('billing-summary?')?snapshot(path):{configured:true}}})
  try{
   hold=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();await h.navigate('/admin/costs')
   const bad=fundingBalanceFixture(initialTime);bad.funding.cumulativeTopUps='500';bad.funding.netPaidFunding='500';bad.funding.usedPaid='480.30';resolveLate(bad);await tick();assert.doesNotMatch(h.body(),/480\.30/)
@@ -227,7 +227,7 @@ test('UTC rollover rejects old monthly usage response without relabeling it; cum
 
 test('real funding registration requires review and explicit save, preserves exact decimals and refreshes after a confirmed mutation',async()=>{
  const mutations:any[]=[],balance=fundingBalanceFixture(initialTime)
- const h=await mount({request:(path,body)=>{if(path==='mutate'){mutations.push(body);return {funding:balance.funding}}return path==='provider-balance'?balance:path.startsWith('costs?')?snapshot(path):{configured:true}}})
+ const h=await mount({request:(path,body)=>{if(path==='mutate'){mutations.push(body);return {funding:balance.funding}}return path==='provider-balance'?balance:path.startsWith('billing-summary?')?snapshot(path):{configured:true}}})
  try{
   await h.navigate('/admin/costs');const reads=h.calls.filter(p=>p==='provider-balance').length
   h.w.document.querySelector('.adm-funding-confirm').click();await tick();assert.match(h.body(),/历次累计总额，不是本次金额/)
@@ -246,11 +246,11 @@ test('confirmed manual bill import refreshes the open costs page immediately wit
  const h=await mount({request:(path,body)=>{
   if(path==='mutate'){mutations.push(body);imported=true;return {ok:true}}
   if(path==='provider-balance')return fundingBalanceFixture(initialTime)
-  if(!path.startsWith('costs?'))return {configured:true}
+  if(!path.startsWith('billing-summary?'))return {configured:true}
   const data=snapshot(path);if(imported)data.officialBills.find(b=>b.provider==='deepseek')!.official_usd_exact='1.830000000001';return data
  }})
  try{
-  await h.navigate('/admin/costs');const reads=h.calls.filter(p=>p.startsWith('costs?')).length
+  await h.navigate('/admin/costs');const reads=h.calls.filter(p=>p.startsWith('billing-summary?')).length
   const section=[...h.w.document.querySelectorAll('.adm-bill-provider')].find((node:any)=>node.querySelector('h3').textContent==='DeepSeek') as HTMLElement
   section.querySelector('button')!.click();await tick()
   const form=h.w.document.querySelector('.adm-edit-form'),inputs=form.querySelectorAll('input')
@@ -259,7 +259,7 @@ test('confirmed manual bill import refreshes the open costs page immediately wit
   form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.equal(mutations.length,0)
   form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
   assert.equal(mutations.length,1);assert.equal(mutations[0].data.officialUsd,'1.830000000001')
-  assert.equal(h.calls.filter(p=>p.startsWith('costs?')).length,reads+1)
+  assert.equal(h.calls.filter(p=>p.startsWith('billing-summary?')).length,reads+1)
   assert.equal(h.w.document.querySelector('[data-provider="deepseek"] .adm-official-amount').textContent,'$1.83')
   assert.equal(h.w.document.querySelector('.adm-edit-form'),null)
  }finally{h.close()}

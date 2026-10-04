@@ -58,7 +58,9 @@ function fixture(options: { recognize?: () => Promise<string>; runtime?: () => P
       return { owner, accountId: 'gv-fixture', authorized: () => gvCurrent && owner === current && revision === version && !value.sender.isDestroyed() }
     } }
   }
-  const source = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf8')
+  // Git may check out this actual production module with CRLF on Windows.
+  // Normalize only line endings before matching registration boundaries.
+  const source = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf8').replace(/\r\n?/g, '\n')
   const start = source.indexOf('  const voiceTranslations = new VoiceTranslationService('), end = source.indexOf('  const embeddedVoiceTranslation =', start)
   assert.ok(start > 0 && end > start, 'extract actual voice IPC registrations')
   const signalStart = source.indexOf('}, async (accountId, raw, current) => {', end), signalEnd = source.indexOf("\n  })\n  ipcMain.handle('signal-desktop:status'", signalStart)

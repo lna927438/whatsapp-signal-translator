@@ -5,6 +5,13 @@ export type OfficialBill={provider:BillProvider;amount:string;fetchedAt:string;s
 export type OfficialBillSummary={complete:boolean;total:string|null;partial:string|null;missing:BillProvider[];items:OfficialBill[]}
 const scale=1000000000000n
 
+/** Errors are account-scoped read failures, not an unsynced or zero bill. */
+export function officialBillReadIssue(data:Row,provider:string):string {
+  const errors=data.officialBillReadErrors
+  return errors&&typeof errors==='object'&&(errors as Row)[provider]==='unavailable'
+    ?'该通道账单读取暂时失败，请稍后刷新；其他数据仍可使用。':''
+}
+
 /** Absent metadata is the legacy dual-provider contract; malformed or empty
  * explicit metadata cannot silently re-enable a retired provider. */
 export function enabledBillProviders(data:Row):BillProvider[]{
@@ -26,7 +33,7 @@ export function officialBillDelayed(summary:OfficialBillSummary,period:BillPerio
 
 export function officialBillNotice(item:OfficialBill|undefined,period:BillPeriod,now=Date.now()):string {
   if(!item)return ''
-  if(item.source==='manual_statement')return '手动账单不会自动更新，新增费用需重新导入。'
+  if(item.source==='manual_statement')return '此金额为手工录入，不会自动补入新费用；更新需重新核对。'
   return officialBillDelayed({items:[item],complete:true,total:item.amount,partial:item.amount,missing:[]},period,now)
     ?'官方同步有延迟，保留上次金额。':'官方账单可能延迟补记。'
 }
@@ -35,8 +42,10 @@ export function officialBillNotice(item:OfficialBill|undefined,period:BillPeriod
 export function officialBillStatus(item:OfficialBill|undefined,period:BillPeriod,now=Date.now()):string {
   if(!item)return '尚未同步'
   const today=currentBillPeriod(item.timezone,now).to
+  // A manual amount is not evidence of an official export. Even a freshly
+  // entered number must never be presented as automatically synchronized.
+  if(item.source==='manual_statement')return item.to<today?'历史手工记录':now-Date.parse(item.fetchedAt)>10*60000?'手工录入 · 待重新核对':'手工录入 · 不自动更新'
   if(item.to<today)return item.provisional?'历史账单快照':'历史官方账单'
-  if(item.source==='manual_statement')return now-Date.parse(item.fetchedAt)>10*60000?'上次导出金额 · 待更新':'官方导出快照'
   return officialBillDelayed({items:[item],complete:true,total:item.amount,partial:item.amount,missing:[]},period,now)?'同步延迟 · 保留上次金额':'官方自动同步'
 }
 
@@ -84,6 +93,7 @@ export function officialBillSummary(data:Row,period:BillPeriod,now=Date.now()):O
   }else if(basis?.kind!=='provider_reporting_period'||basis.from!==period.from||basis.to!==period.to)return empty()
   const items:OfficialBill[]=[]
   for(const provider of selected){
+    if(officialBillReadIssue(data,provider))continue
     const candidates=data.officialBills.filter((value):value is Row=>Boolean(value)&&typeof value==='object'&&(value as Row).provider===provider)
     if(candidates.length!==1)continue
     const bill=candidates[0]

@@ -22,7 +22,7 @@ async function mount(mode:'overview'|'costs'){
     if(path==='session')return w.__session
     if(path==='overview')return {users:30,recentClients:25,todayCharacters:51010,pendingTranslations:0,costs:{mismatches:0},snapshotAt:new Date(now).toISOString()}
     if(path==='provider-balance')return fundingBalanceFixture(now)
-    if(path.startsWith('costs?')){const q=new URLSearchParams(path.slice(6));return {...costsFixture({from:q.get('from')!,to:q.get('to')!,timezone:q.get('timezone')!}),snapshotAt:new Date(now).toISOString()}}
+    if(path.startsWith('billing-summary?')){const q=new URLSearchParams(path.split('?')[1]);return {...costsFixture({from:q.get('from')!,to:q.get('to')!,timezone:q.get('timezone')!}),snapshotAt:new Date(now).toISOString()}}
     return {configured:true}
   }
   let read:(path:string)=>unknown=fixture
@@ -51,10 +51,10 @@ test('a successful request taking time does not skip the next thirty-second time
 
 test('real overview reads at most every fifteen seconds, aggregates thirty seconds, and none while hidden',async()=>{
   const h=await mount('overview');try{
-    const overview=h.count('overview'),costs=h.count('costs?')
-    await h.poll(14999);assert.equal(h.count('overview'),overview);assert.equal(h.count('costs?'),costs)
-    await h.poll(1);assert.equal(h.count('overview'),overview+1);assert.equal(h.count('costs?'),costs)
-    await h.poll(15000);assert.equal(h.count('overview'),overview+2);assert.equal(h.count('costs?'),costs+1)
+    const overview=h.count('overview'),costs=h.count('billing-summary?')
+    await h.poll(14999);assert.equal(h.count('overview'),overview);assert.equal(h.count('billing-summary?'),costs)
+    await h.poll(1);assert.equal(h.count('overview'),overview+1);assert.equal(h.count('billing-summary?'),costs)
+    await h.poll(15000);assert.equal(h.count('overview'),overview+2);assert.equal(h.count('billing-summary?'),costs+1)
     h.visible('hidden');const before=h.calls.length;await h.poll(120000);assert.equal(h.calls.length,before)
     h.visible('visible');h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));await tick();assert.equal(h.count('overview'),overview+3)
     assert.deepEqual(h.errors,[])
@@ -75,22 +75,22 @@ test('overview failures do not hammer the server or clear verified values; manua
 
 test('slow overview billing failures cannot queue an immediate automatic retry',async()=>{
   const h=await mount('overview'),pending=deferred();try{
-    h.read(path=>path.startsWith('costs?')?pending.promise:h.fixture(path))
-    await h.poll(30000);const costs=h.count('costs?');await h.poll(30000);await h.poll(30000);assert.equal(h.count('costs?'),costs)
-    pending.reject(Error('synthetic slow costs'));await tick();assert.equal(h.count('costs?'),costs);assert.match(h.body(),/保留上次数据/)
-    await h.poll(30000);assert.equal(h.count('costs?'),costs)
-    h.read(h.fixture);await h.poll(30000);assert.equal(h.count('costs?'),costs+1);assert.doesNotMatch(h.body(),/synthetic slow costs/)
+    h.read(path=>path.startsWith('billing-summary?')?pending.promise:h.fixture(path))
+    await h.poll(30000);const costs=h.count('billing-summary?');await h.poll(30000);await h.poll(30000);assert.equal(h.count('billing-summary?'),costs)
+    pending.reject(Error('synthetic slow costs'));await tick();assert.equal(h.count('billing-summary?'),costs);assert.match(h.body(),/保留上次数据/)
+    await h.poll(30000);assert.equal(h.count('billing-summary?'),costs)
+    h.read(h.fixture);await h.poll(30000);assert.equal(h.count('billing-summary?'),costs+1);assert.doesNotMatch(h.body(),/synthetic slow costs/)
   }finally{h.close()}
 })
 
 test('costs page coalesces slow automatic reads, backs off, keeps stale labels, and allows manual recovery',async()=>{
   const h=await mount('costs'),pending=deferred();try{
-    h.read(path=>path.startsWith('costs?')?pending.promise:h.fixture(path))
-    await h.poll(30000);const costs=h.count('costs?');await h.poll(60000);assert.equal(h.count('costs?'),costs)
-    pending.reject(new h.w.Error('synthetic slow costs'));await tick();assert.equal(h.count('costs?'),costs);assert.match(h.body(),/23,541/);assert.match(h.body(),/synthetic slow costs/)
-    await h.poll(30000);assert.equal(h.count('costs?'),costs)
-    const recovery=deferred();h.read(path=>path.startsWith('costs?')?recovery.promise:h.fixture(path));await h.manual();assert.equal(h.count('costs?'),costs+1);assert.match(h.body(),/synthetic slow costs/)
-    recovery.resolve(h.fixture(h.calls.filter(p=>p.startsWith('costs?')).at(-1)!));await tick();assert.doesNotMatch(h.body(),/synthetic slow costs/)
+    h.read(path=>path.startsWith('billing-summary?')?pending.promise:h.fixture(path))
+    await h.poll(30000);const costs=h.count('billing-summary?');await h.poll(60000);assert.equal(h.count('billing-summary?'),costs)
+    pending.reject(new h.w.Error('synthetic slow costs'));await tick();assert.equal(h.count('billing-summary?'),costs);assert.match(h.body(),/23,541/);assert.match(h.body(),/synthetic slow costs/)
+    await h.poll(30000);assert.equal(h.count('billing-summary?'),costs)
+    const recovery=deferred();h.read(path=>path.startsWith('billing-summary?')?recovery.promise:h.fixture(path));await h.manual();assert.equal(h.count('billing-summary?'),costs+1);assert.match(h.body(),/synthetic slow costs/)
+    recovery.resolve(h.fixture(h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1)!));await tick();assert.doesNotMatch(h.body(),/synthetic slow costs/)
     h.visible('hidden');const before=h.calls.length;await h.poll(120000);assert.equal(h.calls.length,before)
     assert.deepEqual(h.errors,[])
   }finally{h.close()}

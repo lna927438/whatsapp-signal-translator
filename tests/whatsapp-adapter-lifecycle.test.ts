@@ -231,3 +231,20 @@ test('destroyed native views are detached and paused or destroyed-host selection
   await h.adapter.applyPreferences('paused', { runtimeMode: 'paused' }); await assert.rejects(h.adapter.focus('paused'), /暂停/)
   h.parent.destroyed = true; assert.equal((await h.adapter.focus('c')).state, 'cancelled')
 })
+
+
+test('native WhatsApp composer accepts the full authorized translation length and can restore it', async t => {
+  const h = fixture(t)
+  ;(h.parent as any).isFocused = () => true
+  await h.adapter.focus('a'); await flush()
+  h.views[0].webContents.execute = async script => script.includes('__RT_EDIT_ATOMIC__') ? true : undefined
+  const base = { token: 'fixture-edit', targetKey: 'peer:a', conversationId: 'wa:a' }
+  // Translation and persisted drafts permit 20,000 UTF-16 units; a translated
+  // result longer than the source must not be stranded after charging.
+  const translated = 'Expanded message '.repeat(900)
+  assert.equal(await h.adapter.editComposer('a', { ...base, text: translated, expected: '原文' }), true)
+  assert.equal(await h.adapter.editComposer('a', { ...base, text: '原文', expected: translated }), true)
+  const count = h.views[0].webContents.scripts.length
+  assert.equal(await h.adapter.editComposer('a', { ...base, text: 'a'.repeat(20001), expected: '' }), false)
+  assert.equal(h.views[0].webContents.scripts.length, count)
+})

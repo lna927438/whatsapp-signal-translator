@@ -36,9 +36,9 @@ async function mount(read:(path:string)=>unknown){
  return {w,calls,text:()=>w.document.querySelector('.adm-provider-funding').textContent as string,refresh:async()=>{w.document.querySelector('.adm-funding-heading button').click();await tick()},close:()=>{w.__dispose();dom.window.close()}}
 }
 test('real funds card retains 0.30 across missing period bills and changing filters, with explicit registration only',async()=>{
- const data=fundingBalanceFixture(),h=await mount(path=>path==='provider-balance'?data:path.startsWith('costs?')?{...costsFixture(),enabledProviders:['deepseek']}:{enabledProviders:['deepseek'],configured:false})
+ const data=fundingBalanceFixture(),h=await mount(path=>path==='provider-balance'?data:path.startsWith('billing-summary?')?{...costsFixture(),enabledProviders:['deepseek']}:{enabledProviders:['deepseek'],configured:false})
  try{
-  assert.match(h.text(),/累计已用（余额核算）\$0\.30/);assert.match(h.text(),/累计充值\$20\.00/);assert.match(h.text(),/官方余额\$19\.70/);assert.doesNotMatch(h.text(),/尚缺官方账单/)
+  assert.match(h.text(),/累计充值消耗\$0\.30/);assert.match(h.text(),/累计充值\$20\.00/);assert.match(h.text(),/官方余额\$19\.70/);assert.doesNotMatch(h.text(),/尚缺官方账单/)
   assert.equal(h.w.__funding,undefined);assert.ok(!h.calls.includes('mutate'))
   const date=h.w.document.querySelector('input[type=date]');date.value='2020-01-01';date.dispatchEvent(new h.w.Event('input',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.text(),/\$0\.30/)
   h.w.document.querySelector('.adm-funding-confirm').click();await tick();assert.deepEqual(JSON.parse(JSON.stringify(h.w.__funding)),{currency:'USD',cumulativeTopUps:'20',cumulativeCashRefunds:'0',balanceFetchedAt:data.fetchedAt,reference:''});assert.ok(!h.calls.includes('mutate'))
@@ -46,16 +46,16 @@ test('real funds card retains 0.30 across missing period bills and changing filt
 })
 test('failed or inconsistent refresh keeps last verified amount visibly stale, and recovery updates exact used',async()=>{
  let data:any=fundingBalanceFixture(),fail=false
- const h=await mount(path=>{if(path==='provider-balance'){if(fail)throw Error('synthetic offline');return data}return path.startsWith('costs?')?costsFixture():{configured:true}})
+ const h=await mount(path=>{if(path==='provider-balance'){if(fail)throw Error('synthetic offline');return data}return path.startsWith('billing-summary?')?costsFixture():{configured:true}})
  try{
-  fail=true;await h.refresh();assert.match(h.text(),/\$0\.30/);assert.match(h.text(),/上次核对的资金数据/);assert.equal(h.w.document.querySelector('.adm-funding-confirm').disabled,true)
+  fail=true;await h.refresh();assert.match(h.text(),/\$0\.30/);assert.match(h.text(),/保留上次资金数据.*可能过期/);assert.equal(h.w.document.querySelector('.adm-funding-confirm').disabled,true)
   fail=false;data={...data,funding:{...data.funding,usedPaid:'99'}};await h.refresh();assert.match(h.text(),/未通过核对/);assert.doesNotMatch(h.text(),/\$99/)
-  data=fundingBalanceFixture();data.funding.paidBalance='19.69';data.funding.usedPaid='0.31';data.balances[0].paid='19.69';data.balances[0].total='19.69';await h.refresh();assert.match(h.text(),/\$0\.31/);assert.doesNotMatch(h.text(),/上次核对|offline|未通过核对/)
+  data=fundingBalanceFixture();data.funding.paidBalance='19.69';data.funding.usedPaid='0.31';data.balances[0].paid='19.69';data.balances[0].total='19.69';await h.refresh();assert.match(h.text(),/\$0\.31/);assert.doesNotMatch(h.text(),/可能过期|offline|未通过核对/)
  }finally{h.close()}
 })
 test('unconfirmed balance increases hide used rather than inventing spend; revoked access clears previous money',async()=>{
  let data:any=fundingBalanceFixture(),denied=false
- const h=await mount(path=>{if(path==='provider-balance'){if(denied)throw Object.assign(Error('access revoked'),{code:'admin_forbidden'});return data}return path.startsWith('costs?')?costsFixture():{configured:true}})
+ const h=await mount(path=>{if(path==='provider-balance'){if(denied)throw Object.assign(Error('access revoked'),{code:'admin_forbidden'});return data}return path.startsWith('billing-summary?')?costsFixture():{configured:true}})
  try{
   data.funding={...data.funding,status:'needs_confirmation',reason:'balance_increased',usedPaid:null};data.balances[0].total='39.70';data.balances[0].paid='39.70';await h.refresh();assert.match(h.text(),/待确认累计充值/);assert.match(h.text(),/\$39\.70/);assert.doesNotMatch(h.text(),/\$0\.30/)
   denied=true;await h.refresh();assert.doesNotMatch(h.text(),/\$39\.70|\$20/)
@@ -64,7 +64,7 @@ test('unconfirmed balance increases hide used rather than inventing spend; revok
 
 test('a revoked costs read clears old funds and invalidates a late pending balance reply',async()=>{
  let failCosts=false,holdBalance=false,resolveLate!:(value:unknown)=>void
- const h=await mount(path=>{if(path==='provider-balance')return holdBalance?new Promise(resolve=>{resolveLate=resolve}):fundingBalanceFixture();if(path.startsWith('costs?')){if(failCosts)throw Object.assign(Error('forbidden'),{code:'admin_forbidden'});return costsFixture()}return {configured:true}})
+ const h=await mount(path=>{if(path==='provider-balance')return holdBalance?new Promise(resolve=>{resolveLate=resolve}):fundingBalanceFixture();if(path.startsWith('billing-summary?')){if(failCosts)throw Object.assign(Error('forbidden'),{code:'admin_forbidden'});return costsFixture()}return {configured:true}})
  try{
   assert.match(h.text(),/\$0\.30/);holdBalance=true;await h.refresh()
   failCosts=true;h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.doesNotMatch(h.text(),/\$0\.30|\$20|19\.70/)

@@ -23,6 +23,7 @@ import SignalNativeView from './components/SignalNativeView.vue'
 import { cloudApi } from './lib/cloudApi'
 import { AccountWrites } from './lib/accountWrites'
 import { RemoteSnapshot } from './lib/remoteSnapshot'
+import { parseCharacterWallet } from '../../shared/characterWallet'
 import { prepareBeforeRestart } from './lib/restartState'
 import { orderedAccounts } from '../../shared/accountOrder'
 import { useGoogleVoiceWorkspace, type GoogleVoiceWindow, type GoogleVoiceWindowOptions } from './lib/googleVoiceWorkspace'
@@ -360,13 +361,12 @@ const remainingCharsLabel = computed(() => profile.value
 const quotaLow = computed(() => lowCharacterBalance(profile.value?.remainingCharacters))
 
 function cloudProfileFromState(state: any) {
-  if (!state?.wallet || !Number.isFinite(Number(state.wallet.balance))) throw new Error(t('余额尚未同步。'))
-  const wallet = state.wallet
+  const wallet = { ...state?.wallet, ...parseCharacterWallet(state?.wallet) }
   const cloudProfile = state?.profile || {}
   const user = state?.user || {}
-  const remaining = Number(wallet.balance || 0)
-  const used = Number(wallet.lifetime_debited || 0)
-  const credited = Number(wallet.lifetime_credited || 0)
+  const remaining = wallet.balance
+  const used = wallet.lifetime_debited
+  const credited = wallet.lifetime_credited
   return {
     username: cloudProfile.username || '',
     email: user.email || cloudProfile.email || '',
@@ -553,8 +553,8 @@ async function closeProfile() {
 }
 
 function onProfileUpdated(next: any) {
-  if (next?.wallet) profileSync.accept(cloudProfileFromState(next))
-  else void reloadProfile()
+  try { profileSync.accept(cloudProfileFromState(next)) }
+  catch { invalidateProfile() }
 }
 
 onMounted(async () => {

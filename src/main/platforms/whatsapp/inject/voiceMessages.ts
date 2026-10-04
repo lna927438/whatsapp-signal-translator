@@ -5,7 +5,7 @@ export const whatsappVoiceScript=String.raw`
  if(window.__HD_VOICE_INSTALLED__)return;window.__HD_VOICE_INSTALLED__=true;
  const decode=${voiceAudioWav.toString()};
  const rowSelector='.message-in,.message-out,[data-testid="msg-container"]';
- const records=new WeakMap(),mounted=new Set(),audioBindings=new WeakMap();let scheduled=false,epoch=0,context;
+ const records=new WeakMap(),mounted=new Set(),audioBindings=new WeakMap();let scheduled=false,epoch=0,context,scanTimer,disposed=false;
  const identity=row=>{
   const node=row.closest('[data-id]')||row.querySelector('[data-id]'),id=node?.getAttribute('data-id')||'';
   const match=id.match(/^(?:true|false)_([^_]+@[^_]+)_(.+)$/);
@@ -13,6 +13,7 @@ export const whatsappVoiceScript=String.raw`
  };
  const rows=main=>Array.from(main?.querySelectorAll(rowSelector)||[]).filter(row=>!row.parentElement?.closest(rowSelector));
  const current=()=>{
+  if(disposed||!window.document?.documentElement)return {main:null,header:null,peer:'',title:''};
   const main=document.querySelector('#main'),header=main?.querySelector('header');
   const peers=new Set(rows(main).map(identity).filter(Boolean).map(key=>key.conversationId));
   const title=Array.from(header?.querySelectorAll('[data-testid="conversation-info-header-chat-title"],span[title][dir="auto"]')||[]).find(node=>!node.closest('[data-rt-ui]'));
@@ -52,10 +53,11 @@ export const whatsappVoiceScript=String.raw`
   box.append(button,status,output,original);row.appendChild(box);record={id:key.messageId,row,box,button,status,output,original,transcript,run:0,busy:false,completed:null};records.set(row,record);mounted.add(record);
   box.addEventListener('click',e=>e.stopPropagation());box.addEventListener('keydown',e=>e.stopPropagation());
   button.onclick=async()=>{
+   if(disposed)return;
    const state=refreshContext();
    if(button.disabled||record.busy||!row.isConnected||records.get(row)!==record||identity(row)?.messageId!==key.messageId||state.peer!==key.conversationId||!state.main?.contains(row))return;
    const run=++record.run,version=epoch,audio=audioFor(row),url=source(audio);
-   const valid=()=>{const now=refreshContext();return record.run===run&&epoch===version&&row.isConnected&&records.get(row)===record&&identity(row)?.messageId===key.messageId&&now.main===state.main&&now.header===state.header&&now.peer===key.conversationId&&Boolean(audio?.isConnected)&&audioFor(row)===audio&&source(audio)===url};
+   const valid=()=>{const now=refreshContext();return !disposed&&record.run===run&&epoch===version&&row.isConnected&&records.get(row)===record&&identity(row)?.messageId===key.messageId&&now.main===state.main&&now.header===state.header&&now.peer===key.conversationId&&Boolean(audio?.isConnected)&&audioFor(row)===audio&&source(audio)===url};
    record.busy=true;button.disabled=true;button.textContent='处理中…';status.textContent='正在读取语音…';output.hidden=true;output.textContent='';original.hidden=true;transcript.textContent='';
    try{
     if(!url)throw new Error('请先下载或播放这条语音，再重试。仍无法读取时，可保存语音文件后到“设置 → 语音翻译”处理。');
@@ -69,24 +71,31 @@ export const whatsappVoiceScript=String.raw`
    finally{if(record.run===run){record.busy=false;if(output.hidden){button.disabled=false;button.textContent='重试转中文';if(status.textContent==='正在读取语音…'||status.textContent==='正在识别并转为中文…')status.textContent='页面或语音已变化，请在原消息上重试。'}}}
   };
  }
- function scan(){scheduled=false;refreshContext();
+ function scan(){scheduled=false;scanTimer=undefined;if(disposed||!window.document?.documentElement)return;refreshContext();
   for(const record of mounted)if(!record.row.isConnected){interrupt(record);mounted.delete(record)}
   for(const row of rows(document.querySelector('#main'))){
    if(row.querySelector('audio,[data-icon*="audio-play"],[data-icon*="audio-pause"],[data-icon*="ptt"],[data-testid="audio-play"],button[aria-label*="voice message"],button[aria-label*="语音消息"]'))mount(row);
   }
  }
  const observer=new MutationObserver(changes=>{
+  if(disposed||!window.document?.documentElement)return;
   refreshContext();
   for(const record of mounted){
    if(!record.busy)continue;
    const changed=changes.some(change=>change.type==='attributes'&&change.attributeName==='data-id'&&(change.target.contains(record.row)||record.row.contains(change.target))||change.type==='childList'&&Array.from(change.removedNodes).some(node=>node===record.row||node.contains?.(record.row)));
    if(changed)interrupt(record);
   }
-  if(!scheduled){scheduled=true;setTimeout(scan,100)}
+  if(!scheduled){scheduled=true;scanTimer=setTimeout(scan,100)}
  });
  // Capture navigation intent before React can replace and restore the same row.
  const navigate=event=>{const target=event.target instanceof Element?event.target:event.target?.parentElement;if(target&&!target.closest('#main')&&!target.closest('[data-rt-ui]')){epoch++;for(const record of mounted)interrupt(record)}};
- document.addEventListener('pointerdown',navigate,true);document.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' ')navigate(event)},true);
+ const navigateKey=event=>{if(event.key==='Enter'||event.key===' ')navigate(event)};
+ document.addEventListener('pointerdown',navigate,true);document.addEventListener('keydown',navigateKey,true);
+ window.addEventListener('pagehide',event=>{
+  if(event.persisted||disposed)return;disposed=true;epoch++;observer.disconnect();clearTimeout(scanTimer);scheduled=false;
+  document.removeEventListener('pointerdown',navigate,true);document.removeEventListener('keydown',navigateKey,true);
+  for(const record of mounted){interrupt(record);record.button.onclick=null}mounted.clear();context=null;
+ });
  observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeOldValue:true,characterData:true,attributeFilter:['data-id','src','title']});scan();
 })();
 `

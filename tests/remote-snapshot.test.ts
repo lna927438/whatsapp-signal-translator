@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 const { RemoteSnapshot } = createRequire(import.meta.url)('../src/renderer/src/lib/remoteSnapshot.ts') as typeof import('../src/renderer/src/lib/remoteSnapshot')
+const { checkedWalletState } = createRequire(import.meta.url)('../src/renderer/src/lib/cloudApi.ts') as typeof import('../src/renderer/src/lib/cloudApi')
 
 test('offline startup has unknown balance, failed later refresh retains last confirmed balance', async () => {
   const changes: any[] = []
@@ -45,4 +46,24 @@ test('lost connectivity after settlement keeps the confirmed value explicitly un
  state.accept(100);await state.invalidate(async()=>{throw new Error('offline')})
  assert.deepEqual(changes.at(-1),{value:100,synced:false})
  await state.invalidate(async()=>90);assert.deepEqual(changes.at(-1),{value:90,synced:true})
+})
+
+test('corrupt wallet refresh retains the entire last confirmed snapshot and marks it pending, while true zero is accepted', async () => {
+  const changes: any[] = []
+  const snapshot = new RemoteSnapshot<any>((value, synced) => changes.push({ value, synced }))
+  const valid = { wallet: { balance: 4321, lifetime_credited: 5000, lifetime_debited: 679 } }
+  await snapshot.refresh(async () => checkedWalletState({ wallet: { balance: null, lifetime_credited: 0, lifetime_debited: 0 } }))
+  assert.deepEqual(changes.at(-1), { value: null, synced: false })
+  await snapshot.refresh(async () => checkedWalletState(valid))
+  for (const field of ['balance', 'lifetime_credited', 'lifetime_debited']) {
+    for (const bad of [null, '', false, 1.25, '9007199254740992']) {
+      await snapshot.invalidate(async () => checkedWalletState({ wallet: { ...valid.wallet, [field]: bad } }))
+      assert.deepEqual(changes.at(-1), { value: valid, synced: false })
+    }
+  }
+  const zero = { wallet: { balance: 0, lifetime_credited: 5000, lifetime_debited: 5000 } }
+  await snapshot.refresh(async () => checkedWalletState(zero))
+  assert.deepEqual(changes.at(-1), { value: zero, synced: true })
+  await snapshot.refresh(async () => checkedWalletState({ wallet: { balance: '0', lifetime_credited: '5000', lifetime_debited: '5000' } }))
+  assert.deepEqual(changes.at(-1), { value: zero, synced: true })
 })

@@ -103,10 +103,12 @@ export async function translateHelloDogMessage(message: MessageModel, conversati
   if (!original || !/\p{L}/u.test(original)) return;
   const ranges=(edit?edit.bodyRanges:message.get('bodyRanges'))||[];
   const result = await requestHelloDogTranslation({ id:message.id,editTimestamp,conversationId:conversation.id,text:original,direction:'outgoing',group:conversation.get('type')==='group',sentAt:editTimestamp||message.get('sent_at'),expiresAt:deadline(message) });
+  // The no-translation receipt authorizes only the original snapshot too. A
+  // late English pass-through must not release edited Chinese or erased text.
+  if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation');
   if (result?.enabled === false) return;
   if (result?.enabled !== true) throw new Error('发送权限尚未确认，原消息已保留。');
   if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('Translation returned no text');
-  if ((editTimestamp?message.get('editHistory')?.find(item=>item.timestamp===editTimestamp)?.body:message.get('body')) !== original || message.get('isErased') || message.get('deletedForEveryone') || (deadline(message) ?? Infinity) <= Date.now()) throw new Error('Message changed during translation');
   const extra: Translation = { original,translated:result.text,requestId:result.requestId };
   const bodyRanges=translatedBodyRanges(ranges,original,result.text), before={body:message.get('body'),bodyRanges:message.get('bodyRanges'),editHistory:message.get('editHistory'),helloDogTranslation:prior.helloDogTranslation,helloDogEditTranslations:prior.helloDogEditTranslations};
   const mainEditTimestamp=message.get('editMessageTimestamp');

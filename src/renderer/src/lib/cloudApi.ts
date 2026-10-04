@@ -1,11 +1,9 @@
+import { parseCharacterWallet } from '../../../shared/characterWallet'
+
 export function checkedWalletState(state: any) {
-  for (const key of ['balance', 'lifetime_debited', 'lifetime_credited']) {
-    const value = state?.wallet?.[key]
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error('云端字符数据未通过校验，请重新同步。')
-  }
-  const adjusted = state?.wallet?.lifetime_adjusted_down
-  if (adjusted !== undefined && (!Number.isSafeInteger(adjusted) || adjusted < 0)) throw new Error('云端字符数据未通过校验，请重新同步。')
-  return state
+  const wallet = parseCharacterWallet(state?.wallet)
+  return Object.entries(wallet).every(([key, value]) => state.wallet[key] === value)
+    ? state : { ...state, wallet: { ...state.wallet, ...wallet } }
 }
 
 export const cloudApi = {

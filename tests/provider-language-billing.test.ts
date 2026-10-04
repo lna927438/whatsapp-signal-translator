@@ -111,3 +111,36 @@ test('a Han-only Japanese target that the current desktop rejects is not charged
  assert.equal(result.body.error,'provider_wrong_language');assert.equal(calls.length,3);assert.equal(await debitCount(),0)
  assert.throws(()=>validateTranslation({text:'I work in Tokyo.',targetLanguage:'ja'},'我在東京工作'),/译文语言与目标不符/)
 })
+
+test('outgoing source separators are preserved exactly while model-added blank lines and spacing disappear before the single debit', async () => {
+  output=(_provider,body)=>{
+    const input=JSON.parse(body.input).current_message
+    const markers=input.match(/__HDLAYOUT_\d+__/g)
+    assert.deepEqual(markers,['__HDLAYOUT_0__','__HDLAYOUT_1__'])
+    return 'The first item.  \n\n '+markers[0]+'  The second item. \n '+markers[1]+'   The third item.'
+  }
+  const text='第一项。\r\n\r\n  第二项。  第三项。'
+  const result=await translate('send-audit-authored-layout',{text})
+  assert.equal(result.status,200)
+  assert.equal(result.body.translation,'The first item.\r\n\r\n  The second item.  The third item.')
+  assert.equal(calls.length,1);assert.equal(await debitCount(),1)
+  assert.equal((await wallet(db)).lifetime_debited,Array.from(text).length)
+  const replay=await translate('send-audit-authored-layout',{text})
+  assert.equal(replay.body.translation,result.body.translation);assert.equal(calls.length,1);assert.equal(await debitCount(),1)
+})
+
+test('missing formatting placeholders use one bounded correction and never escape to a sent result or debit', async () => {
+  output=()=>'The first item. The second item.'
+  const result=await translate('send-audit-missing-layout',{text:'第一项。\n第二项。'})
+  assert.equal(result.body.error,'protected_literal_mismatch');assert.equal(calls.length,3)
+  assert.equal(await debitCount(),0);assert.equal((await wallet(db)).reserved_characters,0)
+  const replay=await translate('send-audit-missing-layout',{text:'第一项。\n第二项。'})
+  assert.equal(replay.body.error,'protected_literal_mismatch');assert.equal(calls.length,3)
+})
+
+test('source with no line breaks keeps the paid result compact without changing literal telephone spacing', async () => {
+  output=(_provider,body)=>'Please  call   '+JSON.parse(body.input).current_message.match(/__HDPROTECTED_\d+__/g)[0]+'.\n\nThanks.'
+  const result=await translate('send-audit-compact',{text:'请拨打+44 1234 5678。谢谢。'})
+  assert.equal(result.status,200);assert.equal(result.body.translation,'Please call +44 1234 5678. Thanks.')
+  assert.equal(calls.length,1);assert.equal(await debitCount(),1)
+})

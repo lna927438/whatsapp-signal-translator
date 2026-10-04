@@ -1,4 +1,4 @@
-import {parseProviderFunding,type ProviderFunding} from './providerFunding'
+import {fundingDecimal,parseProviderFunding,type ProviderFunding} from './providerFunding'
 export type BalanceStatus='fresh'|'refreshing'|'stale'|'error'|'not_configured'
 export interface ProviderBalance {
   provider:'deepseek'
@@ -17,9 +17,11 @@ export function parseProviderBalance(value:unknown):ProviderBalance {
   if(!v||v.provider!=='deepseek'||![true,false,null].includes(v.available)||!Array.isArray(v.balances)||v.balances.length>2||!timestamp(v.checkedAt)||typeof v.stale!=='boolean')return invalid()
   const fetchedAt=v.fetchedAt??v.snapshotAt??null
   if(fetchedAt!==null&&!timestamp(fetchedAt)||v.balances.length>0&&fetchedAt===null)return invalid()
+  if(fetchedAt&&Date.parse(fetchedAt)>Date.parse(v.checkedAt)+5000)return invalid()
   const seen=new Set<string>()
   const balances=v.balances.map((row:any)=>{
     if(!row||!['USD','CNY'].includes(row.currency)||seen.has(row.currency)||['total','granted','paid'].some(key=>typeof row[key]!=='string'||! /^-?\d{1,12}(\.\d{1,12})?$/.test(row[key])))return invalid()
+    if(fundingDecimal(row.total)!==fundingDecimal(row.paid)!+fundingDecimal(row.granted)!)return invalid()
     seen.add(row.currency);return {currency:row.currency,total:row.total,granted:row.granted,paid:row.paid}
   })
   const s=v.sync

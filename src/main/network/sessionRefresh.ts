@@ -51,17 +51,29 @@ export class SessionRefresh {
 }
 
 /** Retry authentication once, keeping the original request body and idempotency key. */
-export async function authenticatedFetch(source: TokenSource, url: string, init: RequestInit, timeout: number): Promise<Response> {
+export async function authenticatedFetch(source: TokenSource, url: string, init: RequestInit, timeout: number, absoluteDeadline?: number): Promise<Response> {
   // Session refresh has its own bounded wait. Do not consume the entire
   // network budget before a newly authenticated request can reach the API.
   let deadline: number
   const readToken = async (force: boolean, rejected?: string) => {
-    try { return (typeof source === 'function' ? await source(force, rejected) : source).trim() }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      if (absoluteDeadline !== undefined && Date.now() >= absoluteDeadline) throw new SessionUnavailableError('登录恢复超过翻译等待时间，原请求和草稿已保留。')
+      const work = Promise.resolve(typeof source === 'function' ? source(force, rejected) : source)
+      const token = absoluteDeadline === undefined ? await work : await Promise.race([work, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new SessionUnavailableError('登录恢复超过翻译等待时间，原请求和草稿已保留。')), Math.max(1, absoluteDeadline - Date.now()))
+      })])
+      // A late refresh can update the session, but cannot dispatch this expired
+      // operation. This also covers an event loop waking after the timer.
+      if (absoluteDeadline !== undefined && Date.now() >= absoluteDeadline) throw new SessionUnavailableError('登录恢复超过翻译等待时间，原请求和草稿已保留。')
+      return token.trim()
+    }
     catch (error) { throw error instanceof SessionUnavailableError ? error : new SessionUnavailableError(error instanceof Error ? error.message : '登录状态尚未恢复，草稿已保留。') }
+    finally { if (timer !== undefined) clearTimeout(timer) }
   }
   let token = await readToken(false)
   if (!token) throw new SessionUnavailableError('在线登录令牌缺失，请重新登录。')
-  deadline = Date.now() + Math.max(1, timeout)
+  deadline = Math.min(Date.now() + Math.max(1, timeout), absoluteDeadline ?? Infinity)
   const send = () => {
     if (Date.now() >= deadline) throw new Error('服务请求超时，原请求和草稿已保留。')
     const headers = new Headers(init.headers); headers.set('Authorization', `Bearer ${token}`)
@@ -73,6 +85,6 @@ export async function authenticatedFetch(source: TokenSource, url: string, init:
   if (!refreshed || refreshed === token) return response
   await response.body?.cancel().catch(() => {})
   token = refreshed
-  deadline = Date.now() + Math.max(1, timeout)
+  deadline = Math.min(Date.now() + Math.max(1, timeout), absoluteDeadline ?? Infinity)
   return send()
 }

@@ -13,7 +13,7 @@ async function mount(options:{access?:boolean;request?:(path:string,body?:unknow
   w.__officialAccess=options.access!==false
   w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id)
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
-  w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
+  w.__request=async(path:string,body?:unknown)=>{calls.push(path);return options.request?options.request(path,body):path.startsWith('billing-summary?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'}}
   w.eval(bundle);await tick()
   return {dom,w,calls,timers,body:()=>w.document.body.textContent as string,advance:(ms:number)=>{now+=ms},run:(ms:number)=>{now+=ms;for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
 }
@@ -31,18 +31,25 @@ test('freshness uses provider fetched time rather than a new checked time, with 
   assert.equal(utcTimestamp(value.fetchedAt),'2026-09-15 11:57:59 UTC')
   assert.match(balanceState(parseProviderBalance(value),'network',now).label,/保留上次/)
 })
+
+test('balance rejects inconsistent money and future samples even without funding configuration',()=>{
+ const value=balanceFixture(Date.parse('2026-10-04T02:00:00Z'))
+ assert.throws(()=>parseProviderBalance({...value,balances:[{...value.balances[0],total:'1'}]}),/不完整/)
+ assert.throws(()=>parseProviderBalance({...value,fetchedAt:'2026-10-04T02:00:06Z'}),/不完整/)
+ assert.equal(parseProviderBalance({...value,fetchedAt:'2026-10-04T02:00:05Z'}).fetchedAt,'2026-10-04T02:00:05Z')
+})
 test('one visible balance card shows two-decimal currencies, amount details and current data without summary fallback',async()=>{
   const h=await mount();try{
     assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,1)
     assert.match(h.body(),/USD 1,234\.12/);assert.match(h.body(),/CNY 0\.00/)
     assert.match(h.body(),/赠金余额 USD 0\.00/);assert.doesNotMatch(h.body(),/999999999999/)
-    assert.match(h.body(),/\$0\.12/);assert.match(h.body(),/23,541/);assert.match(h.body(),/UTC/)
+    assert.match(h.body(),/展开后读取/);assert.doesNotMatch(h.body(),/\$0\.12/);assert.match(h.body(),/23,541/);assert.match(h.body(),/UTC/)
     assert.equal(h.calls.filter(p=>p==='provider-balance').length,1)
   }finally{h.close()}
 })
 test('30-second visible checks and the manual button share one guarded request and do not overwrite it with the cost snapshot',async()=>{
   let resolveBalance:((value:unknown)=>void)|undefined,balanceCalls=0
-  const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?(balanceCalls++,new Promise(resolve=>{resolveBalance=resolve})):{configured:true}})
+  const h=await mount({request:path=>path.startsWith('billing-summary?')?costsFixture():path==='provider-balance'?(balanceCalls++,new Promise(resolve=>{resolveBalance=resolve})):{configured:true}})
   try{
     h.run(30000);h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.equal(balanceCalls,1)
     assert.equal(h.w.document.querySelector('.adm-funding-heading button').disabled,true)
@@ -55,15 +62,15 @@ test('30-second visible checks and the manual button share one guarded request a
 })
 test('a failed refresh retains the sampled amount and time, then reconnect recovers without a zero placeholder',async()=>{
   let fail=false;const sampled=balanceFixture(Date.parse('2026-09-15T01:00:00Z'))
-  const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?fail?Promise.reject(Error('暂时无法连接')):sampled:{configured:true}})
+  const h=await mount({request:path=>path.startsWith('billing-summary?')?costsFixture():path==='provider-balance'?fail?Promise.reject(Error('暂时无法连接')):sampled:{configured:true}})
   try{
-    fail=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/上次核对的资金数据/);assert.match(h.body(),/2026-09-15 01:00:00 UTC/);assert.match(h.body(),/USD 1,234\.12/)
-    fail=false;sampled.balances[0].total='1234.000000000001';sampled.fetchedAt=new Date().toISOString();h.advance(60000);h.w.dispatchEvent(new h.w.Event('online'));await tick();assert.match(h.body(),/USD 1,234\.00/);assert.doesNotMatch(h.body(),/暂时无法连接/)
+    fail=true;h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/保留上次资金数据.*可能过期/);assert.match(h.body(),/2026-09-15 01:00:00 UTC/);assert.match(h.body(),/USD 1,234\.12/)
+    fail=false;sampled.balances[0].total='1234.000000000001';sampled.balances[0].paid='1234';sampled.fetchedAt=new Date().toISOString();sampled.checkedAt=sampled.fetchedAt;h.advance(60000);h.w.dispatchEvent(new h.w.Event('online'));await tick();assert.match(h.body(),/USD 1,234\.00/);assert.doesNotMatch(h.body(),/暂时无法连接/)
   }finally{h.close()}
 })
 test('explicit absent account data clears old balance and a role change cannot receive an in-flight private balance',async()=>{
   let response:any=balanceFixture(),resolveBalance:((value:unknown)=>void)|undefined
-  const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?response:{configured:true}})
+  const h=await mount({request:path=>path.startsWith('billing-summary?')?costsFixture():path==='provider-balance'?response:{configured:true}})
   try{
     response={...balanceFixture(),available:null,balances:[],fetchedAt:null,snapshotAt:null,sync:{...balanceFixture().sync,status:'not_configured'}}
     h.w.document.querySelector('.adm-funding-heading button').click();await tick();assert.match(h.body(),/尚未连接/);assert.match(h.body(),/尚未取得/);assert.doesNotMatch(h.body(),/USD 1,234/)
@@ -71,20 +78,20 @@ test('explicit absent account data clears old balance and a role change cannot r
   }finally{h.close()}
 })
 test('cost-reader roles make no owner-only balance or official-bill requests',async()=>{
-  const h=await mount({access:false});try{h.run(30000);await tick();assert.ok(h.calls.every(path=>path.startsWith('costs?')));assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,0);assert.doesNotMatch(h.body(),/同步官方账单/)}finally{h.close()}
+  const h=await mount({access:false});try{h.run(30000);await tick();assert.ok(h.calls.every(path=>path.startsWith('billing-summary?')));assert.equal(h.w.document.querySelectorAll('.adm-provider-funding').length,0);assert.doesNotMatch(h.body(),/同步官方账单/)}finally{h.close()}
 })
 test('background cost refresh preserves the submitted filter until Query is pressed',async()=>{
   const h=await mount();try{
     const period=h.w.document.querySelector('.adm-query-period').textContent
-    const previous=h.calls.filter(p=>p.startsWith('costs?')).at(-1)!
+    const previous=h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1)!
     assert.match(previous,/officialCurrentMonth=true/)
     const input=h.w.document.querySelector('input[type=date]');input.value='2026-01-01';input.dispatchEvent(new h.w.Event('input',{bubbles:true}));await tick()
     assert.equal(h.w.document.querySelector('.adm-query-period').textContent,period,'Draft edits cannot relabel the displayed period')
-    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),previous)
+    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1),previous)
     assert.equal(input.value,'2026-01-01','Background reads preserve the unsubmitted draft')
-    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.calls.filter(p=>p.startsWith('costs?')).at(-1)!,/from=2026-01-01/)
-    const submitted=h.calls.filter(p=>p.startsWith('costs?')).at(-1)!
+    h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.match(h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1)!,/from=2026-01-01/)
+    const submitted=h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1)!
     assert.doesNotMatch(submitted,/officialCurrentMonth/);assert.doesNotMatch(h.w.document.querySelector('.adm-query-period').textContent,/本月/)
-    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('costs?')).at(-1),submitted)
+    h.run(30000);await tick();assert.equal(h.calls.filter(p=>p.startsWith('billing-summary?')).at(-1),submitted)
   }finally{h.close()}
 })

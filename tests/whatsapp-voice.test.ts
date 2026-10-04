@@ -125,3 +125,17 @@ test('concurrent distinct voices retain separate IDs and outputs; reinjection ne
   assert.equal(h.output().textContent,'第一条');assert.equal(h.output('two').textContent,'第二条');assert.deepEqual(h.errors,[])
  }finally{h.close()}
 })
+
+
+test('page teardown stops voice observers and rejects late results without mounting or sending again',async()=>{
+ const gate=deferred(),h=await mount({translate:()=>gate.promise});try{
+  await h.click();assert.equal(h.requests.length,1)
+  h.w.dispatchEvent(new h.w.Event('pagehide'))
+  h.d.querySelector('#main').insertAdjacentHTML('beforeend',row('after-close'))
+  gate.resolve(answer);await tick()
+  assert.equal(h.output().hidden,true)
+  assert.equal(h.d.querySelector('#after-close .rt-voice-translation'),null)
+  h.button().click();await tick();assert.equal(h.requests.length,1)
+  assert.deepEqual(h.errors,[])
+ }finally{h.close()}
+})

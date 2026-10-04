@@ -148,9 +148,23 @@ for (const segmented of [false, true]) test(`a single-paragraph outgoing ${segme
 
 test('explicit source paragraphs are retained in outgoing results, while receive formatting is unchanged', async () => {
   const formatted = 'He was young.\n\nHe had already started working.'
-  output = () => success(formatted)
-  const outgoing = await translate('send-layout-explicit', { text: '他很年轻。\n\n他已经开始工作。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' })
+  output = body => {
+    const message = JSON.parse(body.input).current_message
+    // Outgoing wire data protects authored separators; a faithful provider
+    // echoes that marker rather than replacing it with its own paragraphs.
+    if (message.includes('__HDLAYOUT_')) {
+      assert.equal(message, '他很年轻。__HDLAYOUT_0__他已经开始工作。')
+      return success('He was young.__HDLAYOUT_0__He had already started working.')
+    }
+    assert.equal(message, '他很年轻，而且已经开始工作。')
+    return success(formatted)
+  }
+  const patch = { text: '他很年轻。\n\n他已经开始工作。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' }
+  const outgoing = await translate('send-layout-explicit', patch)
   assert.equal(outgoing.status, 200); assert.equal(outgoing.body.translation, formatted)
+  assert.deepEqual(await translate('send-layout-explicit', patch), outgoing)
+  assert.equal(calls.length, 1); assert.equal(await debits(), 1)
+  assert.equal((await wallet(db)).lifetime_debited, Array.from(patch.text).length)
   const incoming = await translate('receive-layout-preserved', { text: '他很年轻，而且已经开始工作。', sourceLanguage: 'zh-CN', targetLanguage: 'en-US' })
   assert.equal(incoming.status, 200); assert.equal(incoming.body.translation, formatted)
   assert.equal(calls.length, 2); assert.equal(await debits(), 2)

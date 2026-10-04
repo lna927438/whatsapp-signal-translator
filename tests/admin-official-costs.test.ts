@@ -66,20 +66,22 @@ async function mount(options:{access?:boolean;now?:()=>number;request?:(path:str
   let localNow=Date.now();const now=options.now||(()=>localNow),RealDate=w.Date;w.Date=class extends RealDate{constructor(...args:any[]){super(...(args.length?args:[now()]))}static now(){return now()}}
   w.__officialAccess=options.access!==false;w.setInterval=(fn:()=>void,ms:number)=>{timers.set(++timerId,{fn,ms});return timerId};w.clearInterval=(id:number)=>timers.delete(id)
   Object.defineProperty(w.document,'visibilityState',{value:'visible',configurable:true})
-  w.__request=async(path:string,body?:unknown)=>{calls.push(path);const result=await (options.request?options.request(path,body):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'});return path.startsWith('costs?')?costsQueryFixture(path,result as ReturnType<typeof costsFixture>,now()):result}
+  w.__request=async(path:string,body?:unknown)=>{calls.push(path);const result=await (options.request?options.request(path,body):/^(costs|billing-summary)\?/.test(path)?costsFixture():path==='provider-balance'?balanceFixture():{configured:true,message:'已同步'});return /^(costs|billing-summary)\?/.test(path)?costsQueryFixture(path,result as ReturnType<typeof costsFixture>,now()):result}
   w.eval(bundle);await tick()
   return {w,calls,card:()=>w.document.querySelector('.adm-official-breakdown'),body:()=>w.document.body.textContent as string,run:(ms:number)=>{localNow+=ms;for(const item of timers.values())if(item.ms===ms)item.fn()},close:()=>{w.__dispose();dom.window.close()}}
 }
 test('historical breakdown retains each provider bill and missing-period labels, with local evidence collapsed',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data)]
-  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     assert.match(h.card().textContent,/尚未同步该账期/);assert.match(h.card().textContent,/\$0\.03/);assert.match(h.card().textContent,/DeepSeek/)
     assert.doesNotMatch(h.card().textContent,/0\.123456789012|987654321/)
-    assert.equal(h.w.document.querySelector('.adm-local-cost-evidence').open,false);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/\$0\.12/)
-    assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/官方账单不能直接分摊到每个用户/)
+    const details=h.w.document.querySelector('.adm-usage-details')
+    assert.equal(details.open,false);assert.match(details.textContent,/明细尚未加载/)
+    details.open=true;details.dispatchEvent(new h.w.Event('toggle'));await tick();assert.match(details.textContent,/\$0\.12/)
+    assert.match(h.body(),/官方 Costs API 快照/);assert.match(h.body(),/不能直接分摊为每位用户的翻译费用/)
     data.officialBills.push(officialBillFixture('deepseek','0.000000000009',data));h.run(30000);await tick()
-    assert.match(h.card().textContent,/\$0\.03/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/官方账单 · 手动录入/)
+    assert.match(h.card().textContent,/\$0\.03/);assert.doesNotMatch(h.card().textContent,/尚未同步该账期/);assert.match(h.body(),/手工录入/)
     data.officialBills=[];h.run(30000);await tick();assert.match(h.card().textContent,/尚未同步该账期/);assert.doesNotMatch(h.card().textContent,/\$0\.03/)
   }finally{h.close()}
 })
@@ -87,15 +89,17 @@ test('historical breakdown retains each provider bill and missing-period labels,
 test('official bills exclusively drive headline cards; changing receipt estimates cannot replace them',async()=>{
  const data=costsFixture();data.totals.known_cost_usd_exact='1.62';data.totals.unpriced_requests=536
  data.providers=[{provider:'deepseek',known_cost_usd_exact:'1.59',unpriced_requests:466},{provider:'openai',known_cost_usd_exact:'0.03',unpriced_requests:57}] as any
- const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+ const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture():{configured:true}})
  try{
   const card=(name:string)=>h.w.document.querySelector(`.adm-provider-cost-card[data-provider="${name}"]`)
   const amount=(name:string)=>card(name).querySelector('.adm-provider-amount').textContent
   const official=(name:string)=>card(name).querySelector('.adm-official-amount').textContent
   assert.equal(amount('deepseek'),'待同步官方账单');assert.equal(amount('openai'),'待同步官方账单');assert.equal(amount('total'),'账单未齐全')
   assert.equal(official('deepseek'),'待同步官方账单');assert.equal(official('total'),'账单未齐全')
-  assert.match(card('total').querySelector('.adm-fee-label').textContent,/官方账单合计/)
-  assert.doesNotMatch(card('total').textContent,/费用记录不完整|尚未归属/);assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/536 条费用记录不完整|13 条历史记录尚未归属通道/)
+  assert.match(card('total').querySelector('.adm-fee-label').textContent,/已保存账期记录合计/)
+  assert.doesNotMatch(card('total').textContent,/费用记录不完整|尚未归属/)
+  const details=h.w.document.querySelector('.adm-usage-details');assert.match(details.textContent,/明细尚未加载/)
+  details.open=true;details.dispatchEvent(new h.w.Event('toggle'));await tick();assert.match(details.textContent,/536 条费用记录不完整|13 条历史记录尚未归属通道/)
   assert.doesNotMatch(h.body(),/次调用待核算/)
   data.officialBills=[officialBillFixture('deepseek','1.658919574',data)];h.run(30000);await tick()
   assert.equal(official('deepseek'),'$1.65');assert.equal(official('total'),'账单未齐全');assert.match(card('total').textContent,/待同步 OpenAI/);assert.doesNotMatch(card('total').textContent,/\$1\.66/)
@@ -112,7 +116,7 @@ test('DeepSeek-only configuration hides retired OpenAI billing warnings and acti
  const h=await mount({request:path=>{
   if(path==='provider-balance')return balanceFixture()
   if(path==='billing-status')return {enabledProviders:['deepseek'],configured:false,reason:'provider_disabled',message:'OpenAI official sync not configured',sync:{status:'error',message:'OpenAI account deactivated'}}
-  const query=new URLSearchParams(path.slice(6)),data=Object.assign(costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!}),{enabledProviders:['deepseek']})
+  const query=new URLSearchParams(path.split('?')[1]),data=Object.assign(costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!}),{enabledProviders:['deepseek']})
   data.officialBills=[officialBillFixture('openai','100',data),officialBillFixture('deepseek','0.19',data)];return data
  }})
  try{
@@ -122,14 +126,15 @@ test('DeepSeek-only configuration hides retired OpenAI billing warnings and acti
   const provider=h.w.document.querySelectorAll('select')[1];assert.match(provider.textContent,/OpenAI（历史）/)
   provider.value='openai';provider.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
   assert.equal(h.card(),null);assert.match(h.w.document.querySelector('.adm-retired-provider').textContent,/此通道已停用/)
-  assert.match(h.w.document.querySelector('.adm-local-cost-evidence').textContent,/OpenAI 回执/);assert.ok(!h.calls.includes('billing-sync'))
+  const details=h.w.document.querySelector('.adm-usage-details');details.open=true;details.dispatchEvent(new h.w.Event('toggle'));await tick()
+  assert.match(details.textContent,/OpenAI 回执/);assert.ok(!h.calls.includes('billing-sync'))
  }finally{h.close()}
 })
 test('official sync refreshes historical bill details immediately even when a background read is already in flight',async()=>{
   let resolveSync!:(value:unknown)=>void,resolveRead!:(value:unknown)=>void,count=0
   const old=costsFixture();old.officialBills=[officialBillFixture('openai','0.1',old)]
   const updated=costsFixture();updated.officialBills=[officialBillFixture('openai','0.2',updated),officialBillFixture('deepseek','0.000000000001',updated)]
-  const h=await mount({request:path=>path.startsWith('costs?')?(++count===1?old:count===2?new Promise(resolve=>{resolveRead=resolve}):updated):path==='billing-sync'?new Promise(resolve=>{resolveSync=resolve}):path==='provider-balance'?balanceFixture():{configured:true}})
+  const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?(++count===1?old:count===2?new Promise(resolve=>{resolveRead=resolve}):updated):path==='billing-sync'?new Promise(resolve=>{resolveSync=resolve}):path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((button:any)=>button.textContent==='同步官方账单') as HTMLButtonElement
     button.click();await tick();h.run(30000);await tick();resolveSync({message:'已同步'});await tick();resolveRead(old);await tick()
@@ -140,56 +145,56 @@ test('default current-month queries follow UTC midnight and month rollover; manu
   let now=Date.parse('2026-09-30T23:59:58Z')
   assert.deepEqual(currentBillPeriod('Asia/Shanghai',now),{from:'2026-10-01',to:'2026-10-01'})
   const h=await mount({now:()=>now});try{
-    assert.match(h.calls.find(path=>path.startsWith('costs?'))!,/from=2026-09-01&to=2026-09-30/)
+    assert.match(h.calls.find(path=>/^(costs|billing-summary)\?/.test(path))!,/from=2026-09-01&to=2026-09-30/)
     const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-    assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-09-01&to=2026-09-30/,'A business timezone change cannot move the default official calendar month')
-    now=Date.parse('2026-10-01T00:00:33Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-10-01&to=2026-10-01/)
+    assert.match(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!,/from=2026-10-01&to=2026-10-01/,'Following current month must use the submitted business timezone')
+    now=Date.parse('2026-10-01T00:00:33Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!,/from=2026-10-01&to=2026-10-01/)
     const inputs=h.w.document.querySelectorAll('input[type=date]');inputs[0].value='2026-08-01';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[1].value='2026-08-31';inputs[1].dispatchEvent(new h.w.Event('input',{bubbles:true}))
     h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-    now=Date.parse('2026-10-02T00:00:03Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/from=2026-08-01&to=2026-08-31/)
+    now=Date.parse('2026-10-02T00:00:03Z');h.run(30000);await tick();assert.match(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!,/from=2026-08-01&to=2026-08-31/)
   }finally{h.close()}
 })
 
 test('unsubmitted historical filters survive month rollover while displayed bills keep their submitted current-month basis',async()=>{
  let now=Date.parse('2026-09-30T23:59:58Z'),fail=false
  const h=await mount({now:()=>now,request:path=>{
-  if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(now):{configured:true}
+  if(!/^(costs|billing-summary)\?/.test(path))return path==='provider-balance'?balanceFixture(now):{configured:true}
   if(fail)throw Error('synthetic query failure')
-  const query=new URLSearchParams(path.slice(6)),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})
-  data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('deepseek','0.1',data),officialBillFixture('openai','0.2',data)];return data
+  const query=new URLSearchParams(path.split('?')[1]),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})
+  data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('deepseek','0.1',data),officialBillFixture('openai','0.2',data)];data.officialBills.forEach(bill=>bill.fetched_at=data.snapshotAt);return data
  }})
  try{
   const inputs=h.w.document.querySelectorAll('input[type=date]'),selects=h.w.document.querySelectorAll('select'),form=h.w.document.querySelector('form')
   inputs[0].value='2026-08-01';inputs[0].dispatchEvent(new h.w.Event('input',{bubbles:true}));inputs[1].value='2026-08-31';inputs[1].dispatchEvent(new h.w.Event('input',{bubbles:true}))
   selects[0].value='Asia/Shanghai';selects[0].dispatchEvent(new h.w.Event('change',{bubbles:true}));selects[1].value='deepseek';selects[1].dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
   now+=33000;h.run(30000);await tick()
-  const current=h.calls.filter(path=>path.startsWith('costs?')).at(-1)!
+  const current=h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!
   assert.match(current,/from=2026-10-01&to=2026-10-01&provider=&timezone=UTC&officialCurrentMonth=true/)
   assert.match(h.w.document.querySelector('.adm-query-period').textContent,/2026-10-01 至 2026-10-01 · UTC · 全部通道 · 本月/)
   assert.equal(h.w.document.querySelector('[data-provider="total"] .adm-provider-amount').textContent,'$0.30')
   assert.equal(inputs[0].value,'2026-08-01');assert.equal(inputs[1].value,'2026-08-31');assert.equal(selects[0].value,'Asia/Shanghai');assert.equal(selects[1].value,'deepseek')
   fail=true;form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
   assert.match(h.w.document.querySelector('.adm-query-period').textContent,/本月/,'A failed custom query must retain the successful bill basis')
-  fail=false;now+=90000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).at(-1),current)
+  fail=false;now+=90000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1),current)
   form.dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-  const historical=h.calls.filter(path=>path.startsWith('costs?')).at(-1)!
+  const historical=h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!
   assert.match(historical,/from=2026-08-01&to=2026-08-31&provider=deepseek&timezone=Asia%2FShanghai/);assert.doesNotMatch(historical,/officialCurrentMonth/)
   assert.doesNotMatch(h.w.document.querySelector('.adm-query-period').textContent,/本月/)
-  now+=33000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>path.startsWith('costs?')).at(-1),historical)
+  now+=33000;h.run(30000);await tick();assert.equal(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1),historical)
  }finally{h.close()}
 })
 
 test('current-month official cards and import actions use each supplier month; failed midnight reads never relabel the old bill',async()=>{
  let now=Date.parse('2026-09-30T15:59:58Z'),fail=false
  const h=await mount({now:()=>now,request:path=>{
-  if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(now):{configured:true}
+  if(!/^(costs|billing-summary)\?/.test(path))return path==='provider-balance'?balanceFixture(now):{configured:true}
   if(fail)throw Error('synthetic midnight outage')
-  const query=new URLSearchParams(path.slice(6)),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})
+  const query=new URLSearchParams(path.split('?')[1]),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})
   data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('deepseek','1.854140974',data),officialBillFixture('openai','0.0134932',data)];data.officialBills.forEach(item=>item.fetched_at=data.snapshotAt);return data
  }})
  try{
   const card=(name:string)=>h.w.document.querySelector(`[data-provider="${name}"]`)
-  assert.match(h.calls.find(path=>path.startsWith('costs?'))!,/officialCurrentMonth=true/)
+  assert.match(h.calls.find(path=>/^(costs|billing-summary)\?/.test(path))!,/officialCurrentMonth=true/)
   assert.equal(card('deepseek').querySelector('.adm-provider-amount').textContent,'$1.85')
   now+=33000;fail=true;h.run(30000);await tick()
   assert.match(card('deepseek').querySelector('.adm-bill-period').textContent,/2026-09-01 至 2026-09-30/)
@@ -205,12 +210,12 @@ test('current-month official cards and import actions use each supplier month; f
 test('OpenAI current-day sync delay remains visible after GMT+8 midnight under a GMT+8 business filter',async()=>{
   const now=Date.parse('2026-09-15T16:30:00Z')
   const h=await mount({now:()=>now,request:path=>{
-    if(!path.startsWith('costs?'))return path==='provider-balance'?balanceFixture(now):{configured:true}
-    const query=new URLSearchParams(path.slice(6)),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!});data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.3',data)];data.officialBills.forEach(bill=>{bill.fetched_at=new Date(now-11*60000).toISOString()});return data
+    if(!/^(costs|billing-summary)\?/.test(path))return path==='provider-balance'?balanceFixture(now):{configured:true}
+    const query=new URLSearchParams(path.split('?')[1]),data=costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!});data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.3',data)];data.officialBills.forEach(bill=>{bill.fetched_at=new Date(now-11*60000).toISOString()});return data
   }})
   try{
     const timezone=h.w.document.querySelectorAll('select')[0];timezone.value='Asia/Shanghai';timezone.dispatchEvent(new h.w.Event('change',{bubbles:true}));h.w.document.querySelector('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
-    assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.calls.filter(path=>path.startsWith('costs?')).at(-1)!,/to=2026-09-15/)
+    assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方同步有延迟/);assert.match(h.calls.filter(path=>/^(costs|billing-summary)\?/.test(path)).at(-1)!,/to=2026-09-16/)
   }finally{h.close()}
 })
 test('future samples are rejected, and an old current-period API snapshot is visibly delayed rather than called current',async()=>{
@@ -219,12 +224,12 @@ test('future samples are rejected, and an old current-period API snapshot is vis
   data.officialBills[0].fetched_at=new Date(Date.now()+120000).toISOString();assert.equal(officialBillSummary(data,selected).total,null)
   data.officialBills[0].fetched_at=data.snapshotAt;assert.equal(officialBillSummary(data,selected,Date.now()-86400000).total,'0.5','Use the server snapshot clock when the local computer clock is behind')
   data.officialBills[0].fetched_at=new Date(Date.now()-11*60000).toISOString()
-  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
-  try{assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方账单同步有延迟/);assert.match(h.card().textContent,/采集于/)}finally{h.close()}
+  const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  try{assert.match(h.card().textContent,/\$0\.20/);assert.match(h.card().textContent,/官方同步有延迟/);assert.match(h.card().textContent,/采集于/)}finally{h.close()}
 })
 test('provider query updates historical bill details only after that query succeeds and excludes other channels',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','0.0329117',data),officialBillFixture('deepseek','0.000000000009',data)]
-  const h=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const select=h.w.document.querySelectorAll('select')[1];select.value='deepseek';select.dispatchEvent(new h.w.Event('change',{bubbles:true}));await tick()
     assert.match(h.card().textContent,/\$0\.03/)
@@ -234,14 +239,14 @@ test('provider query updates historical bill details only after that query succe
 })
 test('non-owner cannot see official billing cards or fetch owner endpoints, including after an access change',async()=>{
   const data=costsFixture();data.officialBills=[officialBillFixture('openai','18.1',data),officialBillFixture('deepseek','18.2',data)]
-  const h=await mount({access:false,request:path=>path.startsWith('costs?')?data:{configured:true}})
-  try{assert.equal(h.card(),null);assert.doesNotMatch(h.body(),/官方账单明细|\$36\.30/);assert.ok(h.calls.every(path=>path.startsWith('costs?')))}finally{h.close()}
-  const owner=await mount({request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture():{configured:true}})
+  const h=await mount({access:false,request:path=>/^(costs|billing-summary)\?/.test(path)?data:{configured:true}})
+  try{assert.equal(h.card(),null);assert.doesNotMatch(h.body(),/官方账单明细|\$36\.30/);assert.ok(h.calls.every(path=>/^(costs|billing-summary)\?/.test(path)))}finally{h.close()}
+  const owner=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture():{configured:true}})
   try{assert.match(owner.card().textContent,/\$18\.10/);owner.w.__setAccess(false);await tick();assert.equal(owner.card(),null);assert.doesNotMatch(owner.body(),/\$18\.10/)}finally{owner.close()}
 })
 test('business GMT+8 filtering does not disable native UTC sync or change each platform manual billing timezone',async()=>{
   const h=await mount({request:path=>{
-    if(path.startsWith('costs?')){const query=new URLSearchParams(path.slice(6));return costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})}
+    if(/^(costs|billing-summary)\?/.test(path)){const query=new URLSearchParams(path.split('?')[1]);return costsFixture({from:query.get('from')!,to:query.get('to')!,timezone:query.get('timezone')!})}
     return path==='provider-balance'?balanceFixture():{configured:true}
   }})
   try{
@@ -257,7 +262,7 @@ test('business GMT+8 filtering does not disable native UTC sync or change each p
 test('a failed manual sync clears only after a newer matching OpenAI API snapshot, not a DeepSeek balance or statement update',async()=>{
   let now=Date.now()
   const data=costsFixture();data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.19',data)];data.officialBills.forEach(b=>{b.fetched_at=new Date(now-5000).toISOString()})
-  const h=await mount({now:()=>now,request:path=>{if(path==='billing-sync')throw Error('unavailable');return path.startsWith('costs?')?structuredClone(data):path==='provider-balance'?balanceFixture(now):{configured:true,sync:{status:'fresh'}}}})
+  const h=await mount({now:()=>now,request:path=>{if(path==='billing-sync')throw Error('unavailable');return /^(costs|billing-summary)\?/.test(path)?structuredClone(data):path==='provider-balance'?balanceFixture(now):{configured:true,sync:{status:'fresh'}}}})
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement
     button.click();await tick();assert.match(h.body(),/同步未完成，已保留上次结果/)
@@ -272,7 +277,7 @@ test('a failed manual sync clears only after a newer matching OpenAI API snapsho
 test('account-deactivation status is explicit and an automatic successful status read removes it',async()=>{
   let now=Date.now(),failed=true
   const data=costsFixture();data.snapshotAt=new Date(now).toISOString();data.officialBills=[officialBillFixture('openai','0.2',data),officialBillFixture('deepseek','0.19',data)]
-  const h=await mount({now:()=>now,request:path=>path.startsWith('costs?')?data:path==='provider-balance'?balanceFixture(now):{configured:true,sync:failed?{status:'error',errorCode:'billing_account_deactivated',message:'OpenAI 账单账号已停用，请通过官方支持恢复账号。保留上次金额。'}:{status:'fresh'}}})
+  const h=await mount({now:()=>now,request:path=>/^(costs|billing-summary)\?/.test(path)?data:path==='provider-balance'?balanceFixture(now):{configured:true,sync:failed?{status:'error',errorCode:'billing_account_deactivated',message:'OpenAI 账单账号已停用，请通过官方支持恢复账号。保留上次金额。'}:{status:'fresh'}}})
   try{
     assert.match(h.card().textContent,/账单账号已停用/);assert.match(h.card().textContent,/\$0\.20/)
     failed=false;now+=61000;h.run(30000);await tick();assert.doesNotMatch(h.body(),/账单账号已停用/)
@@ -280,7 +285,7 @@ test('account-deactivation status is explicit and an automatic successful status
 })
 
 test('a missing OpenAI billing connection is actionable beside the live fee without substituting the fee for its official bill',async()=>{
- const h=await mount({request:path=>path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:false,message:'official API not configured'}})
+ const h=await mount({request:path=>/^(costs|billing-summary)\?/.test(path)?costsFixture():path==='provider-balance'?balanceFixture():{configured:false,message:'official API not configured'}})
  try{
   const card=h.w.document.querySelector('[data-provider="openai"]')
   assert.equal(card.querySelector('.adm-provider-amount').textContent,'待同步官方账单')
@@ -292,7 +297,7 @@ test('a missing OpenAI billing connection is actionable beside the live fee with
 
 test('late failed manual sync cannot restore status or text after official-access changes',async()=>{
   let rejectSync!:(error:Error)=>void
-  const h=await mount({request:path=>path==='billing-sync'?new Promise((_,reject)=>{rejectSync=reject}):path.startsWith('costs?')?costsFixture():path==='provider-balance'?balanceFixture():{configured:true}})
+  const h=await mount({request:path=>path==='billing-sync'?new Promise((_,reject)=>{rejectSync=reject}):/^(costs|billing-summary)\?/.test(path)?costsFixture():path==='provider-balance'?balanceFixture():{configured:true}})
   try{
     const button=[...h.w.document.querySelectorAll('button')].find((b:any)=>b.textContent==='同步官方账单') as HTMLButtonElement
     button.click();await tick();h.w.__setAccess(false);await tick();rejectSync(new Error('old-account-error'));await tick();h.w.__setAccess(true);await tick()

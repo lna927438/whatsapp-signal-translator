@@ -83,7 +83,7 @@ test('slow independent billing refresh cannot hide successful overview or block 
 })
 
 test('late overview response cannot overwrite a newer page or its snapshot',async()=>{
-  const waiting=deferred(),h=await mount(path=>path==='overview'?waiting.promise:path.startsWith('costs?')?costs(path):page([{id:'u1',email:'test@example.invalid'}]))
+  const waiting=deferred(),h=await mount(path=>path==='overview'?waiting.promise:path.startsWith('billing-summary?')?costs(path):page([{id:'u1',email:'test@example.invalid'}]))
   try{
     await h.navigate('/admin/users');assert.match(h.body(),/test@example.invalid/)
     waiting.resolve(overview({snapshotAt:'2020-01-01T00:00:00Z'}));await tick()
@@ -92,7 +92,7 @@ test('late overview response cannot overwrite a newer page or its snapshot',asyn
 })
 
 test('switching from successful overview to failed user list never shows its timestamp or a false empty result',async()=>{
-  const h=await mount(path=>{if(path==='overview')return overview();if(path.startsWith('costs?'))return costs(path);throw Error('列表暂不可用')})
+  const h=await mount(path=>{if(path==='overview')return overview();if(path.startsWith('billing-summary?'))return costs(path);throw Error('列表暂不可用')})
   try{
     await h.navigate('/admin/users');assert.match(h.find('.adm-empty').textContent,/记录尚未取得/)
     assert.match(h.find('.adm-list-footer').textContent,/本页数据尚未取得/)
@@ -101,7 +101,7 @@ test('switching from successful overview to failed user list never shows its tim
 })
 
 test('a failed new search clears previous rows instead of relabeling them as the new results',async()=>{
-  const h=await mount(path=>{if(path==='overview')return overview();if(path.startsWith('costs?'))return costs(path);if(new URLSearchParams(path.split('?')[1]).get('q'))throw Error('搜索暂不可用');return page([{id:'u1',email:'previous@example.invalid'}])})
+  const h=await mount(path=>{if(path==='overview')return overview();if(path.startsWith('billing-summary?'))return costs(path);if(new URLSearchParams(path.split('?')[1]).get('q'))throw Error('搜索暂不可用');return page([{id:'u1',email:'previous@example.invalid'}])})
   try{
     await h.navigate('/admin/users');assert.match(h.body(),/previous@example.invalid/)
     const input=h.find('.adm-search input');input.value='new query';input.dispatchEvent(new h.w.Event('input',{bubbles:true}));h.find('.adm-toolbar').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));await tick()
@@ -110,7 +110,7 @@ test('a failed new search clears previous rows instead of relabeling them as the
 })
 
 test('real empty user result still displays an empty table and zero rows',async()=>{
-  const h=await mount(path=>path==='overview'?overview():path.startsWith('costs?')?costs(path):page())
+  const h=await mount(path=>path==='overview'?overview():path.startsWith('billing-summary?')?costs(path):page())
   try{await h.navigate('/admin/users');assert.match(h.find('.adm-empty').textContent,/没有符合条件/);assert.match(h.find('.adm-list-footer').textContent,/本页 0 条/)}finally{h.close()}
 })
 

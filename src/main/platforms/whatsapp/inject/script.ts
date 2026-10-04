@@ -1,6 +1,7 @@
 import { whatsappSidebarScript } from './sidebar'
 import { whatsappPresenceScript } from './presence'
 import { whatsappVoiceScript } from './voiceMessages'
+import { readWhatsAppComposerText } from './composerText'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
 import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
 export const whatsappInjectionScript = String.raw`
@@ -106,7 +107,9 @@ export const whatsappInjectionScript = String.raw`
   const equivalentDisplayText = ${equivalentDisplayText.toString()};
   const wrongTargetScript = ${wrongTargetScript.toString()};
   const hasBlockedChinese = ${hasBlockedChinese.toString()};
-  const composerText = (composer) => String(composer?.innerText || composer?.textContent || '').replace(/\u00a0/g, ' ').trim();
+  const composerText = ${readWhatsAppComposerText.toString()};
+  // Dispatch must compare hard line breaks and spaces, not just visible words.
+  const exactComposerText = text => String(text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
 
   const reportStatus = (state, message) => {
     window.realtimeTranslator?.reportStatus?.({ state, message, at: Date.now() });
@@ -522,8 +525,8 @@ export const whatsappInjectionScript = String.raw`
         if (text) selection.insertRawText(text);
       }, { discrete: true });
       const state = editor.getEditorState();
-      return normalizeMessage(state.read(() => state._nodeMap.get('root').getTextContent())) === normalizeMessage(text)
-        && normalizeMessage(composerText(composer)) === normalizeMessage(text);
+      return exactComposerText(state.read(() => state._nodeMap.get('root').getTextContent())) === exactComposerText(text)
+        && composerText(composer) === exactComposerText(text);
     } catch { return false; }
   };
   window.__RT_EDIT_ATOMIC__ = value => {
@@ -558,7 +561,7 @@ export const whatsappInjectionScript = String.raw`
     document.execCommand(text ? 'insertText' : 'delete', false, text || undefined);
     await sleep(0);
     return composer.isConnected && getComposer() === composer && targetKey() === key
-      && normalizeMessage(composerText(composer)) === normalizeMessage(text);
+      && composerText(composer) === exactComposerText(text);
     } catch { return false; } finally { editorLocked = wasLocked; }
   };
 
@@ -571,11 +574,11 @@ export const whatsappInjectionScript = String.raw`
     for(let n=0;n<20;n++) {
       const edit=nativeEditor,composer=getComposer();
       if(edit?.token!==token||composer!==edit.composer||targetKey()!==edit.targetKey||conversationInfo().id!==edit.conversationId)return false;
-      if(finish) {if(normalizeMessage(composerText(composer))===normalizeMessage(edit.text)){
+      if(finish) {if(composerText(composer)===exactComposerText(edit.text)){
         await sleep(20); // Native selection/IME and Lexical reconciliation finish on separate tasks.
-        return nativeEditor===edit && getComposer()===composer && targetKey()===edit.targetKey && normalizeMessage(composerText(composer))===normalizeMessage(edit.text);
+        return nativeEditor===edit && getComposer()===composer && targetKey()===edit.targetKey && composerText(composer)===exactComposerText(edit.text);
       }}
-      else {const selection=getSelection();if(selection?.rangeCount&&composer.contains(selection.getRangeAt(0).commonAncestorContainer)&&normalizeMessage(selection.toString())===normalizeMessage(edit.expected))return true;}
+      else {const selection=getSelection();if(selection?.rangeCount&&composer.contains(selection.getRangeAt(0).commonAncestorContainer)&&exactComposerText(selection.toString())===exactComposerText(edit.expected))return true;}
       await sleep(5);
     }
     return false;
@@ -634,7 +637,7 @@ export const whatsappInjectionScript = String.raw`
       return { dispatched: false, message: '输入框仍含中文，已阻止发送并保留草稿。' };
     }
     if (!snapshot || snapshot.id !== task.id || !matchesSnapshot(snapshot)
-      || normalizeMessage(composerText(snapshot.composer)) !== normalizeMessage(task.translated)
+      || composerText(snapshot.composer) !== exactComposerText(task.translated)
       || !button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
       return { dispatched: false, message: '对话、草稿或发送按钮已变化，已阻止发送。' };
     }
@@ -948,6 +951,9 @@ export const whatsappInjectionScript = String.raw`
     if (editorLocked) { stopInput(event); return; }
     const auxiliary = auxiliaryEditor(event.target);
     if (auxiliary && !auxiliary.closest('[data-rt-ui]')) {
+      const editor = event.target?.closest?.('[contenteditable="true"],[contenteditable="plaintext-only"],textarea');
+      if (editor && event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) nativeParagraphEditors.add(editor);
+      else if (editor) nativeParagraphEditors.delete(editor);
       if (event.key === 'Enter' && !(event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey)) {
         if (event.isComposing || event.keyCode === 229) { event.stopPropagation(); event.stopImmediatePropagation(); }
         else guardAuxiliary(event, auxiliary);
@@ -968,6 +974,11 @@ export const whatsappInjectionScript = String.raw`
     interceptSendNow(event, composer);
   }, true);
   window.addEventListener('keyup', event => {
+    const auxiliary = auxiliaryEditor(event.target);
+    if (auxiliary) {
+      const editor = event.target?.closest?.('[contenteditable="true"],[contenteditable="plaintext-only"],textarea');
+      if (editor) nativeParagraphEditors.delete(editor);
+    }
     const composer = getComposer(event.target);
     if (composer?.contains(event.target)) {
       nativeParagraphEditors.delete(composer);
@@ -976,6 +987,12 @@ export const whatsappInjectionScript = String.raw`
   }, true);
   document.addEventListener('beforeinput', (event) => {
     if (event.inputType !== 'insertParagraph' || event.isComposing) return;
+    const auxiliary = auxiliaryEditor(event.target);
+    if (auxiliary && !auxiliary.closest('[data-rt-ui]')) {
+      const editor = event.target?.closest?.('[contenteditable="true"],[contenteditable="plaintext-only"],textarea');
+      if (!editor || !nativeParagraphEditors.has(editor)) guardAuxiliary(event, auxiliary);
+      return;
+    }
     const composer = getComposer(event.target);
     if (composer && composer.contains(event.target) && !composingEditors.has(composer) && !nativeParagraphEditors.has(composer)) interceptSendNow(event, composer);
   }, true);

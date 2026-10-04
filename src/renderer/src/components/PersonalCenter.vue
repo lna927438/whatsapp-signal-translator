@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { lowCharacterBalance } from "../../../shared/characterQuota"
+import { parseCharacterWallet } from '../../../shared/characterWallet'
 import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -25,9 +26,9 @@ let unsubscribe: (() => void) | undefined
 function invalidate() { revision++; syncing.value = true; if (busy.value) refreshAgain = true; else void reload() }
 
 const formatter = new Intl.NumberFormat(uiLanguage.value)
-const remaining = computed(() => Number(cloudState.value?.wallet?.balance || 0))
-const credited = computed(() => Number(cloudState.value?.wallet?.lifetime_credited || 0))
-const used = computed(() => Number(cloudState.value?.wallet?.lifetime_debited || 0))
+const remaining = computed(() => cloudState.value?.wallet.balance ?? 0)
+const credited = computed(() => cloudState.value?.wallet.lifetime_credited ?? 0)
+const used = computed(() => cloudState.value?.wallet.lifetime_debited ?? 0)
 const total = computed(() => Math.max(remaining.value + used.value, credited.value, 0))
 const usedPercent = computed(() => total.value > 0 ? Math.min(100, Math.round((used.value / total.value) * 100)) : 0)
 const profile = computed(() => cloudState.value?.profile || {})
@@ -49,16 +50,20 @@ async function reload() {
     localProfile.value = (await window.desktopAPI.authStatus())?.user || localProfile.value
     const nextState = await cloudApi.me()
     if (disposed || current !== revision) return
-    cloudState.value = nextState
+    const wallet = parseCharacterWallet(nextState?.wallet)
+    cloudState.value = { ...nextState, wallet: { ...nextState.wallet, ...wallet } }
     lastSyncedAt.value = new Date().toLocaleTimeString()
     if (!editing.value) {
       username.value = profile.value?.username || localProfile.value?.username || ''
       email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
     }
   } catch (error: any) {
+    if (disposed || current !== revision) return
     cloudError.value = error?.message || String(error)
-    username.value = localProfile.value?.username || ''
-    email.value = localProfile.value?.email || ''
+    if (!editing.value) {
+      username.value = profile.value?.username || localProfile.value?.username || ''
+      email.value = user.value?.email || profile.value?.email || localProfile.value?.email || ''
+    }
   } finally {
     busy.value = false
     syncing.value = current !== revision
@@ -87,7 +92,9 @@ async function saveAccount() {
     message.value = t('账号信息已保存。')
     busy.value = false
     await reload()
-    emit('updated', cloudState.value)
+    // An old preserved balance is useful to display, but is not a fresh server
+    // confirmation. Keep the parent explicitly pending after a failed reload.
+    emit('updated', cloudError.value ? null : cloudState.value)
   } catch (error: any) { message.value = error?.message || String(error) }
   finally { busy.value = false }
 }
