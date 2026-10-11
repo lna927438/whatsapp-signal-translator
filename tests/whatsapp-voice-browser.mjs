@@ -19,7 +19,7 @@ try{
   window.__url=URL.createObjectURL(new Blob([bytes],{type:'audio/wav'}));document.querySelector('#received audio').src=window.__url
   const fetchOriginal=window.fetch;window.__reads=[];window.fetch=(url,options)=>{window.__reads.push(String(url));return fetchOriginal(url,options)}
   window.__requests=[];window.__hold=false;window.__failed=false
-  window.realtimeTranslator={translateVoiceMessage:async payload=>{window.__requests.push({messageId:payload.messageId,conversationId:payload.conversationId,bytes:payload.bytes.length,channels:new DataView(payload.bytes.buffer).getUint16(22,true),rate:new DataView(payload.bytes.buffer).getUint32(24,true)});if(window.__hold)return new Promise(resolve=>window.__finish=resolve);if(window.__failed)throw Error('语音识别暂时繁忙，请重试。');return{text:'Please call me tomorrow morning.',translation:'请明天上午给我打电话。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}}}
+  window.realtimeTranslator={translateVoiceMessage:async payload=>{window.__requests.push({messageId:payload.messageId,conversationId:payload.conversationId,bytes:payload.bytes.length,channels:new DataView(payload.bytes.buffer).getUint16(22,true),rate:new DataView(payload.bytes.buffer).getUint32(24,true)});if(window.__hold)return new Promise(resolve=>window.__finish=resolve);if(window.__failed)throw Error('语音识别暂时繁忙，请重试。');return{text:'Please call me tomorrow morning.',englishTranslation:'Please call me tomorrow morning.',translation:'请明天上午给我打电话。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}}}
  })
  await page.addScriptTag({content:whatsappVoiceScript});assert.equal(await page.locator('.rt-voice-translation').count(),2);assert.equal(await page.evaluate(()=>window.__requests.length),0)
  await page.locator('#sent').getByRole('button',{name:'转为中文',exact:true}).click();await page.locator('#sent [role=status]').filter({hasText:'设置 → 语音翻译'}).waitFor();assert.equal(await page.evaluate(()=>window.__requests.length),0)
@@ -41,7 +41,7 @@ try{
  await page.evaluate(()=>{document.querySelector('#received audio').src=window.__url;window.__hold=true})
  await page.locator('#received').getByRole('button',{name:'转为中文',exact:true}).click();await page.waitForFunction(()=>typeof window.__finish==='function')
  const before=await page.evaluate(()=>window.__requests.length);await page.evaluate(()=>document.querySelector('#received .rt-voice-translation button').click());assert.equal(await page.evaluate(()=>window.__requests.length),before)
- await page.locator('#side button').click();await page.evaluate(()=>window.__finish({text:'Old conversation transcript',translation:'不应显示的旧结果',audioId:'b'.repeat(64),targetLanguage:'zh-CN'}));await page.waitForTimeout(50)
+ await page.locator('#side button').click();await page.evaluate(()=>window.__finish({text:'Old conversation transcript',englishTranslation:'Old conversation transcript',translation:'不应显示的旧结果',audioId:'b'.repeat(64),targetLanguage:'zh-CN'}));await page.waitForTimeout(50)
  assert.equal(await page.locator('#received [data-voice-translation]').isVisible(),false);assert.doesNotMatch(await page.textContent('body'),/不应显示的旧结果|Old conversation transcript/);assert.equal(await page.locator('#received .rt-voice-translation button').isEnabled(),true)
  checks.push('Duplicate clicks do not start parallel work; navigation invalidates late reply and restores the retry control')
  assert.deepEqual(errors,[])

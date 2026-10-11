@@ -1,6 +1,7 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {rmSync} from 'node:fs'
+import {rmSync,writeFileSync} from 'node:fs'
+import {join} from 'node:path'
 import {mainHarness} from './main-harness.ts'
 
 const request={text:'Thought about bitcoin at $1.00 😬😬😬',accountId:'wa',conversationId:'peer',messageId:'false_peer@c.us_one',sourceLanguage:'auto',targetLanguage:'zh-CN'}
@@ -107,8 +108,11 @@ test('a transient request-index write failure cannot poison future cache lookups
   requests.store.write=async(value:any)=>{if(fail){fail=false;throw Error('temporary disk failure')}return write(value)};
   await assert.rejects(requests.prepare({...request,messageId:'other',cacheUserId:'owner'}),/disk/);
   assert.ok(await e.cached(request));await e.translateIncoming(request);assert.equal(h.calls,1);
-  // Recovery never treats corrupt/locked storage as an empty message index.
-  requests.store.read=async()=>{throw Error('record unreadable')};await assert.rejects(e.cached(request),/unreadable/);
+  // Damage the actual durable index: unchanged files may now reuse an immutable
+  // snapshot, so replacing read() would not model a real disk change anymore.
+  writeFileSync(join(h.directory,'message-requests-v1.json'),'damaged ledger');
+  await assert.rejects(e.cached(request),/无法读取/);
+  await assert.rejects(e.translateIncoming(request),/无法读取/);assert.equal(h.calls,1);
  }finally{rmSync(h.directory,{recursive:true,force:true})}
 })
 

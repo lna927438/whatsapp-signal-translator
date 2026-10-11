@@ -54,7 +54,7 @@ try {
         if(channel==='hellodog:voice'){
           diagnostics.voiceCalls++
           if(request.id==='failure')throw Error('Synthetic recognition failure')
-          return {text:'Synthetic transcript',translation:longChinese,audioId:'b'.repeat(64),targetLanguage:'zh-CN'}
+          return {text:'Synthetic transcript',englishTranslation:'Good afternoon. Thank you for sending this voice message. We can schedule tomorrow’s meeting for three in the afternoon, confirm the design first, and then review translations and attachments together. Please keep the original voice message and reply whenever it is convenient.',translation:longChinese,audioId:'b'.repeat(64),targetLanguage:'zh-CN'}
         }
         diagnostics.textCalls++;throw Error('Unexpected text translation')
       }}
@@ -82,15 +82,16 @@ try {
     assert.deepEqual(await page.evaluate(()=>window.fixtureDiagnostics),{reads:0,voiceCalls:0,textCalls:0,plays:0,removed:0})
     await page.locator('[data-hellodog-id="success"] [data-hellodog-voice] button').click()
     await page.locator('[data-hellodog-id="failure"] [data-hellodog-voice] button').click()
-    await page.waitForFunction(()=>document.querySelector('[data-hellodog-id="success"] [role="status"]')?.textContent.startsWith('下午好')&&document.querySelector('[data-hellodog-id="failure"] [data-hellodog-voice] button')?.textContent==='重试语音翻译')
+    await page.waitForFunction(()=>document.querySelector('[data-hellodog-id="success"] [lang="zh-CN"]')?.textContent.startsWith('下午好')&&document.querySelector('[data-hellodog-id="failure"] [data-hellodog-voice] button')?.textContent==='重试语音翻译')
     await page.evaluate(()=>{document.querySelector('.fixture-duration').textContent='0:18';document.dispatchEvent(new Event('scroll'))})
     await page.waitForTimeout(5500)
     const measurement=await page.evaluate(()=>{
       const rect=node=>{const b=node.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height,right:b.right,bottom:b.bottom}}
       const rows=['success','failure'].map(id=>{
-        const row=document.querySelector(`[data-hellodog-id="${id}"]`),panel=row.querySelector('[data-hellodog-voice]'),status=panel.querySelector('[role="status"]'),range=document.createRange()
+        const row=document.querySelector(`[data-hellodog-id="${id}"]`),panel=row.querySelector('[data-hellodog-voice]'),status=panel.querySelector('[lang="zh-CN"]')||panel.querySelector('[role="status"]'),range=document.createRange()
         range.selectNodeContents(status)
-        return {id,samePanel:panel===window.fixturePanels[id],audio:rect(row.querySelector('.module-message__audio-attachment')),bubble:rect(row.querySelector('.module-message__container')),panel:rect(panel),button:rect(panel.querySelector('button')),status:rect(status),lineHeight:getComputedStyle(status).lineHeight,statusScrollWidth:status.scrollWidth,statusClientWidth:status.clientWidth,lines:[...range.getClientRects()].map(b=>({y:b.y,bottom:b.bottom,height:b.height})),text:status.textContent}
+        const english=panel.querySelector('[lang=en]')
+        return {id,samePanel:panel===window.fixturePanels[id],audio:rect(row.querySelector('.module-message__audio-attachment')),bubble:rect(row.querySelector('.module-message__container')),panel:rect(panel),button:rect(panel.querySelector('button')),buttonHidden:panel.querySelector('button').hidden,status:rect(status),english:english?rect(english):null,lineHeight:getComputedStyle(status).lineHeight,statusScrollWidth:status.scrollWidth,statusClientWidth:status.clientWidth,lines:[...range.getClientRects()].map(b=>({y:b.y,bottom:b.bottom,height:b.height})),text:status.textContent}
       })
       return {diagnostics:window.fixtureDiagnostics,rows}
     })
@@ -101,7 +102,8 @@ try {
       assert.ok(row.status.y>=row.button.bottom-1,`${name}/${row.id}: status overlaps button`)
       assert.ok(row.status.bottom<=row.panel.bottom+1,`${name}/${row.id}: status exceeds panel`)
       assert.ok(row.panel.bottom<=row.bubble.bottom+1,`${name}/${row.id}: panel exceeds bubble`)
-      assert.ok(row.button.x>=row.panel.x&&row.button.right<=row.panel.right+1,`${name}/${row.id}: button outside panel`)
+      if(!row.buttonHidden)assert.ok(row.button.x>=row.panel.x&&row.button.right<=row.panel.right+1,`${name}/${row.id}: button outside panel`)
+      if(row.english){assert.ok(row.english.bottom<=row.status.y+1,`${name}/${row.id}: languages overlap`);assert.ok(row.english.y>=row.audio.bottom-1,`${name}/${row.id}: English overlaps audio`)}
       assert.ok(row.statusScrollWidth<=row.statusClientWidth+1,`${name}/${row.id}: horizontal text overflow`)
       assert.ok(parseFloat(row.lineHeight)>=19,`${name}/${row.id}: zero/small inherited line-height`)
       for(let i=1;i<row.lines.length;i++)assert.ok(row.lines[i].y>=row.lines[i-1].bottom-1,`${name}/${row.id}: wrapped text lines overlap`)

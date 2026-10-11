@@ -30,14 +30,22 @@ function fixture(resourceName='bin'){
  }},child_process:{spawn:(command:string,args:string[],options:any)=>{
   calls.push({command,args,options});const child:any=new EventEmitter();children.push(child);child.kill=()=>{child.killed=true;setImmediate(()=>child.emit('close',null));return true}
   const output=args[args.indexOf('-of')+1]
-  if(mode!=='hold')setImmediate(()=>{if(mode==='error')child.emit('error',Error('sensitive native error must not escape'));else{writeFileSync(output+'.json',JSON.stringify({transcription:[{text:mode==='silence'?'[BLANK_AUDIO]':'Hello from a local fixture.'}]}));child.emit('close',0)}})
+  if(mode!=='hold')setImmediate(()=>{if(mode==='error')child.emit('error',Error('sensitive native error must not escape'));else{writeFileSync(output+'.json',JSON.stringify({result:{language:'en'},transcription:[{text:mode==='silence'?'[BLANK_AUDIO]':'Hello from a local fixture.'}]}));child.emit('close',0)}})
   return child
  }}}),resources=join(h.directory,resourceName),temporary=join(h.directory,'temporary')
  mkdirSync(resources);writeFileSync(join(resources,manifest.executable),'test-executable');writeFileSync(join(resources,manifest.model),'test-model')
- const {VoiceRecognition,voiceTranscript}=h.load('src/main/translation/voiceRecognition.ts'),{validateVoiceWav}=h.load('src/shared/voiceAudio.ts')
- return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
+ const {VoiceRecognition,voiceTranscript,recognizedVoice}=h.load('src/main/translation/voiceRecognition.ts'),{validateVoiceWav}=h.load('src/shared/voiceAudio.ts')
+ return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,recognizedVoice,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
 }
 async function until(predicate:()=>boolean){for(let i=0;i<100&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(predicate(),'fixture operation started')}
+
+test('local recognizer exposes detected language without breaking the transcript-only API',async()=>{
+ const h=fixture();try{
+  assert.deepEqual({...await h.voice.recognizeWithLanguage(wav(),()=>true)},{text:'Hello from a local fixture.',language:'en'})
+  assert.equal(await h.voice.recognize(wav(),()=>true),'Hello from a local fixture.')
+  assert.deepEqual({...h.recognizedVoice({result:{language:'file:///invalid'},transcription:[{text:'Hello'}]})},{text:'Hello'})
+ }finally{h.close()}
+})
 
 test('voice PCM accepts only bounded canonical mono 16k signed PCM and copies renderer input',()=>{
  const h=fixture();try{

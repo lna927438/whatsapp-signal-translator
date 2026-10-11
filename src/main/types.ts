@@ -1,7 +1,7 @@
 import type { AccountProxy } from './network/accountProxy'
 import type { TranslationQuality } from '../shared/translationPolicy'
 import type { TranslationChannel } from '../shared/translationChannels'
-export type Platform = 'whatsapp' | 'signal'
+export type Platform = 'whatsapp' | 'signal' | 'telegram'
 
 // Historical receipt identifiers remain readable; new work always uses the cloud transport.
 export type TranslationProviderName = 'openai' | 'deepl' | 'google'

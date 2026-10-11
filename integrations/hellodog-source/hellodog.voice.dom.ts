@@ -1,6 +1,6 @@
 // Copyright 2026 HelloDog contributors
 // SPDX-License-Identifier: AGPL-3.0-only
-export type SignalVoiceResult = { text: string; translation: string; audioId: string; targetLanguage: 'zh-CN' };
+export type SignalVoiceResult = { text: string; translation: string; englishTranslation: string; audioId: string; targetLanguage: 'zh-CN' };
 export type SignalVoiceItem = { id: string; conversationId: string; attachmentId: string; expiresAt?: number; ready: boolean };
 export type SignalVoiceDependencies = {
   document: Document;
@@ -37,10 +37,10 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
           panel = deps.document.createElement('section'); panel.dataset.hellodogVoice = id; panel.dataset.hellodogUi = 'voice';
           // Signal's container-outer uses line-height:0 for its media layout.
           // Reset it for our text so wrapped status/results take up real height.
-          panel.setAttribute('aria-label', '语音转中文'); panel.style.cssText = 'box-sizing:border-box;padding:7px 10px;max-width:420px;min-width:0;white-space:normal;overflow-wrap:anywhere;font-size:13px;line-height:1.5';
+          panel.setAttribute('aria-label', '语音中英双译'); panel.style.cssText = 'box-sizing:border-box;padding:7px 10px;max-width:420px;min-width:0;white-space:normal;overflow-wrap:anywhere;font-size:13px;line-height:1.5';
           (element.querySelector('.module-message__container') || element).appendChild(panel);
         }
-        const view = JSON.stringify([state.busy, state.error, state.result?.translation, item.ready]);
+        const view = JSON.stringify([state.busy, state.error, state.result?.translation, state.result?.englishTranslation, item.ready]);
         if (panel.dataset.voiceState === view) continue;
         panel.dataset.voiceState = view; panel.replaceChildren();
         const button = deps.document.createElement('button');
@@ -51,8 +51,15 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
         button.onclick = event => { event.preventDefault(); event.stopPropagation(); void run(state!); };
         panel.appendChild(button);
         const status = deps.document.createElement('div'); status.setAttribute('role', 'status'); status.style.cssText = 'padding-top:6px;white-space:pre-wrap';
-        status.textContent = state.result?.translation || state.error || (item.ready ? '仅显示中文，不会发送消息。' : '请先用 Signal 下载这条语音，再点击转为中文。');
+        status.textContent = state.result ? '已完成中英双译' : state.error || (item.ready ? '点击后在语音下方显示英文和中文。' : '请先用 Signal 下载这条语音，再点击转为中文。');
         panel.appendChild(status);
+        if (state.result) {
+          button.hidden = true;
+          for (const [language, label, text] of [['en', '英文译文', state.result.englishTranslation], ['zh-CN', '中文译文', state.result.translation]] as const) {
+            const line = deps.document.createElement('div'); line.lang = language; line.setAttribute('aria-label', label);
+            line.style.cssText = 'padding-top:6px;white-space:pre-wrap;overflow-wrap:anywhere'; line.textContent = text; panel.appendChild(line);
+          }
+        }
       }
     }
     while (states.size > 200) { const idle = [...states].find(([, state]) => !state.busy); if (!idle) break; states.delete(idle[0]); }
@@ -66,7 +73,8 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
     try {
       const result = await deps.translate(item, current);
       if (!current()) return;
-      if (!result || result.targetLanguage !== 'zh-CN' || typeof result.translation !== 'string' || !result.translation.trim() || result.translation.length > 20000) throw new Error('invalid result');
+      if (!result || result.targetLanguage !== 'zh-CN' || typeof result.translation !== 'string' || !result.translation.trim() || result.translation.length > 40000
+        || typeof result.englishTranslation !== 'string' || !result.englishTranslation.trim() || result.englishTranslation.length > 40000) throw new Error('invalid result');
       state.result = result;
     } catch { if (current()) state.error = '语音暂未转为中文，请稍后重试。原语音已保留。'; }
     finally { if (current()) { state.busy = false; scan(); } }

@@ -21,7 +21,8 @@ export default defineConfig({
           index: resolve(__dirname, 'src/preload/index.ts'),
           notice: resolve(__dirname, 'src/preload/notice.ts'),
           googleVoice: resolve(__dirname, 'src/preload/googleVoice.ts'),
-          whatsapp: resolve(__dirname, 'src/preload/whatsapp.ts')
+          whatsapp: resolve(__dirname, 'src/preload/whatsapp.ts'),
+          telegram: resolve(__dirname, 'src/preload/telegram.ts')
         }
       }
     }

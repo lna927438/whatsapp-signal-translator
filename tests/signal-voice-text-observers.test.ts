@@ -129,6 +129,6 @@ test('native voice status opts out of Signal zero-line-height media layout',()=>
     const panelStyle=f.dom.window.getComputedStyle(f.panel())
     assert.equal(panelStyle.lineHeight,'1.5','wrapped status/error/result text needs nonzero line boxes')
     assert.equal(panelStyle.boxSizing,'border-box')
-    assert.equal(f.panel().querySelector('[role="status"]')!.textContent,'仅显示中文，不会发送消息。')
+    assert.equal(f.panel().querySelector('[role="status"]')!.textContent,'点击后在语音下方显示英文和中文。')
   } finally { f.close() }
 })

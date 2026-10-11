@@ -13,7 +13,7 @@ async function noLinks(directory){for(const entry of await readdir(directory,{wi
 await noLinks(resolve(output,'win-unpacked'))
 const source=(name)=>asar.extractFile(archive,join(...name.split(/[\\/]+/).filter(Boolean))).toString()
 const main=source('out/main/index.js'),preload=source('out/preload/index.js'),google=source('out/preload/googleVoice.js'),whatsapp=source('out/preload/whatsapp.js')
-for(const token of ['voice:translate-file-audio','voice:translate-message','google-voice:voice-audio','voice-zh-','preserveVoiceRequest','转为中文'])assert.ok(main.includes(token),'Missing packaged main behavior '+token)
+for(const token of ['voice:translate-file-audio','voice:translate-message','google-voice:voice-audio','voice-zh-','voice-en-','englishTranslation','recognizeWithLanguage','preserveVoiceRequest','转为中文'])assert.ok(main.includes(token),'Missing packaged main behavior '+token)
 for(const token of ['voice:translate-file-audio','voice:translate-message'])assert.ok(preload.includes(token))
 assert.ok(google.includes('google-voice:voice-audio'));assert.ok(google.includes('audio[controls]'));assert.ok(whatsapp.includes('voice:translate-message'))
 const files=asar.listPackage(archive),renderer=files.filter(name=>/out[\\/]renderer[\\/]assets[\\/]index-[^\\/]+\.js$/.test(name)).map(name=>source(name)).join('\n')

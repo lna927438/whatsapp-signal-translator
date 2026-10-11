@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, shell, desktopCapturer, type WebContents, type Session } from 'electron'
 import { join } from 'path'
-import { externalUrl, isAppUrl, isWhatsAppUrl } from './securityPolicy'
+import { externalUrl, isAppUrl, isWhatsAppUrl, isTelegramUrl, isTelegramOrigin } from './securityPolicy'
 
 export async function openExternalSafe(value: string): Promise<void> {
   const url = externalUrl(value)
@@ -8,17 +8,18 @@ export async function openExternalSafe(value: string): Promise<void> {
   await shell.openExternal(url)
 }
 const sessions = new WeakSet<Session>()
-const knownContents = new WeakMap<WebContents, 'app' | 'whatsapp'>()
+const knownContents = new WeakMap<WebContents, 'app' | 'whatsapp' | 'telegram'>()
 const grants = new WeakMap<WebContents, Set<string>>()
 const documents = new WeakMap<WebContents, object>()
 function trusted(contents: WebContents | null, origin?: string): boolean {
   if (!contents || contents.isDestroyed()) return false
   const kind = knownContents.get(contents)
   if (kind === 'whatsapp') return isWhatsAppUrl(contents.getURL()) && (!origin || isWhatsAppUrl(origin))
+  if (kind === 'telegram') return isTelegramUrl(contents.getURL()) && (!origin || isTelegramOrigin(origin))
   return kind === 'app' && isAppUrl(contents.getURL(), join(__dirname, '../renderer'), !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined) &&
     (!origin || origin === 'file://' || origin === 'file:' || isAppUrl(origin, join(__dirname, '../renderer'), !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined))
 }
-export function installWebSecurity(contents: WebContents, kind: 'app' | 'whatsapp'): void {
+export function installWebSecurity(contents: WebContents, kind: 'app' | 'whatsapp' | 'telegram'): void {
   if (knownContents.has(contents)) return
   knownContents.set(contents, kind)
   documents.set(contents, {})
@@ -27,7 +28,7 @@ export function installWebSecurity(contents: WebContents, kind: 'app' | 'whatsap
   })
   contents.once('destroyed', () => { grants.delete(contents); documents.delete(contents) })
   contents.setWindowOpenHandler(({ url }) => { void openExternalSafe(url).catch(() => undefined); return { action: 'deny' } })
-  const allowed = (url: string) => kind === 'whatsapp' ? isWhatsAppUrl(url) : isAppUrl(url, join(__dirname, '../renderer'), !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined)
+  const allowed = (url: string) => kind === 'telegram' ? isTelegramUrl(url) : kind === 'whatsapp' ? isWhatsAppUrl(url) : isAppUrl(url, join(__dirname, '../renderer'), !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined)
   contents.on('will-navigate', (event, url) => { if (!allowed(url)) event.preventDefault() })
   contents.on('will-redirect', (event, url, _inPlace, isMain) => { if (isMain && !allowed(url)) event.preventDefault() })
   contents.on('will-attach-webview', event => event.preventDefault())

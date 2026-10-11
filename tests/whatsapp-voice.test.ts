@@ -7,7 +7,7 @@ import {JSDOM,VirtualConsole} from 'jsdom'
 import {mainHarness} from './main-harness.ts'
 const modules=mainHarness(),{whatsappVoiceScript}=modules.load('src/main/platforms/whatsapp/inject/voiceMessages.ts')
 after(()=>{assert.match(relative(resolve(tmpdir()),resolve(modules.directory)),/^hellodog-test-[A-Za-z0-9]+$/);rmSync(modules.directory,{recursive:true,force:true})})
-const answer={text:'I will call tomorrow.',translation:'我明天打电话。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}
+const answer={text:'I will call tomorrow.',englishTranslation:'I will call tomorrow.',translation:'我明天打电话。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}
 const row=(id='one',peer='123',audio=true)=>`<div id="${id}" class="message-in" data-id="false_${peer}@c.us_${id}"><button data-icon="audio-play">Play</button>${audio?`<audio src="blob:https://web.whatsapp.com/${id}"></audio>`:''}</div>`
 const tick=async()=>{for(let n=0;n<6;n++)await new Promise(resolve=>setTimeout(resolve,2))}
 function deferred<T=any>(){let resolve!:(value:T)=>void,reject!:(e:unknown)=>void;const promise=new Promise<T>((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}}
@@ -25,14 +25,15 @@ async function mount(options:{html?:string;translate?:(payload:any)=>any;decode?
  return {w,d,requests,reads,errors,button:(id='one')=>d.querySelector('#'+id+' .rt-voice-translation button') as HTMLButtonElement,output:(id='one')=>d.querySelector('#'+id+' [data-voice-translation]') as HTMLElement,status:(id='one')=>d.querySelector('#'+id+' [role=status]')?.textContent,async click(id='one'){this.button(id).click();await tick()},get plays(){return plays},get pauses(){return pauses},get closed(){return closed},close:()=>dom.window.close()}
 }
 
-test('one deliberate click renders Chinese first, folds the transcript, and never changes or plays original audio',async()=>{
+test('one deliberate click shows English and Chinese directly and never changes or plays original audio',async()=>{
  const h=await mount();try{
   const audio=h.d.querySelector('audio'),before=audio.outerHTML
   assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.button().textContent,'转为中文')
   await h.click();assert.equal(h.requests.length,1);assert.equal(h.requests[0].messageId,'voice:false_123@c.us_one');assert.equal(h.requests[0].conversationId,'peer:123@c.us')
   assert.equal(Object.hasOwn(h.requests[0],'text'),false);assert.equal(h.requests[0].bytes.length,4844)
   assert.equal(h.output().textContent,answer.translation);assert.equal(h.output().hidden,false)
-  const details=h.d.querySelector('#one details');assert.equal(details.open,false);assert.equal(details.hidden,false);assert.match(details.textContent,/识别原文I will call tomorrow/)
+  assert.equal(h.d.querySelector('#one [data-voice-english]').textContent,answer.englishTranslation);assert.equal(h.d.querySelector('#one [data-voice-english]').hidden,false)
+  const details=h.d.querySelector('#one details');assert.equal(details.open,false);assert.equal(details.hidden,true)
   assert.equal(audio.outerHTML,before);assert.equal(h.plays,0);assert.equal(h.pauses,0);assert.equal(h.closed,1)
   await h.click();assert.equal(h.requests.length,1);assert.deepEqual(h.errors,[])
  }finally{h.close()}
@@ -43,6 +44,13 @@ test('pending duplicate clicks coalesce; a failed retry keeps exact durable mess
   await h.click();await h.click();assert.equal(h.requests.length,1);gate.reject(Error('识别暂时繁忙'));await tick();assert.equal(h.button().disabled,false);assert.match(h.status()!,/识别暂时繁忙/)
   h.w.realtimeTranslator.translateVoiceMessage=async(payload:any)=>{h.requests.push(payload);return answer};await h.click()
   assert.equal(h.requests.length,2);assert.equal(h.requests[1].messageId,h.requests[0].messageId);assert.equal(h.requests[1].conversationId,h.requests[0].conversationId);assert.deepEqual(h.requests[1].bytes,h.requests[0].bytes);assert.equal(h.output().textContent,answer.translation)
+ }finally{h.close()}
+})
+
+test('WhatsApp mounts bilingual output inside the identified message bubble and retains nodes on rescans',async()=>{
+ const h=await mount({html:'<div class="message-in" data-id="false_123@c.us_one" id="one"><div class="copyable-text"><audio src="blob:https://web.whatsapp.com/one"></audio></div></div>'});try{
+  await h.click();const box=h.d.querySelector('.copyable-text .rt-voice-translation'),english=box.querySelector('[lang=en]');assert.ok(box)
+  h.d.querySelector('header span').title='Alex renamed';await tick();assert.equal(h.d.querySelector('.copyable-text .rt-voice-translation'),box);assert.equal(box.querySelector('[lang=en]'),english);assert.equal(h.requests.length,1)
  }finally{h.close()}
 })
 

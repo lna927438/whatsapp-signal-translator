@@ -39,7 +39,7 @@ export const whatsappVoiceScript=String.raw`
   let record=records.get(row);
   if(record?.id===key.messageId&&record.box.isConnected){
    mounted.add(record);
-   if(record.completed&&(record.completed.audio!==ownedAudio||record.completed.url!==source(ownedAudio))){record.completed=null;record.output.hidden=true;record.output.textContent='';record.original.hidden=true;record.transcript.textContent='';record.button.hidden=false;record.button.disabled=false;record.button.textContent='转为中文';record.status.textContent='语音已更新，请重新转为中文。'}
+   if(record.completed&&(record.completed.audio!==ownedAudio||record.completed.url!==source(ownedAudio))){record.completed=null;record.output.hidden=true;record.output.textContent='';record.english.hidden=true;record.english.textContent='';record.original.hidden=true;record.transcript.textContent='';record.button.hidden=false;record.button.disabled=false;record.button.textContent='转为中文';record.status.textContent='语音已更新，请重新转为中文。'}
    return;
   }
   if(record){interrupt(record);record.box.remove();mounted.delete(record)}
@@ -49,8 +49,10 @@ export const whatsappVoiceScript=String.raw`
   button.style.cssText='color:inherit;background:transparent;border:1px solid #8886;border-radius:6px;padding:4px 8px;cursor:pointer';
   const status=document.createElement('div');status.setAttribute('role','status');status.style.cssText='padding-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';
   const output=document.createElement('div');output.dataset.voiceTranslation='true';output.style.cssText='padding-top:6px;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere';output.hidden=true;
+  output.lang='zh-CN';output.setAttribute('aria-label','中文译文');
+  const english=document.createElement('div');english.dataset.voiceEnglish='true';english.lang='en';english.setAttribute('aria-label','英文译文');english.style.cssText=output.style.cssText;english.hidden=true;
   const original=document.createElement('details');original.hidden=true;const summary=document.createElement('summary');summary.textContent='识别原文';summary.style.cursor='pointer';const transcript=document.createElement('div');transcript.style.cssText='padding-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';original.append(summary,transcript);
-  box.append(button,status,output,original);row.appendChild(box);record={id:key.messageId,row,box,button,status,output,original,transcript,run:0,busy:false,completed:null};records.set(row,record);mounted.add(record);
+  box.append(button,status,english,output,original);(row.querySelector('[data-testid="msg-container"],.copyable-text')||row).appendChild(box);record={id:key.messageId,row,box,button,status,output,english,original,transcript,run:0,busy:false,completed:null};records.set(row,record);mounted.add(record);
   box.addEventListener('click',e=>e.stopPropagation());box.addEventListener('keydown',e=>e.stopPropagation());
   button.onclick=async()=>{
    if(disposed)return;
@@ -58,14 +60,14 @@ export const whatsappVoiceScript=String.raw`
    if(button.disabled||record.busy||!row.isConnected||records.get(row)!==record||identity(row)?.messageId!==key.messageId||state.peer!==key.conversationId||!state.main?.contains(row))return;
    const run=++record.run,version=epoch,audio=audioFor(row),url=source(audio);
    const valid=()=>{const now=refreshContext();return !disposed&&record.run===run&&epoch===version&&row.isConnected&&records.get(row)===record&&identity(row)?.messageId===key.messageId&&now.main===state.main&&now.header===state.header&&now.peer===key.conversationId&&Boolean(audio?.isConnected)&&audioFor(row)===audio&&source(audio)===url};
-   record.busy=true;button.disabled=true;button.textContent='处理中…';status.textContent='正在读取语音…';output.hidden=true;output.textContent='';original.hidden=true;transcript.textContent='';
+   record.busy=true;button.disabled=true;button.textContent='处理中…';status.textContent='正在读取语音…';output.hidden=true;output.textContent='';english.hidden=true;english.textContent='';original.hidden=true;transcript.textContent='';
    try{
     if(!url)throw new Error('请先下载或播放这条语音，再重试。仍无法读取时，可保存语音文件后到“设置 → 语音翻译”处理。');
     if(typeof window.realtimeTranslator?.translateVoiceMessage!=='function')throw new Error('语音翻译尚未准备好，请重新打开此账号窗口。');
     const bytes=await decode(url);if(!valid())return;status.textContent='正在识别并转为中文…';
     const result=await window.realtimeTranslator.translateVoiceMessage({bytes,messageId:key.messageId,conversationId:key.conversationId});if(!valid())return;
-    if(result?.targetLanguage!=='zh-CN'||typeof result?.translation!=='string'||!result.translation.trim()||typeof result?.text!=='string'||!result.text.trim()||!/^[a-f0-9]{64}$/.test(result?.audioId||''))throw new Error('未取得完整的中文结果，请重试。');
-    output.textContent=result.translation;output.hidden=false;transcript.textContent=result.text;original.hidden=false;
+    if(result?.targetLanguage!=='zh-CN'||typeof result?.translation!=='string'||!result.translation.trim()||result.translation.length>40000||typeof result?.englishTranslation!=='string'||!result.englishTranslation.trim()||result.englishTranslation.length>40000||typeof result?.text!=='string'||!result.text.trim()||!/^[a-f0-9]{64}$/.test(result?.audioId||''))throw new Error('未取得完整的中文和英文结果，请重试。');
+    english.textContent=result.englishTranslation;english.hidden=false;output.textContent=result.translation;output.hidden=false;transcript.textContent=result.text;original.hidden=result.text===result.translation||result.text===result.englishTranslation;
     record.completed={audio,url};status.textContent='已转为中文';button.textContent='已转为中文';button.disabled=true;button.hidden=true;
    }catch(error){if(record.run===run&&row.isConnected&&records.get(row)===record){status.textContent=audio&&!valid()?'页面或语音已变化，请在原消息上重试。':error?.message||'语音翻译失败，请重试。';button.textContent='重试转中文';button.disabled=false}}
    finally{if(record.run===run){record.busy=false;if(output.hidden){button.disabled=false;button.textContent='重试转中文';if(status.textContent==='正在读取语音…'||status.textContent==='正在识别并转为中文…')status.textContent='页面或语音已变化，请在原消息上重试。'}}}
@@ -79,6 +81,7 @@ export const whatsappVoiceScript=String.raw`
  }
  const observer=new MutationObserver(changes=>{
   if(disposed||!window.document?.documentElement)return;
+  if(changes.every(change=>(change.target instanceof Element?change.target:change.target.parentElement)?.closest('[data-rt-ui]')))return;
   refreshContext();
   for(const record of mounted){
    if(!record.busy)continue;

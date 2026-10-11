@@ -22,13 +22,13 @@ function fixture(expireAt=''){
   requestChannelPreference:async(value:string)=>{if(expireAt==='preference')authorized=false;return value},
   translator:{testWithSettings:async(_settings:any,request:any)=>{calls.push(['test',request]);if(expireAt==='result')authorized=false;return '译文'},translate:async(request:any)=>{calls.push(['test',request]);if(expireAt==='result')authorized=false;return '译文'}},
   accounts:{add:async(...args:any[])=>{calls.push(['account',...args]);return args.at(-1)},addBatch:async(...args:any[])=>{calls.push(['batch',...args]);return args.at(-1)}},googleVoice:{add:async(options:any)=>{calls.push(['voice',options]);return options},invalidateContext:()=>{}},
-  applyDesktopOptions:()=>{},setCloudRoute:()=>{},whatsapp:{resumeTranslations:()=>{}},signalDesktop:{refresh:()=>{}},mainWindow:{webContents:{send:()=>{}}}
+  applyDesktopOptions:()=>{},setCloudRoute:()=>{},whatsapp:{resumeTranslations:()=>{}},telegram:{resumeTranslations:()=>{}},signalDesktop:{refresh:()=>{}},mainWindow:{webContents:{send:()=>{}}}
  })
  return {calls,validated,select:(value:string)=>selected=value,disable:()=>available=false,invoke:(name:string,...args:any[])=>handlers.get(name)!({sender:1},...args)}
 }
-test('each new WhatsApp, Signal and Voice window captures the selected default without changing old windows',async()=>{
+test('each new WhatsApp, Signal, Telegram and Voice window captures the selected default without changing old windows',async()=>{
  const h=fixture()
- for(const platform of ['whatsapp','signal']){const result=await h.invoke('accounts:add',{platform,label:'New'});assert.equal(result.translationProvider,'openai')}
+ for(const platform of ['whatsapp','signal','telegram']){const result=await h.invoke('accounts:add',{platform,label:'New'});assert.equal(result.translationProvider,'openai')}
  assert.equal((await h.invoke('google-voice:add',{label:'New Voice'})).translationProvider,'openai')
  h.select('deepseek');assert.equal((await h.invoke('accounts:add-batch',{platform:'whatsapp',count:2})).translationProvider,'deepseek')
  assert.equal(h.calls.filter(call=>call[0]==='settings').length,0)

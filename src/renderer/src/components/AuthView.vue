@@ -354,7 +354,7 @@ function backToLoginWithRecoveredUsername() {
       <div class="auth-visual-mark"><img src="/hellodog-icon.webp" :alt="t('HelloDog 小狗')" /></div>
       <div class="auth-brand-copy">
         <h1>{{ t('熟悉的语言。') }}<br />{{ t('更广阔的世界。') }}</h1>
-        <p>{{ t('连接 WhatsApp 与 Signal，让翻译融入每一次对话。用 HelloDog，轻松说 Hello。') }}</p>
+        <p>{{ t('连接常用聊天应用，让翻译融入每一次对话。用 HelloDog，轻松说 Hello。') }}</p>
         <div class="auth-feature-row"><span>{{ t('邮箱验证') }}</span><span>{{ t('云端账号') }}</span><span>{{ t('安全找回') }}</span><span>{{ t('字符钱包') }}</span></div>
       </div>
     </section>
@@ -365,7 +365,7 @@ function backToLoginWithRecoveredUsername() {
         <div class="auth-card-head">
           <span class="auth-kicker">SAY HELLO, GO FURTHER.</span>
           <h2>{{ title }}</h2>
-          <p v-if="mode === 'login'">{{ t('使用在线账号进入 WhatsApp / Signal 翻译工作台') }}</p>
+          <p v-if="mode === 'login'">{{ t('使用在线账号进入 HelloDog 翻译工作台') }}</p>
           <p v-else-if="mode === 'register'">{{ t('创建账号并通过邮箱验证码完成绑定') }}</p>
           <p v-else-if="mode === 'verify-signup'">{{ t('输入注册邮箱收到的验证码') }}</p>
           <p v-else-if="mode === 'verify-mfa'">{{ t('此账号已开启安全验证，请输入验证器中的验证码。') }}</p>

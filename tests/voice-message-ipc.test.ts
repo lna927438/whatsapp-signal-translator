@@ -41,9 +41,9 @@ function fixture(options: { recognize?: () => Promise<string>; runtime?: () => P
     trackContent: async (updates: any[]) => { tracked.push(...updates) }
   }
   const scope: any = {
-    ipcMain, electronIpcMain: raw, mainWindow, whatsapp, VoiceTranslationService, normalizeSignalPeer, app,
+    ipcMain, electronIpcMain: raw, mainWindow, whatsapp, webAdapter: (platform: string) => platform === 'whatsapp' ? whatsapp : undefined, VoiceTranslationService, normalizeSignalPeer, app,
     accounts: { list: async () => records }, translator,
-    voice: { recognize: async (bytes: unknown) => { recognitions.push(bytes); return options.recognize ? options.recognize() : 'Can you call me tomorrow morning?' }, get busy() { return options.busy?.() ?? false }, dispose: () => { disposed++; return options.dispose?.() ?? Promise.resolve() } },
+    voice: { recognizeWithLanguage: async (bytes: unknown) => { recognitions.push(bytes); return { text: options.recognize ? await options.recognize() : 'Can you call me tomorrow morning?', language: 'en' } }, get busy() { return options.busy?.() ?? false }, dispose: () => { disposed++; return options.dispose?.() ?? Promise.resolve() } },
     taskIdentity: () => { if (!owner) throw Error('请先登录'); const current = owner, version = revision; return { owner, authorized: () => owner === current && revision === version } },
     requireMain: (value: any) => { if (value.sender.id !== 1) throw Error('main required') },
     accountRuntime: async (id: string, conversationId?: string) => { runtimes.push({ id, conversationId }); await options.runtime?.(); return { localLanguage: 'fr-FR', translationQuality: { style: 'natural' }, providerPreference: 'deepseek' } },

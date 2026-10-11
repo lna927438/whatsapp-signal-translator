@@ -4,12 +4,12 @@ import {readFile,mkdir,writeFile} from 'node:fs/promises'
 import {fileURLToPath} from 'node:url'
 import {workspaceUiBundle} from './workspace-ui-fixture.ts'
 const {chromium}=createRequire(import.meta.url)('D:/UserAppData/OpenAI/DevelopmentRuntime/codex-primary-runtime/dependencies/node/node_modules/playwright')
-const folder=new URL('../verification/workspace-ui-20260917/',import.meta.url);await mkdir(folder,{recursive:true})
+const folder=new URL('../verification/workspace-ui-20261012/',import.meta.url);await mkdir(folder,{recursive:true})
 const bundle=await workspaceUiBundle(),css=(await Promise.all(['style.css','hellodog.css','workspace.css','compactSidebar.css'].map(name=>readFile(new URL('../src/renderer/src/'+name,import.meta.url),'utf8')))).join('\n')
-const icons=Object.fromEntries(await Promise.all(['whatsapp.svg','signal.svg'].map(async name=>[name,await readFile(new URL('../src/renderer/public/'+name,import.meta.url))])))
+const icons=Object.fromEntries(await Promise.all(['whatsapp.svg','signal.svg','telegram.svg'].map(async name=>[name,await readFile(new URL('../src/renderer/public/'+name,import.meta.url))])))
 const browser=await chromium.launch({channel:'msedge',headless:true}),results=[]
 try{
- for(const [platform,position,theme,width,height,language] of [['whatsapp','top','charcoal',1280,800,'zh-CN'],['signal','top','soft',960,640,'en'],['whatsapp','side','charcoal',1100,700,'zh-CN']]){
+ for(const [platform,position,theme,width,height,language] of [['whatsapp','top','charcoal',1280,800,'zh-CN'],['signal','top','soft',960,640,'en'],['whatsapp','side','charcoal',1100,700,'zh-CN'],['telegram','top','charcoal',960,640,'zh-CN'],['telegram','side','soft',1280,800,'en']]){
  const page=await browser.newPage({viewport:{width,height}}),errors=[];page.on('pageerror',e=>errors.push(e.message))
  await page.route('**/*',route=>{const name=route.request().url().split('/').at(-1);return icons[name]?route.fulfill({contentType:'image/svg+xml',body:icons[name]}):route.abort()})
  await page.setContent('<!doctype html><html><head><base href="https://fixture.example.invalid"></head><body><div id="app"></div></body></html>');await page.addStyleTag({content:css})

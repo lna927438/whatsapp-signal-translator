@@ -11,6 +11,7 @@ import { legacyUserDataPath } from './storage/userDataPath'
 import { registerIpc } from './ipc'
 import { TranslationEngine } from './translation/translationEngine'
 import { WhatsAppAdapter } from './platforms/whatsapp/whatsAppAdapter'
+import { TelegramAdapter } from './platforms/telegram/TelegramAdapter'
 import { SignalAdapter } from './platforms/signal/signalAdapter'
 import { markReady } from './runtimeHealth'
 import { restoreWindowState, trackWindowState } from './windowState'
@@ -30,6 +31,7 @@ app.setPath('userData', userData)
 app.setAppLogsPath()
 const translator = new TranslationEngine()
 const whatsapp = new WhatsAppAdapter()
+const telegram = new TelegramAdapter()
 const signal = new SignalAdapter(translator)
 
 function installApplicationMenu(): void {
@@ -106,8 +108,9 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => { markReady(); if (!app.isPackaged && process.env.HELLODOG_TEST_HIDDEN === '1') return; mainWindow?.show(); if (shouldStartMinimized()) mainWindow?.minimize() })
   installWebSecurity(mainWindow.webContents, 'app')
   whatsapp.attachMainWindow(mainWindow)
+  telegram.attachMainWindow(mainWindow)
   signal.attachMainWindow(mainWindow)
-  registerIpc(mainWindow, whatsapp, signal, translator)
+  registerIpc(mainWindow, whatsapp, signal, translator, telegram)
 
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   else mainWindow.loadFile(join(__dirname, '../renderer/index.html'))

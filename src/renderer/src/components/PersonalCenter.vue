@@ -152,7 +152,7 @@ onUnmounted(() => { disposed = true; unsubscribe?.(); if (poll) clearInterval(po
 
         <p class="personal-sync-status" role="status">{{ syncing ? t('正在同步余额…') : lastSyncedAt ? t('上次同步：') + lastSyncedAt : t('等待云端同步') }}</p>
         <button class="personal-logout" :disabled="busy" @click="logout">{{ t('退出当前账号') }}</button>
-        <p class="personal-logout-note">{{ t('退出账号不会清除 WhatsApp / Signal 登录状态，也不会删除本地历史翻译缓存。字符余额保存在云端。') }}</p>
+        <p class="personal-logout-note">{{ t('退出账号不会清除聊天应用的登录状态，也不会删除本地历史翻译缓存。字符余额保存在云端。') }}</p>
         <p v-if="message" class="personal-message">{{ uiError(message) }}</p>
       </div>
 

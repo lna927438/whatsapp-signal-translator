@@ -19,7 +19,7 @@ const archive = join(output, 'resources/app.asar')
 const packaged = file => asar.extractFile(archive, join(...file.split('/'))).toString()
 const main = packaged('bundles/main.js'), preload = packaged('bundles/preload/main.js'), html = packaged('background.html')
 for (const marker of ['hellodog:voice', 'voice-result', 'senderFrame', 'Signal 语音窗口已断开。']) assert.ok(main.includes(marker), 'Missing main bridge ' + marker)
-for (const marker of ['hellodog:voice', '转为中文', 'data-hellodog-voice', 'message changed', 'audioBase64']) assert.ok(preload.includes(marker), 'Missing preload feature ' + marker)
+for (const marker of ['hellodog:voice', '转为中文', 'data-hellodog-voice', 'englishTranslation', '英文译文', '中文译文', 'message changed', 'audioBase64']) assert.ok(preload.includes(marker), 'Missing preload feature ' + marker)
 assert.match(html, /connect-src [^;]*blob:/)
 assert.match(html, /default-src 'none'/)
 const sourcePolicy = (await readFile(join(checkout, 'background.html'), 'utf8')).match(/http-equiv="Content-Security-Policy"\s+content="([^"]+)"/)?.[1]

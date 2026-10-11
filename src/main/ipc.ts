@@ -5,7 +5,7 @@ import { ipcMain as electronIpcMain, app, Menu, clipboard, dialog, shell } from 
 import { createSecureIpc } from './secureIpc'
 import { OnlineSessionStore } from './storage/onlineSessionStore'
 import type { BrowserWindow } from 'electron'
-import type { AppSettings, RuntimeSettings, TranslationRequest } from './types'
+import type { AppSettings, RuntimeSettings, TranslationRequest, Platform } from './types'
 import { AccountManager } from './accounts/accountManager'
 import { SettingsStore } from './storage/settingsStore'
 import { requestAuthChallenge } from './authChallenge'
@@ -15,6 +15,7 @@ import { TranslationEngine } from './translation/translationEngine'
 import { detectContactLanguage } from './translation/languageDetection'
 import { languages } from './translation/languages'
 import { WhatsAppAdapter } from './platforms/whatsapp/whatsAppAdapter'
+import type { TelegramAdapter } from './platforms/telegram/TelegramAdapter'
 import { SignalAdapter } from './platforms/signal/signalAdapter'
 import { JsonStore } from './storage/jsonStore'
 import { readTranslationChannels, assertTranslationChannel, requestChannelPreference, setTranslationChannelIdentity } from './network/translationChannels'
@@ -61,8 +62,10 @@ interface TranslatePayload {
 type OnlineIdentity = { userId: string; email?: string; username?: string; accessToken?: string } | null
 
 
-export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine): void {
-  const ipcMain = createSecureIpc(electronIpcMain, mainWindow, whatsapp)
+export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter, signal: SignalAdapter, translator: TranslationEngine, telegram?: TelegramAdapter): void {
+  const ipcMain = createSecureIpc(electronIpcMain, mainWindow, whatsapp, telegram)
+  const webAdapter = (platform?: string) => platform === 'whatsapp' ? whatsapp : platform === 'telegram' ? telegram : undefined
+  const ownsWebSender = (id: string, sender: number) => whatsapp.ownsSender(id, sender) || Boolean(telegram?.ownsSender(id, sender))
   ipcMain.handle('auth:challenge',()=>requestAuthChallenge(mainWindow))
   const onlineSessions = new OnlineSessionStore()
   ipcMain.handle('auth:storage-get', (_event, key: string) => onlineSessions.get(key))
@@ -118,14 +121,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     notify:(accountId,authorized)=>notifyAccount(accountId,'Google Voice',{hideNames:true,authorized}),
     clearNotifications:clearAccountNotifications
   })
-  const workspaceFocus=new WorkspaceFocus(()=>{googleVoice.hide();whatsapp.hideAll();signalDesktop.focus('')},()=>!mainWindow.isDestroyed())
+  const workspaceFocus=new WorkspaceFocus(()=>{googleVoice.hide();whatsapp.hideAll();telegram?.hideAll();signalDesktop.focus('')},()=>!mainWindow.isDestroyed())
   mainWindow.on?.('closed',()=>workspaceFocus.invalidate())
 
   const voice = new VoiceRecognition(app.isPackaged ? join(process.resourcesPath,'voice') : join(app.getAppPath?.()||join(__dirname,'../..'),'resources/voice/bin'),join(app.getPath('temp'),'hellodog-voice'))
   ipcMain.handle('voice:recognize',async(event,id:string,bytes:Uint8Array)=>{
     const identity=taskIdentity()
     const record=(await accounts.list()).find(item=>item.id===id)
-    const senderAllowed=()=>event.sender.id===mainWindow.webContents.id&&['whatsapp','signal'].includes(record?.platform||'')||record?.platform==='whatsapp'&&whatsapp.ownsSender(id,event.sender.id)
+    const senderAllowed=()=>event.sender.id===mainWindow.webContents.id&&['whatsapp','signal','telegram'].includes(record?.platform||'')||Boolean(webAdapter(record?.platform)?.ownsSender(id,event.sender.id))
     if(!record||!senderAllowed())throw new Error('语音不属于当前账号窗口。')
     const text=await voice.recognize(bytes,()=>identity.authorized()&&!event.sender.isDestroyed()&&Boolean(senderAllowed()))
     if(!identity.authorized()||!senderAllowed())throw new Error('登录状态已变化。')
@@ -154,9 +157,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
 
   const assertTaskSender = (event: Electron.IpcMainInvokeEvent, task: { platform: string; accountId: string }) => {
-    const expected = task.platform === 'whatsapp'
-      ? whatsapp.ownsSender(task.accountId, event.sender.id)
-      : event.sender.id === mainWindow.webContents.id
+    const expected = task.platform === 'signal' ? event.sender.id === mainWindow.webContents.id
+      : Boolean(webAdapter(task.platform)?.ownsSender(task.accountId, event.sender.id))
     if (!expected) throw new SendNotStartedError('发送窗口与任务账号不匹配。')
   }
 
@@ -174,7 +176,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   }
   const outgoingCredit = new OutgoingCredit(() => onlineIdentity?.userId || '', () => cloudRequest('/api/me'), id => translator.outgoingSettlement(id))
   const voiceTranslations = new VoiceTranslationService({
-    recognize: (bytes, authorized) => voice.recognize(bytes, authorized),
+    recognize: (bytes, authorized) => voice.recognizeWithLanguage(bytes, authorized),
     prepare: request => translator.preserveVoiceRequest(request),
     translate: request => translator.translateIncoming(request, true)
   })
@@ -210,11 +212,14 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       || typeof input.messageId !== 'string' || !input.messageId || input.messageId.length > 1000) throw new Error('语音消息标识无效。')
     let conversationId = input.conversationId
     const owns = () => !event.sender.isDestroyed() && (event.sender.id === mainWindow.webContents.id
-      || record.platform === 'whatsapp' && whatsapp.ownsSender(id, event.sender.id))
+      || Boolean(webAdapter(record.platform)?.ownsSender(id, event.sender.id)))
     if (!owns()) throw new Error('语音不属于当前聊天窗口。')
     if (record.platform === 'whatsapp') {
       const match = input.messageId.match(/^voice:(?:true|false)_([^_\s]+@[^_\s]+)_.+$/)
       if (!match || conversationId !== 'peer:' + match[1]) throw new Error('语音与当前会话不匹配，请重新打开这条语音。')
+    } else if (record.platform === 'telegram') {
+      const prefix = 'voice:' + conversationId + ':'
+      if (!/^telegram:-?\d+(?::\d+)?$/.test(conversationId) || !input.messageId.startsWith(prefix) || !/^[1-9]\d{0,19}$/.test(input.messageId.slice(prefix.length))) throw new Error('语音与当前 Telegram 会话不匹配。')
     } else {
       requireMain(event)
       conversationId = normalizeSignalPeer(conversationId)
@@ -330,7 +335,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     prepareRestart:()=>signalDesktop.prepareRestart(), refresh:()=>signalDesktop.refresh(),
     insertDraft:(id,text)=>signalDesktop.insertDraft(id,text),
     mode: async(id,mode)=>{if(mode==='paused')await signalDesktop.stop(id);else{const record=(await accounts.list()).find(item=>item.id===id&&item.signalEngine==='desktop');if(record)await signalDesktop.open(record,true)}}
-  })
+  }, telegram)
   registerSignalFeatures(mainWindow, signal, () => taskIdentity().owner)
   const notifications = new ClientNotifications(mainWindow, updates, () => onlineIdentity?.userId || '',
     () => cloudRequest('/api/notices'), value => postNoticeReceipt(String(onlineIdentity?.accessToken || ''), value))
@@ -403,7 +408,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('accounts:contact-quality', async (event, id: string, conversation: string, quality: unknown) => {
     requireMain(event); await requireAuth()
     const result = await accounts.updateContactQuality(id, conversation, quality)
-    whatsapp.refreshTranslations();signalDesktop.refresh(id)
+    whatsapp.refreshTranslations();telegram?.refreshTranslations();signalDesktop.refresh(id)
     return result
   })
   ipcMain.handle('signal-desktop:open', async (event, id: string) => {
@@ -445,6 +450,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       clearAccountUnread()
       signalDesktop.stopAll()
       whatsapp.resetViews()
+      telegram?.resetViews()
       signal.setOnlineUser(onlineIdentity?.userId || '')
     }
     if (onlineIdentity && (previous?.userId !== onlineIdentity.userId || previous?.username !== onlineIdentity.username || previous?.email !== onlineIdentity.email)) {
@@ -453,6 +459,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       await identityWrites
     }
     whatsapp.resumeTranslations()
+    telegram?.resumeTranslations()
     if (previous?.userId === onlineIdentity?.userId && previous?.accessToken !== onlineIdentity?.accessToken) signalDesktop.refresh()
     if (onlineIdentity?.userId && (previous?.userId !== onlineIdentity.userId || previous?.accessToken !== onlineIdentity.accessToken)) void recover().catch(() => undefined)
     return { authenticated: Boolean(onlineIdentity), source: 'supabase', user: onlineIdentity ? { ...onlineIdentity, accessToken: undefined } : null }
@@ -479,6 +486,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     voiceTranslations.clear()
     translator.setOnlineSession(null, null)
     whatsapp.resetViews()
+    telegram?.resetViews()
     signal.setOnlineUser('')
     await googleVoice.detachAll()
     return auth.logout()
@@ -491,10 +499,11 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return accounts.reorder(platform, ids)
   })
   whatsapp.setPasswordReader(id => accounts.proxyPassword(id))
+  telegram?.setPasswordReader(id => accounts.proxyPassword(id))
   ipcMain.handle('accounts:add', async (event, args: any) => {
     requireMain(event); await requireAuth()
     const identity=taskIdentity()
-    if (!['whatsapp', 'signal'].includes(args.platform)) throw new Error('不支持的应用类型。')
+    if (!['whatsapp', 'signal', 'telegram'].includes(args.platform)) throw new Error('不支持的应用类型。')
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     args = {...args, options:{...args.options,translationProvider:args.options?.translationProvider || (await settings.get()).translationProvider || 'deepseek'}}
     await requireSelectableChannel(args.options.translationProvider)
@@ -504,7 +513,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('accounts:add-batch', async (event, args: any) => {
     requireMain(event); await requireAuth()
     const identity=taskIdentity()
-    if (!['whatsapp', 'signal'].includes(args.platform)) throw new Error('不支持的应用类型。')
+    if (!['whatsapp', 'signal', 'telegram'].includes(args.platform)) throw new Error('不支持的应用类型。')
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     args = {...args, options:{...args.options,translationProvider:args.options?.translationProvider || (await settings.get()).translationProvider || 'deepseek'}}
     await requireSelectableChannel(args.options.translationProvider)
@@ -525,8 +534,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if(!identity.authorized())throw new Error('登录状态已变化。')
     if (existing?.platform === 'signal' && patch.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     const updated = await accounts.update(id, patch)
-    if (patch.proxy !== undefined) whatsapp.remove(id)
-    if (updated?.platform === 'whatsapp') await whatsapp.applyPreferences(id, updated)
+    if (patch.proxy !== undefined) webAdapter(existing.platform)?.remove(id)
+    if (updated) await webAdapter(updated.platform)?.applyPreferences(id, updated)
     if (updated?.platform === 'signal') await signal.resumeReceiving()
     if (updated?.platform === 'signal' && updated.runtimeMode === 'paused') signalDesktop.stop(id)
     signalDesktop.refresh()
@@ -547,7 +556,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if ((await sendTasks.unfinished(taskIdentity().owner)).some(task => task.accountId === id)) throw new Error('请先完成或核对该账号的待处理发送任务。')
     const answer = await dialog.showMessageBox(mainWindow, { type: 'warning', message: `移除「${item?.label || '此账号'}」入口？`, detail: '此操作与清理译文缓存不同。将保留请求防重记录和恢复数据。', buttons: ['取消', '移除'], defaultId: 0, cancelId: 0 })
     if (answer.response !== 1) return false
-    if (item?.platform === 'whatsapp') whatsapp.remove(id)
+    webAdapter(item?.platform)?.remove(id)
     if (item?.platform === 'signal') await signalDesktop.stop(id)
     await accounts.remove(id)
     clearAccountUnread(id)
@@ -563,9 +572,9 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
   ipcMain.handle('profile:topup', async (_e, characters: number, note?: string) => { await requireAuth(); return profile.addCharacters(characters, note || '字符充值') })
 
-  ipcMain.handle('platform:focus', (event, args: { platform: 'whatsapp' | 'signal'; accountId?: string }) => {
+  ipcMain.handle('platform:focus', (event, args: { platform: Platform; accountId?: string }) => {
     requireMain(event)
-    if(!args||!['whatsapp','signal'].includes(args.platform)||(args.accountId!==undefined&&typeof args.accountId!=='string'))throw new Error('账号窗口无效。')
+    if(!args||!['whatsapp','signal','telegram'].includes(args.platform)||(args.accountId!==undefined&&typeof args.accountId!=='string'))throw new Error('账号窗口无效。')
     const revision=identityRevision
     return workspaceFocus.select(args.platform+':'+(args.accountId||''),async lease=>{
       const current=()=>lease.current()&&revision===identityRevision
@@ -575,10 +584,11 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       if(!current())return {state:'cancelled'}
       if(!account)throw new Error('账号不存在。')
       if(account.runtimeMode==='paused')throw new Error('请先恢复此账号。')
-      if(account.platform==='whatsapp'){
+      const adapter = webAdapter(account.platform)
+      if(adapter){
         // Preferences update memory first; a stalled page script must not hold navigation.
-        void whatsapp.applyPreferences(account.id,account).catch(()=>undefined)
-        return whatsapp.focus(account.id)
+        void adapter.applyPreferences(account.id,account).catch(()=>undefined)
+        return adapter.focus(account.id)
       }
       if(account.signalEngine==='desktop'){
         signalDesktop.focus(account.id)
@@ -589,8 +599,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       return {state:'ready'}
     })
   })
-  ipcMain.handle('ui:set-overlay-open', (event, open: boolean) => { requireMain(event); whatsapp.setOverlayOpen(Boolean(open)); signalDesktop.setOverlayOpen(Boolean(open)); googleVoice.setOverlayOpen(Boolean(open)); notifications.setOverlayOpen(Boolean(open)); return true })
-  ipcMain.handle('ui:set-content-bounds', (event, bounds) => { requireMain(event); whatsapp.setContentBounds(bounds); signalDesktop.setBounds(bounds); googleVoice.setBounds(bounds) })
+  ipcMain.handle('ui:set-overlay-open', (event, open: boolean) => { requireMain(event); whatsapp.setOverlayOpen(Boolean(open)); telegram?.setOverlayOpen(Boolean(open)); signalDesktop.setOverlayOpen(Boolean(open)); googleVoice.setOverlayOpen(Boolean(open)); notifications.setOverlayOpen(Boolean(open)); return true })
+  ipcMain.handle('ui:set-content-bounds', (event, bounds) => { requireMain(event); whatsapp.setContentBounds(bounds); telegram?.setContentBounds(bounds); signalDesktop.setBounds(bounds); googleVoice.setBounds(bounds) })
   ipcMain.handle('cloud:read', async (event, path: string) => {
     requireMain(event); await requireAuth()
     if (!['/api/me', '/api/wallet', '/api/usage', '/api/account-snapshot'].includes(path)) throw new Error('不支持此请求。')
@@ -629,7 +639,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       try {
         const refresh=account.platform==='signal'&&account.signalEngine==='desktop'
           ? (['ready','starting'].includes(signalDesktop.status(id).state)?signalDesktop.reload(account):signalDesktop.open(account,true))
-          : account.platform==='whatsapp'?whatsapp.reload(id):signal.refreshAccount(id)
+          : webAdapter(account.platform)?.reload(id) ?? signal.refreshAccount(id)
         await boundedOperation(Promise.resolve(refresh),25000,'刷新仍在等待，聊天和草稿已保留，请稍后重试。')
         if(revision!==identityRevision)return false
         if(!mainWindow.isDestroyed())mainWindow.webContents.send('ui:account-action', { action: 'refreshed', accountId: id })
@@ -648,12 +658,12 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     await requireAuth()
     const account = (await accounts.list()).find(item => item.id === id)
     if (!account) return
-    const contents = whatsapp.contents(id)
+    const contents = webAdapter(account.platform)?.contents(id)
     const nativeSignal = account.platform === 'signal' && account.signalEngine === 'desktop'
     const notify = (action: string) => mainWindow.webContents.send('ui:account-action', { action, accountId: id })
     const update = async (patch: any) => {
       const value = await accounts.update(id, patch)
-      if (value) await whatsapp.applyPreferences(id, value)
+      if (value) await webAdapter(account.platform)?.applyPreferences(id, value)
       if (nativeSignal) signalDesktop.refresh(id)
       notify('updated')
     }
@@ -678,24 +688,25 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
         { label: t('前进'), enabled: contents?.navigationHistory.canGoForward() || false, click: () => contents?.navigationHistory.goForward() },
         { label: t('复制当前页面地址'), enabled: Boolean(contents), click: () => { const url = contents?.getURL(); if (url && /^https?:\/\//.test(url)) clipboard.writeText(url) } },
         { type: 'separator' },
-        { label: t('代理与出口 IP'), enabled: account.platform === 'whatsapp', click: () => notify('configure') },
+        { label: t('代理与出口 IP'), enabled: Boolean(webAdapter(account.platform)), click: () => notify('configure') },
         { label: t('检查连接'), click: () => notify('diagnose') },
         { label: t('诊断日志'), click: safe(async () => { const error = await shell.openPath(app.getPath('logs')); if (error) throw new Error(error) }) }
       ] },
       { label: t('回到工作台'), click: () => notify('home') },
-      { label: t('关闭窗口（保留账号）'), click: () => { whatsapp.remove(id); notify('home') } },
+      { label: t('关闭窗口（保留账号）'), click: () => { webAdapter(account.platform)?.remove(id); notify('home') } },
       { type: 'separator' },
       { label: t('移除账号入口…'), click: safe(async () => {
         if ((await sendTasks.unfinished(taskIdentity().owner)).some(task => task.accountId === id)) throw new Error(t('请先核对待处理发送任务。'))
         const answer = await dialog.showMessageBox(mainWindow, { type: 'warning', title: t('移除账号'), message: t('移除「{0}」？', account.label), detail: t('仅移除此电脑中的账号入口。请先处理该账号中未完成的发送任务。'), buttons: [t('取消'), t('移除')], defaultId: 0, cancelId: 0 })
         if (answer.response !== 1) return
-        whatsapp.remove(id); await signalDesktop.stop(id); await accounts.remove(id); clearAccountUnread(id); if (account.platform === 'signal') await signal.resumeReceiving(); notify('removed')
+        webAdapter(account.platform)?.remove(id); await signalDesktop.stop(id); await accounts.remove(id); clearAccountUnread(id); if (account.platform === 'signal') await signal.resumeReceiving(); notify('removed')
       }) }
     ]).popup({ window: mainWindow })
   }
   whatsapp.setMenuHandler(id => { void openAccountMenu(id).catch(() => {}) })
+  telegram?.setMenuHandler(id => { void openAccountMenu(id).catch(() => {}) })
   ipcMain.handle('ui:account-menu', async (event, id: string) => { requireMain(event); return openAccountMenu(id) })
-  ipcMain.handle('send:prepare', async (event, input: { platform: 'whatsapp' | 'signal'; accountId: string; conversationId: string; targetKey?: string; signalAccount?: string; recipient?: string; signalPayload?: SignalPayload; intentId?: string; text: string; context?: TranslationRequest['context'] }) => {
+  ipcMain.handle('send:prepare', async (event, input: { platform: Platform; accountId: string; conversationId: string; targetKey?: string; signalAccount?: string; recipient?: string; signalPayload?: SignalPayload; intentId?: string; text: string; context?: TranslationRequest['context'] }) => {
     const { owner, authorized } = taskIdentity()
     assertTaskSender(event, input)
     if (input.intentId !== undefined && !/^[a-zA-Z0-9-]{12,100}$/.test(input.intentId)) throw new Error('发送编号格式无效。')
@@ -752,7 +763,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
         accountStatus.assertAvailable()
         if (!authorized()) throw new Error('登录状态已变化。')
       } catch (error: any) { throw new SendNotStartedError(String(error?.message || error)) }
-      if (task.platform === 'whatsapp') return whatsapp.submitTask(task, authorized)
+      const adapter = webAdapter(task.platform)
+      if (adapter) return adapter.submitTask(task, authorized)
       return signal.submitTask(task, authorized)
     }, authorized)
     if (result.state === 'sent') await drafts.save(owner, { accountId: result.accountId, conversationId: result.conversationId, targetKey: result.targetKey }, '', result.request.text)
@@ -795,6 +807,13 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (increased) void accounts.list().then(items => { const account = items.find(item => item.id === accountId); if (account) notifyAccount(accountId, account.label) }).catch(() => {})
   })
   ipcMain.on('whatsapp:conversation', (_e, accountId: string | undefined, info: { id?: string; name?: string }) => announceConversation(accountId, info?.id, info?.name))
+  ipcMain.on('telegram:unread', (event, accountId: string, count: number) => {
+    if (!telegram?.ownsSender(accountId, event.sender.id) || !Number.isInteger(count) || count < 0 || count > 99999) return
+    const increased = updateAccountUnread(accountId, count)
+    mainWindow.webContents.send('accounts:unread', { accountId, count })
+    if (increased) void accounts.list().then(items => { const account = items.find(item => item.id === accountId && item.platform === 'telegram'); if (account) notifyAccount(accountId, account.label) }).catch(() => {})
+  })
+  ipcMain.on('telegram:conversation', (_e, accountId: string | undefined, info: { id?: string; name?: string }) => announceConversation(accountId, info?.id, info?.name))
 
   ipcMain.handle('settings:ui-language', async (event) => { requireMain(event); return (await settings.get()).uiLanguage || 'system' })
   ipcMain.handle('settings:set-ui-language', async (event, value: unknown) => {
@@ -802,7 +821,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     await settings.setUiLanguage(value)
     applyDesktopOptions(await settings.get())
     mainWindow.webContents.send('settings:ui-language-changed', value)
-    whatsapp.refreshTranslations(); signalDesktop.refresh()
+    whatsapp.refreshTranslations(); telegram?.refreshTranslations(); signalDesktop.refresh()
     return true
   })
   ipcMain.handle('settings:get', async () => {
@@ -814,7 +833,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if(!identity.authorized())throw new Error('登录状态已变化。')
     try { applyDesktopOptions(value); await settings.save(value) } catch (error) { applyDesktopOptions(previous); throw error }
     mainWindow.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system')
-    setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); signalDesktop.refresh(); googleVoice.invalidateContext(); return true })
+    setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); telegram?.resumeTranslations(); signalDesktop.refresh(); googleVoice.invalidateContext(); return true })
   ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => { await requireAuth(); return accountRuntime(accountId, conversationId) })
   ipcMain.handle('translator:cache-info', async (event) => { requireMain(event); await requireAuth(); return translator.cacheInfo() })
   ipcMain.handle('translator:clear-cache', async (event) => { requireMain(event); await requireAuth(); await translator.clearCache(); return true })
@@ -823,7 +842,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   ipcMain.handle('translator:cached-incoming', async (event, accountId: string, raw: TranslatePayload) => {
     await requireAuth()
     const {owner,authorized}=taskIdentity()
-    if (!whatsapp.ownsSender(accountId, event.sender.id)) throw new Error('账号窗口不匹配。')
+    if (!ownsWebSender(accountId, event.sender.id)) throw new Error('账号窗口不匹配。')
     const payload = normalizePayload(raw)
     const current = await accountRuntime(accountId, payload.conversationId)
     if(!authorized())throw new Error('登录状态已变化。')
@@ -846,7 +865,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if(!authorized())throw new Error('登录状态已变化。')
     // Recheck at the paid boundary as well: a cache read can finish before
     // the send receipt is committed, and the DOM may change in between.
-    if (accountId && payload.messageId && whatsapp.ownsSender(accountId, _e.sender.id)) {
+    if (accountId && payload.messageId && ownsWebSender(accountId, _e.sender.id)) {
       const original = await sendTasks.originalForMessage(owner, accountId, payload.messageId, payload.text)
       if(!authorized())throw new Error('登录状态已变化。')
       if (reusableDisplayOriginal(original, payload.text, current.localLanguage)) return original

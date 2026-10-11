@@ -31,7 +31,7 @@ async function refreshVoiceAccounts(){
  if(revision!==voiceAccountsRevision)return
  const known=new Set<string>(),items:Array<{id:string;label:string;platform:string}>=[]
  results.forEach((result,index)=>{if(result.status!=='fulfilled'||!Array.isArray(result.value))return
-  for(const item of result.value){const platform=index===1?'google-voice':item?.platform;if(!item||typeof item.id!=='string'||!item.id||known.has(item.id)||!['whatsapp','signal','google-voice'].includes(platform))continue;known.add(item.id);items.push({id:item.id,platform,label:(platform==='whatsapp'?'WhatsApp':platform==='signal'?'Signal':'Google Voice')+' · '+String(item.label||item.id)})}
+  for(const item of result.value){const platform=index===1?'google-voice':item?.platform;if(!item||typeof item.id!=='string'||!item.id||known.has(item.id)||!['whatsapp','signal','telegram','google-voice'].includes(platform))continue;known.add(item.id);items.push({id:item.id,platform,label:(platform==='whatsapp'?'WhatsApp':platform==='signal'?'Signal':platform==='telegram'?'Telegram':'Google Voice')+' · '+String(item.label||item.id)})}
  })
  voiceAccounts.value=items;voiceAccountsLoading.value=false
  if(results.some(result=>result.status==='rejected'||!Array.isArray(result.value)))voiceAccountsError.value=t('部分窗口暂时无法读取，请刷新后重试。')

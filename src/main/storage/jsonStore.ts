@@ -9,13 +9,69 @@ protectedFiles.add('google-voice-pairs-v1.json')
 protectedFiles.add('google-voice-dispatch-v1.json')
 protectedFiles.add('google-voice-embedded-drafts-v1.json')
 const pendingWrites = new Map<string, Promise<void>>()
+const fileRevisions = new Map<string, number>()
 const encryptedPrefix = 'hellodog-encrypted-v1:'
 
+function freezeSnapshot<T>(value: T): Readonly<T> {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeSnapshot(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
 export class JsonStore<T> {
+  private snapshot?: { path: string; signature: string; revision: number; value: Readonly<T> }
+  private snapshotRead?: Promise<Readonly<T>>
   constructor(private readonly fileName: string, private readonly defaults: T, private readonly strictRead = false) {}
 
   private get filePath(): string {
     return join(app.getPath('userData'), this.fileName)
+  }
+
+  /** Opt-in, immutable view for frequent key lookups. Check the actual file on
+   * every access; writes through another instance, external replacement, damage
+   * and deletion must never leave a usable stale ledger/cache in memory. */
+  readSnapshot(): Promise<Readonly<T>> {
+    if (this.snapshotRead) return this.snapshotRead
+    const work = this.loadSnapshot()
+    this.snapshotRead = work
+    void work.then(() => { if (this.snapshotRead === work) this.snapshotRead = undefined },
+      () => { if (this.snapshotRead === work) this.snapshotRead = undefined })
+    return work
+  }
+
+  private async signature(path: string): Promise<string> {
+    try {
+      const stat = await fs.stat(path, { bigint: true })
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':')
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return 'missing'
+      throw error
+    }
+  }
+
+  private async loadSnapshot(): Promise<Readonly<T>> {
+    try {
+      for (;;) {
+        const path = this.filePath
+        await pendingWrites.get(path)?.catch(() => undefined)
+        const revision = fileRevisions.get(path) || 0
+        const before = await this.signature(path)
+        if (pendingWrites.has(path) || revision !== (fileRevisions.get(path) || 0)) continue
+        const cached = this.snapshot
+        if (cached?.path === path && cached.signature === before && cached.revision === revision) return cached.value
+        this.snapshot = undefined
+        const value = await this.read()
+        const after = await this.signature(path)
+        if (path !== this.filePath || before !== after || pendingWrites.has(path) || revision !== (fileRevisions.get(path) || 0)) continue
+        this.snapshot = { path, signature: after, revision, value: freezeSnapshot(value) }
+        return this.snapshot.value
+      }
+    } catch (error) {
+      this.snapshot = undefined
+      throw error
+    }
   }
 
   async read(): Promise<T> {
@@ -39,6 +95,7 @@ export class JsonStore<T> {
 
   private async encryptLegacy(expected: string): Promise<void> {
     const path=this.filePath
+    fileRevisions.set(path, (fileRevisions.get(path) || 0) + 1)
     const work=(pendingWrites.get(path)||Promise.resolve()).catch(()=>undefined).then(async()=>{
       const current=await fs.readFile(path,'utf8')
       if(current!==expected)return
@@ -55,6 +112,7 @@ export class JsonStore<T> {
   async write(value: T): Promise<void> {
     const path = this.filePath
     const json = JSON.stringify(value, null, 2)
+    fileRevisions.set(path, (fileRevisions.get(path) || 0) + 1)
     const work = (pendingWrites.get(path) || Promise.resolve()).catch(() => undefined).then(async () => {
       let text = json
       if (protectedFiles.has(this.fileName)) {

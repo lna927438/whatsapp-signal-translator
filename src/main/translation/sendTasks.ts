@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto'
-import type { TranslationRequest } from '../types'
+import type { TranslationRequest, Platform } from '../types'
 import { hasSignalMedia, mediaIntent, type SignalPayload } from '../../shared/signalMedia'
 import { alreadyInTargetLanguage, hasBlockedChinese } from './outgoingPolicy'
 import { validateTranslation } from './translationValidation'
@@ -9,7 +9,7 @@ export interface SendTask {
   id: string
   intentId?: string
   owner: string
-  platform: 'whatsapp' | 'signal'
+  platform: Platform
   accountId: string
   conversationId: string
   targetKey?: string
@@ -62,7 +62,7 @@ export class SendTasks {
       // Never restore an original by matching identical text in another message.
       for (const task of data.tasks) {
         const messageId = (task.result as any)?.messageId
-        if (task.platform !== 'whatsapp' || task.state !== 'sent' || typeof messageId !== 'string' || !messageId || messageId.startsWith('pre:') || !task.translated) continue
+        if (!['whatsapp', 'telegram'].includes(task.platform) || task.state !== 'sent' || typeof messageId !== 'string' || !messageId || messageId.startsWith('pre:') || !task.translated) continue
         data.originals ??= {}
         const key = originalKey(task.owner, task.accountId, messageId)
         data.originals[key] = { owner: task.owner, accountId: task.accountId, messageId, text: displayText(task.translated), original: task.request.text, at: task.updatedAt }
@@ -234,7 +234,7 @@ export class SendTasks {
     const saved = data.originals?.[originalKey(owner, accountId, messageId)]
     if (saved?.owner === owner && saved.accountId === accountId && saved.messageId === messageId && saved.text === displayText(text)) return saved.original
     // Also restore beta6 records before their next journal write.
-    const matches = data.tasks.filter(task => task.owner === owner && task.accountId === accountId && task.platform === 'whatsapp' && task.state === 'sent'
+    const matches = data.tasks.filter(task => task.owner === owner && task.accountId === accountId && ['whatsapp', 'telegram'].includes(task.platform) && task.state === 'sent'
       && (task.result as any)?.messageId === messageId && task.translated !== undefined && displayText(task.translated) === displayText(text))
     return matches.length === 1 ? matches[0].request.text : undefined
   }
@@ -242,13 +242,13 @@ export class SendTasks {
   resolveWithEvidence(owner: string, id: string, result: unknown): Promise<SendTask> {
     return this.transaction(data => {
       const task = this.owned(data, owner, id)
-      if (task.platform === 'whatsapp') {
+      if (task.platform === 'whatsapp' || task.platform === 'telegram') {
         const messageId = (result as any)?.messageId
         const normalize = (text?: string) => (text || '').replace(/[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim()
         // A DOM receipt proves the task only while its text/ID is unambiguous.
         // A later, different original may translate to the same visible text.
         const ambiguous = data.tasks.some(other => other.id !== id && other.owner === owner && other.accountId === task.accountId
-          && other.platform === 'whatsapp' && other.conversationId === task.conversationId && other.state !== 'cancelled'
+          && other.platform === task.platform && other.conversationId === task.conversationId && other.state !== 'cancelled'
           && ((messageId && (other.result as any)?.messageId === messageId)
             || (other.createdAt >= task.createdAt && other.translated !== undefined && normalize(other.translated) === normalize(task.translated))))
         if (ambiguous) return task

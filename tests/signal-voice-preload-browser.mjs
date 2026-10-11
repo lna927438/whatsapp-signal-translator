@@ -104,7 +104,7 @@ app.whenReady().then(() => {
     const request = decodeSignalVoiceRequest(raw);
     global.probeResults.invocations++;
     global.probeResults.wavBytes = request.bytes.length;
-    return { text: 'Synthetic recognition placeholder', translation: '测试中文译文', audioId: 'a'.repeat(64), targetLanguage: 'zh-CN' };
+    return { text: 'Synthetic recognition placeholder',englishTranslation:'Synthetic recognition placeholder', translation: '测试中文译文', audioId: 'a'.repeat(64), targetLanguage: 'zh-CN' };
   });
   win.loadFile(path.join(__dirname, 'fixture.html'));
 });
@@ -118,7 +118,7 @@ for (const [index, config] of cases.entries()) {
     assert.equal((await electron.evaluate(() => global.probeResults)).invocations, 0)
     assert.equal((await page.evaluate(() => window.probe.snapshot())).attachmentReads, 0)
     await page.getByRole('button', { name: '转为中文', exact: true }).click()
-    await page.getByRole('button', { name: config.invalid ? '重试语音翻译' : '已转为中文', exact: true }).waitFor({ timeout: 30000 })
+    if(config.invalid)await page.getByRole('button', { name: '重试语音翻译', exact: true }).waitFor({ timeout: 30000 });else await page.locator('[aria-label="中文译文"]').waitFor({timeout:30000})
     const result = await electron.evaluate(() => global.probeResults)
     const snapshot = await page.evaluate(() => ({ ...window.probe.snapshot(), requireType: typeof window.require }))
     assert.equal(result.invocations, config.invalid ? 0 : 1)
@@ -129,7 +129,8 @@ for (const [index, config] of cases.entries()) {
     assert.equal(snapshot.attachmentReads, config.mode === 'memory' ? 0 : 1)
     if (!config.invalid) {
       assert.deepEqual(result.errors, [])
-      assert.match(await page.locator('[role=status]').textContent(), /测试中文译文/)
+      assert.match(await page.locator('[aria-label="中文译文"]').textContent(), /测试中文译文/)
+      assert.equal(await page.locator('[aria-label="英文译文"]').textContent(),'Synthetic recognition placeholder')
       if (!config.fixture) assert.equal(result.wavBytes, 576044)
     } else {
       assert.equal(result.errors.length, 1)

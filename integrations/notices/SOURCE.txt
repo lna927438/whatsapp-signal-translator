@@ -1,4 +1,4 @@
-HelloDog 0.5.20: modified Signal Desktop integration.
+HelloDog 0.5.21: modified Signal Desktop integration.
 This is not an official Signal distribution and is not endorsed by Signal.
 
 Upstream: https://github.com/signalapp/Signal-Desktop
@@ -8,7 +8,7 @@ License: AGPL-3.0-only; original copyright notices are retained.
 Runtime: Electron 43.5.0; libsignal 0.100.0; RingRTC 2.71.0.
 
 The patched corresponding source is supplied with the distribution artifacts:
-HelloDog-0.5.20-corresponding-source.zip
+HelloDog-0.5.21-corresponding-source.zip
 Checksums are in delivery-manifest.json for local candidates, or
 release-manifest.json for published installers.
 Build and patch instructions: hellodog/integrations/README.md in that archive.

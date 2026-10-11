@@ -91,7 +91,7 @@ export class TranslationCache {
   }
 
   async get(provider: string, request: TranslationRequest): Promise<string | undefined> {
-    const cache = await this.store.read()
+    const cache = await this.store.readSnapshot()
     if (cache['expired:' + this.scopeHash(request)]) return undefined
     const scoped = (key: string) => request.cacheUserId ? this.hash(request.cacheUserId + ':' + key, 64) : key
     // Different message identities must never share contextual/text aliases.
@@ -110,8 +110,8 @@ export class TranslationCache {
 
   async set(_provider: string, request: TranslationRequest, translated: string): Promise<void> {
     this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
-      const cache = await this.store.read()
-      if (cache['expired:' + this.scopeHash(request)]) return
+      const snapshot = await this.store.readSnapshot()
+      if (snapshot['expired:' + this.scopeHash(request)]) return
       const entry: CacheEntry = {
         scopeHash: this.scopeHash(request),
         ownerHash: request.cacheUserId ? this.hash(request.cacheUserId,64) : undefined,
@@ -124,7 +124,13 @@ export class TranslationCache {
       entry.identityHash = identity
       const keys = identity ? [identity] : []
 
-      for (const key of keys) cache[request.cacheUserId ? this.hash(request.cacheUserId + ':' + key, 64) : key] = entry
+      // Repainting an already completed message must not rewrite and encrypt
+      // the whole cache. A different identity still gets its own entry.
+      const scopedKeys = keys.map(key => request.cacheUserId ? this.hash(request.cacheUserId + ':' + key, 64) : key)
+      if (!scopedKeys.length || scopedKeys.every(key => snapshot[key]?.translated === translated && snapshot[key]?.textHash === entry.textHash)) return
+      const cache = { ...snapshot }
+
+      for (const key of scopedKeys) cache[key] = entry
 
       // Bound cache size; immutable receipts and send-task journals remain separate.
       const allKeys = Object.keys(cache).filter(key => !cache[key]?.expired)

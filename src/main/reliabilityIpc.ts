@@ -11,6 +11,7 @@ import { AccountManager } from './accounts/accountManager'
 import { SendTasks } from './translation/sendTasks'
 import { TranslationEngine } from './translation/translationEngine'
 import { WhatsAppAdapter } from './platforms/whatsapp/whatsAppAdapter'
+import type { TelegramAdapter } from './platforms/telegram/TelegramAdapter'
 import { SignalAdapter } from './platforms/signal/signalAdapter'
 import { runtimeSnapshot, getAccountStates, setAccountState, watchPower, markSwitch } from './runtimeHealth'
 import { configureQuitGuard, configureRestart, restartDesktop, applyDesktopOptions } from './desktopRuntime'
@@ -21,8 +22,9 @@ import { RecoveryCoordinator } from './recoveryCoordinator'
 
 export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountManager, settings: SettingsStore,
   tasks: SendTasks, translator: TranslationEngine, whatsapp: WhatsAppAdapter, signal: SignalAdapter,
-  owner: () => string, desktop?: { resume: () => Promise<void>; mode: (id:string,mode:'paused'|'receiving')=>Promise<void>; pending:()=>number; prepareRestart?:()=>Promise<void>; refresh?:()=>void; insertDraft?:(id:string,text:string)=>Promise<void> }) {
-  const ipcMain = createSecureIpc(electronIpcMain, window, whatsapp)
+  owner: () => string, desktop?: { resume: () => Promise<void>; mode: (id:string,mode:'paused'|'receiving')=>Promise<void>; pending:()=>number; prepareRestart?:()=>Promise<void>; refresh?:()=>void; insertDraft?:(id:string,text:string)=>Promise<void> }, telegram?: TelegramAdapter) {
+  const ipcMain = createSecureIpc(electronIpcMain, window, whatsapp, telegram)
+  const webAdapter = (platform: string) => platform === 'whatsapp' ? whatsapp : platform === 'telegram' ? telegram : undefined
   const drafts = new Drafts(), updates = new UpdateManager()
   translator.onContentCleanup(entry => tasks.expireContent(entry.owner, entry.accountId, entry.conversationId, entry.identity),
     async user => new Set((await tasks.unfinished(user)).flatMap(task => [task.id, task.request.requestId || '', task.request.messageId || ''])),
@@ -36,7 +38,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
       const pending = (await tasks.unfinished(user)).filter(task => ['uncertain', 'submitting'].includes(task.state))
       for (const task of pending.slice(-30)) {
         if (user !== owner()) return
-        const result = await boundedOperation(task.platform === 'signal' ? signal.reconcileTask(task) : whatsapp.reconcileTask(task), 2000, '发送结果仍待确认').catch(() => undefined)
+        const result = await boundedOperation(task.platform === 'signal' ? signal.reconcileTask(task) : Promise.resolve(webAdapter(task.platform)?.reconcileTask(task)), 2000, '发送结果仍待确认').catch(() => undefined)
         if (result && user === owner()) {
           const settled = await tasks.resolveWithEvidence(user, task.id, result)
           if (settled.state !== 'sent') continue
@@ -57,7 +59,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
   const draftOwner = async (event: IpcMainInvokeEvent, target: DraftTarget) => {
     const user = owner()
     const record = (await accounts.list()).find(item => item.id === target?.accountId)
-    if (!record || (record.platform === 'whatsapp' ? !whatsapp.ownsSender(record.id, event.sender.id) : event.sender.id !== window.webContents.id)) throw new Error('草稿账号与窗口不匹配。')
+    if (!record || (record.platform === 'signal' ? event.sender.id !== window.webContents.id : !webAdapter(record.platform)?.ownsSender(record.id, event.sender.id))) throw new Error('草稿账号与窗口不匹配。')
     if (user !== owner()) throw new Error('登录状态已变化。')
     return user
   }
@@ -70,6 +72,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     const results = await recovery.run(user, {
       '翻译结果': () => translator.reconcilePending(),
       'WhatsApp': () => whatsapp.resumeTranslations(),
+      'Telegram': () => telegram?.resumeTranslations(),
       'Signal 接收': () => signal.resumeReceiving(),
       'Signal 窗口': () => desktop?.resume(),
       '发送结果': reconcileSends,
@@ -85,6 +88,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
   configureRestart(() => boundedOperation((async () => {
     await window.webContents.executeJavaScript('window.__HELLODOG_PREPARE_RESTART__?.()')
     await whatsapp.prepareRestart()
+    await telegram?.prepareRestart()
     await desktop?.prepareRestart?.()
     await Promise.all([tasks.flush(), translator.flush(), drafts.flush(), signal.flushHistory()])
     await window.webContents.session.flushStorageData()
@@ -106,6 +110,11 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     if(!whatsapp.ownsSender(accountId,event.sender.id))throw new Error('输入框与账号不匹配。')
     return whatsapp.editComposer(accountId,value)
   })
+  ipcMain.handle('telegram:edit-composer',async(event,accountId:string,value:any)=>{
+    owner()
+    if(!telegram?.ownsSender(accountId,event.sender.id))throw new Error('输入框与账号不匹配。')
+    return telegram.editComposer(accountId,value)
+  })
   ipcMain.handle('reliability:history', async event => { main(event); return (await translator.history()).slice(0, 500).map(({ owner: _owner, ...item }) => item) })
   ipcMain.handle('reliability:retention', async (event, days?: number) => { main(event); return translator.retentionInfo(days) })
   ipcMain.handle('reliability:set-retention', async (event, days: number) => {
@@ -114,7 +123,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
       detail: t('当前将清理 {0} 条已完成记录的原文和译文。保留请求编号、字符数和扣费结果。草稿、待确认请求和平台聊天不在此范围。已清理内容不会自动恢复或重新扣费。', preview.affected), buttons:[t('取消'),t('保存')], defaultId:0, cancelId:0 })
     if (user !== owner()) throw new Error('登录状态已变化。')
     if (answer.response !== 1) return false
-    await translator.setRetention(days); whatsapp.refreshTranslations(); desktop?.refresh?.(); return true
+    await translator.setRetention(days); whatsapp.refreshTranslations(); telegram?.refreshTranslations(); desktop?.refresh?.(); return true
   })
   ipcMain.handle('reliability:recover', async event => { main(event); await recover(); return true })
   ipcMain.handle('reliability:resolve-send', async (event, id: string, action: string) => {
@@ -122,8 +131,8 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     const task = await tasks.get(user, id)
     if (user !== owner()) throw new Error('登录状态已变化。')
     if (action === 'retry') {
-      if (task.platform !== 'whatsapp' || !['draft','translating','ready'].includes(task.state)) throw new Error('此任务正在处理或确认，不能重复发送。')
-      if (!await whatsapp.retryTask(task)) {
+      if (!webAdapter(task.platform) || !['draft','translating','ready'].includes(task.state)) throw new Error('此任务正在处理或确认，不能重复发送。')
+      if (!await webAdapter(task.platform)!.retryTask(task)) {
         const message='请先打开原账号的原对话，再重试这条消息。'
         window.webContents.send('translator:error',message)
         throw new Error(message)
@@ -138,8 +147,8 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
   })
   ipcMain.handle('reliability:switch-duration', (event, ms: number) => { main(event); if (Number.isFinite(ms) && ms >= 0 && ms < 60000) markSwitch(ms) })
   ipcMain.handle('reliability:retry-original', async (event, id: string) => { main(event); return translator.retryOriginal(id) })
-  ipcMain.handle('reliability:correct', async (event, id: string, text: string) => { main(event); await translator.correct(id, text); whatsapp.refreshTranslations(); desktop?.refresh?.(); return true })
-  ipcMain.handle('reliability:restore-correction', async (event, id: string) => { main(event); await translator.restoreCorrection(id); whatsapp.refreshTranslations(); desktop?.refresh?.(); return true })
+  ipcMain.handle('reliability:correct', async (event, id: string, text: string) => { main(event); await translator.correct(id, text); whatsapp.refreshTranslations(); telegram?.refreshTranslations(); desktop?.refresh?.(); return true })
+  ipcMain.handle('reliability:restore-correction', async (event, id: string) => { main(event); await translator.restoreCorrection(id); whatsapp.refreshTranslations(); telegram?.refreshTranslations(); desktop?.refresh?.(); return true })
   ipcMain.handle('reliability:new-translation', async (event, id: string, input: any) => {
     main(event)
     if (input?.confirmed !== true || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 10000 || typeof input.targetLanguage !== 'string') throw new Error('请先确认新翻译的内容和目标语言。')
@@ -167,9 +176,10 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     if (mode === 'paused' && (await tasks.unfinished(owner())).some(task => task.accountId === id && ['translating', 'submitting'].includes(task.state))) throw new Error('账号仍在处理发送任务，请完成或核对后再暂停。')
     await accounts.update(id, { runtimeMode: mode })
     try {
-      if (record.platform === 'whatsapp') {
-        if (mode === 'paused') whatsapp.remove(id)
-        else { await whatsapp.applyPreferences(id, { ...record, runtimeMode: mode }); await whatsapp.focus(id) }
+      const adapter = webAdapter(record.platform)
+      if (adapter) {
+        if (mode === 'paused') adapter.remove(id)
+        else { await adapter.applyPreferences(id, { ...record, runtimeMode: mode }); await adapter.focus(id) }
       } else { await signal.resumeReceiving(); await desktop?.mode(id,mode) }
       setAccountState(id, mode === 'paused' ? 'paused' : getAccountStates()[id]?.state || 'loading')
     } catch (error) { await accounts.update(id, { runtimeMode: record.runtimeMode || 'receiving' }); throw error }
@@ -192,8 +202,8 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw new Error('快捷回复无效。')
     const record = (await accounts.list()).find(item => item.id === id)
     if (!record || record.runtimeMode === 'paused') throw new Error('请先打开聊天账号。')
-    if (record.platform === 'whatsapp') {
-      const contents = whatsapp.contents(id)
+    if (webAdapter(record.platform)) {
+      const contents = webAdapter(record.platform)!.contents(id)
       if (!contents || !await contents.executeJavaScript(`window.__RT_INSERT_DRAFT__?.(${JSON.stringify(text)})`, true)) throw new Error('请先打开目标对话。为保留已有草稿，快捷回复只填入空输入框。')
     } else if(record.signalEngine==='desktop') {
       if(!desktop?.insertDraft)throw new Error('Signal 快捷回复暂不可用。')
@@ -203,6 +213,9 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
   })
   ipcMain.on('whatsapp:connection', (event, id: string, state: string) => {
     if (whatsapp.ownsSender(id, event.sender.id) && ['offline', 'page-ready', 'login-required', 'loading'].includes(state)) setAccountState(id, state)
+  })
+  ipcMain.on('telegram:connection', (event, id: string, state: string) => {
+    if (telegram?.ownsSender(id, event.sender.id) && ['offline', 'page-ready', 'login-required', 'loading'].includes(state)) setAccountState(id, state)
   })
   ipcMain.handle('signal:history', async (event, account: string) => { main(event); return signal.loadHistory(account) })
   ipcMain.handle('settings:export-backup', async event => {
@@ -222,7 +235,7 @@ export function registerReliabilityIpc(window: BrowserWindow, accounts: AccountM
     if (answer.response !== 1) return false
     const previous = await settings.get()
     const value = { ...previous, ...backup.settings }
-    try { applyDesktopOptions(value); await settings.save(value); setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); desktop?.refresh?.(); window.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system') }
+    try { applyDesktopOptions(value); await settings.save(value); setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); telegram?.resumeTranslations(); desktop?.refresh?.(); window.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system') }
     catch (error) { applyDesktopOptions(previous); await settings.save(previous); throw error }
     return true
   })

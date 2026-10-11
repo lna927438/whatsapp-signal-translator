@@ -8,7 +8,7 @@ import { voiceAudioWav } from '../../../shared/voiceAudio'
 const props = defineProps<{ accountId: string; peer: string; attachment: SignalAttachment; staged?: boolean; thumbnail?: boolean; gallery?: SignalMediaEntry[]; timestamp?: number }>()
 const kind = computed(() => mediaKind(props.attachment.contentType)), url = ref(''), error = ref(''), busy = ref(false), expanded = ref(false), element = ref<HTMLElement>()
 const saving = ref(false), notice = ref('')
-const voiceBusy=ref(false),voiceError=ref(''),voiceOutput=ref('')
+const voiceBusy=ref(false),voiceError=ref(''),voiceOutput=ref(''),voiceEnglish=ref('')
 const filename = computed(() => signalAttachmentFilename(props.attachment))
 const ownEntry = computed<SignalMediaEntry>(() => ({ ...props.attachment, filename: filename.value, peer: props.peer, timestamp: props.timestamp || 0, key: JSON.stringify([props.peer, props.timestamp || 0, props.attachment.id]) }))
 const galleryItems = computed(() => props.gallery?.length ? props.gallery : [ownEntry.value])
@@ -44,19 +44,19 @@ async function act(action: SignalMediaAction) {
 function openImage() { returnFocus = document.activeElement as HTMLElement; expanded.value = true }
 async function translateVoice(){
  if(voiceBusy.value||voiceOutput.value||!url.value||props.staged||props.thumbnail)return
- const current=identity.value;voiceBusy.value=true;voiceError.value=''
+ const current=identity.value,version=revision;voiceBusy.value=true;voiceError.value=''
  try{
-  const bytes=await voiceAudioWav(url.value);if(disposed||current!==identity.value)return
+  const bytes=await voiceAudioWav(url.value);if(disposed||version!==revision||current!==identity.value)return
   const result=await window.desktopAPI.translateVoiceMessage(props.accountId,{bytes,conversationId:props.peer,messageId:'voice:'+JSON.stringify([props.peer,props.attachment.id,props.timestamp||0])})
-  if(disposed||current!==identity.value)return
-  if(result?.targetLanguage!=='zh-CN'||typeof result.translation!=='string'||!result.translation.trim())throw new Error(t('翻译失败，请重试。'))
-  voiceOutput.value=result.translation
+  if(disposed||version!==revision||current!==identity.value)return
+  if(result?.targetLanguage!=='zh-CN'||typeof result.translation!=='string'||!result.translation.trim()||result.translation.length>40000||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim()||result.englishTranslation.length>40000)throw new Error(t('翻译失败，请重试。'))
+  voiceOutput.value=result.translation;voiceEnglish.value=result.englishTranslation
  }
- catch(e:any){if(!disposed&&current===identity.value)voiceError.value=e.message||t('语音暂未转为中文，请稍后重试。原语音已保留。')}
- finally{if(current===identity.value)voiceBusy.value=false}
+ catch(e:any){if(!disposed&&version===revision&&current===identity.value)voiceError.value=e.message||t('语音暂未转为中文，请稍后重试。原语音已保留。')}
+ finally{if(version===revision&&current===identity.value)voiceBusy.value=false}
 }
 function closeImage() { expanded.value = false; if (returnFocus?.isConnected) returnFocus.focus(); returnFocus = undefined }
-watch(identity, () => { revision++; url.value = ''; error.value = ''; notice.value = ''; busy.value = false; saving.value = false;voiceBusy.value=false;voiceError.value='';voiceOutput.value=''; closeImage(); if (visible) void load() })
+watch(identity, () => { revision++; url.value = ''; error.value = ''; notice.value = ''; busy.value = false; saving.value = false;voiceBusy.value=false;voiceError.value='';voiceOutput.value='';voiceEnglish.value=''; closeImage(); if (visible) void load() })
 onMounted(() => {
   if (typeof IntersectionObserver === 'undefined') { visible = true; void load(); return }
   observer = new IntersectionObserver(entries => { if (entries.some(item => item.isIntersecting)) { visible = true; observer?.disconnect(); void load() } }, { rootMargin: '200px' })
@@ -73,10 +73,11 @@ onUnmounted(() => { disposed = true; revision++; observer?.disconnect(); closeIm
     <span v-else-if="busy" class="media-loading">{{ t('正在读取附件…') }}</span>
     <div v-if="!thumbnail" class="media-caption"><span>{{ attachment.isVoiceNote ? t('语音消息') : filename }} <small>{{ attachment.size >= 1048576 ? (attachment.size / 1048576).toFixed(1) + ' MB' : Math.ceil(attachment.size / 1024) + ' KB' }}</small></span><button v-if="!staged" :disabled="saving" :title="t('保存附件')" @click="act('save')">↓</button></div>
     <div v-if="kind==='audio'&&!staged&&!thumbnail" class="voice-review">
-      <button :disabled="voiceBusy||!url||Boolean(voiceOutput)" @click="translateVoice">{{t(voiceBusy?'正在转为中文…':voiceOutput?'已转为中文':voiceError?'重试语音翻译':'转为中文')}}</button>
+      <button v-if="!voiceOutput" :disabled="voiceBusy||!url" @click="translateVoice">{{t(voiceBusy?'正在转为中文…':voiceError?'重试语音翻译':'转为中文')}}</button>
       <p v-if="voiceError" role="status">{{uiError(voiceError)}}</p>
-      <p v-if="voiceOutput" class="voice-output" role="status" :aria-label="t('语音中文译文')">{{voiceOutput}}</p>
-      <p v-else-if="!voiceError&&!voiceBusy">{{t('仅显示中文，不会发送消息。')}}</p>
+      <p v-if="voiceEnglish" class="voice-output" lang="en" :aria-label="t('英文译文')">{{voiceEnglish}}</p>
+      <p v-if="voiceOutput" class="voice-output" lang="zh-CN" role="status" :aria-label="t('语音中文译文')">{{voiceOutput}}</p>
+      <p v-else-if="!voiceError&&!voiceBusy">{{t('点击后在语音下方显示英文和中文。')}}</p>
     </div>
     <p v-if="error" role="status">{{ uiError(error) }} <button v-if="kind !== 'file'" @click="load">{{ t('重试') }}</button></p>
     <p v-else-if="notice" class="media-notice" role="status">{{ notice }}</p>
@@ -88,4 +89,4 @@ onUnmounted(() => { disposed = true; revision++; observer?.disconnect(); closeIm
 <style scoped>
 .media-thumbnail{min-width:0;max-width:none;width:100%;height:100%;aspect-ratio:1;margin:0;position:relative;background:var(--signal-input,#272b34);border-radius:8px;overflow:hidden}.media-thumbnail .media-image{width:100%;height:100%;max-width:none}.media-thumbnail img,.media-thumbnail video{width:100%;height:100%;max-height:none;object-fit:cover;border-radius:0}.media-thumbnail .media-loading{display:block;padding:10px;font-size:10px}.media-thumbnail p{padding:6px;position:absolute;inset:auto 0 0;background:#181a20dc}.media-video-thumb{position:relative}.media-video-thumb>span{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#0008;color:white;padding:7px 10px;border-radius:50%}.media-notice{color:#8bc8a0!important}
 </style>
-<style scoped>.voice-review{padding:6px 0}.voice-review textarea{box-sizing:border-box;width:100%;min-height:70px;max-width:100%;background:transparent;color:inherit;border:1px solid #8887;border-radius:6px;padding:6px}.voice-review button{color:inherit;background:transparent;border:1px solid #8886;border-radius:6px;padding:4px 8px}.voice-output{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+<style scoped>.voice-review{padding:6px 0}.voice-review button{color:inherit;background:transparent;border:1px solid #8886;border-radius:6px;padding:4px 8px}.voice-review .voice-output{white-space:pre-wrap;overflow-wrap:anywhere;color:inherit;font-size:13px;line-height:1.5;margin:6px 0}</style>

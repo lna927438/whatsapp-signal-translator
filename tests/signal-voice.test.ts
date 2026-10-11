@@ -12,7 +12,7 @@ runInNewContext(ts.transpileModule(readFileSync(new URL('../integrations/hellodo
 const createSignalVoiceUi=uiExports.createSignalVoiceUi as typeof import('../integrations/hellodog-source/hellodog.voice.dom.ts').createSignalVoiceUi
 const {decodeSignalVoiceRequest}=mainHarness().load('src/main/platforms/signal/signalDesktopVoice.ts')
 
-const answer = {text:'How are you?',translation:'你好吗？',audioId:'b'.repeat(64),targetLanguage:'zh-CN' as const}
+const answer = {text:'How are you?',englishTranslation:'How are you?',translation:'你好吗？',audioId:'b'.repeat(64),targetLanguage:'zh-CN' as const}
 const flush = async () => { await new Promise(resolve=>setImmediate(resolve)) }
 function fixture(translate: (item:SignalVoiceItem,current:()=>boolean)=>Promise<typeof answer> = async()=>answer) {
   const dom = new JSDOM('<div data-hellodog-id="message-a"><div class="module-message__container"><audio></audio></div></div>')
@@ -29,7 +29,7 @@ test('native Signal pure voice has an explicit Chinese action, no automatic ASR 
   let finish!:(value:typeof answer)=>void
   const f=fixture(()=>new Promise(resolve=>{finish=resolve}))
   try{assert.equal(f.calls(),0);assert.equal(f.button().textContent,'转为中文');f.button().click();f.button().click();assert.equal(f.calls(),1);assert.equal(f.button().disabled,true)
-    finish(answer);await flush();assert.match(f.dom.window.document.body.textContent!,/你好吗/);f.button().click();assert.equal(f.calls(),1)
+    finish(answer);await flush();assert.match(f.dom.window.document.body.textContent!,/你好吗/);assert.equal(f.dom.window.document.querySelector('.module-message__container [lang=en]')?.textContent,answer.englishTranslation);f.button().click();assert.equal(f.calls(),1)
   }finally{f.close()}
 })
 test('native Signal failure exposes retry and a successful retry displays Chinese',async()=>{
@@ -37,6 +37,14 @@ test('native Signal failure exposes retry and a successful retry displays Chines
   try{f.button().click();await flush();assert.equal(f.button().textContent,'重试语音翻译');assert.doesNotMatch(f.dom.window.document.body.textContent!,/private payload/)
     f.button().click();await flush();assert.equal(f.calls(),2);assert.match(f.dom.window.document.body.textContent!,/你好吗/)
   }finally{f.close()}
+})
+
+test('native Signal completed bilingual bubble remains the same nodes across repeated scans',async()=>{
+ const f=fixture();try{
+  f.button().click();await flush();const panel=f.dom.window.document.querySelector('[data-hellodog-voice]')!,english=panel.querySelector('[lang=en]'),chinese=panel.querySelector('[lang="zh-CN"]'),audio=f.dom.window.document.querySelector('audio');
+  for(let i=0;i<50;i++)f.ui.scan()
+  assert.equal(panel.querySelector('[lang=en]'),english);assert.equal(panel.querySelector('[lang="zh-CN"]'),chinese);assert.equal(f.dom.window.document.querySelector('audio'),audio);assert.equal(f.calls(),1)
+ }finally{f.close()}
 })
 test('native Signal rejects late results after switching conversation, deletion, expiry or disposal',async()=>{
   for(const change of ['conversation','deletion','expiry','dispose']){

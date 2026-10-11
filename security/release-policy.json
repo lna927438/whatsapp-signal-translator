@@ -1,6 +1,6 @@
 {
   "allowProduction": true,
-  "reason": "The owner explicitly approved publishing this reliability update on 2026-10-04 with the instruction 上线 after reviewing the 0.5.20-beta.1 results. Publish 0.5.20 with the verified translation, admin and recovery fixes; retain rollback artifacts and signed-manifest distribution. Real-account device acceptance remains a separately reported limitation.",
+  "reason": "The owner explicitly approved publication on 2026-10-12 with 全面实装上线 after accepting 0.5.21-beta.1: Telegram login and existing conversations work, bilingual voice text is correct and bubbles are stable. Publish 0.5.21 with bilingual voice, local translation performance improvements and Telegram integration; retain 0.5.20 rollback artifacts and signed-manifest distribution. Real outgoing message and adverse-network acceptance remain separately reported limitations.",
   "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,

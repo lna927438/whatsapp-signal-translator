@@ -25,13 +25,14 @@ export class AccountManager {
   }
 
   async add(platform: Platform, label?: string, signalAccount?: string, options: Partial<AccountRecord> & { proxy?: any } = {}): Promise<AccountRecord> {
+    if (!['whatsapp', 'signal', 'telegram'].includes(platform)) throw new Error('请选择支持的应用。')
     return this.serialized(async () => {
       const accounts = await this.store.read()
       const count = accounts.filter((a) => a.platform === platform).length + 1
       const record: AccountRecord = {
         id: randomUUID(),
         platform,
-        label: label?.trim() || `${platform === 'whatsapp' ? 'WhatsApp' : 'Signal'} ${count}`,
+        label: label?.trim() || `${platform === 'whatsapp' ? 'WhatsApp' : platform === 'telegram' ? 'Telegram' : 'Signal'} ${count}`,
         signalAccount,
         localLanguage: 'zh-CN',
         targetLanguage: 'en-US',
@@ -52,6 +53,7 @@ export class AccountManager {
   }
 
   async addBatch(platform: Platform, label: string, count: number, options: any): Promise<AccountRecord[]> {
+    if (!['whatsapp', 'signal', 'telegram'].includes(platform)) throw new Error('请选择支持的应用。')
     const names = accountNames(label, count)
     const prepared = this.preparePatch(options)
     return this.serialized(async () => {
@@ -70,7 +72,7 @@ export class AccountManager {
   }
 
   async reorder(platform: Platform, ids: string[]): Promise<AccountRecord[]> {
-    if (!['whatsapp', 'signal'].includes(platform) || !Array.isArray(ids) || ids.length > 1000 || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new Error('账号顺序无效，请重试。')
+    if (!['whatsapp', 'signal', 'telegram'].includes(platform) || !Array.isArray(ids) || ids.length > 1000 || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new Error('账号顺序无效，请重试。')
     return this.serialized(async () => {
       const accounts = await this.store.read(), platformRows = accounts.filter(account => account.platform === platform)
       if (ids.length !== platformRows.length || platformRows.some(account => !ids.includes(account.id))) throw new Error('账号列表已变化，请重试。')

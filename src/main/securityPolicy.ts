@@ -17,6 +17,19 @@ export function isWhatsAppUrl(value: string): boolean {
   try { const u = new URL(value); return u.origin === 'https://web.whatsapp.com' && !u.username && !u.password } catch { return false }
 }
 
+/** Only Telegram Web A receives our isolated chat bridge. Web K and external links do not. */
+export function isTelegramUrl(value: string): boolean {
+  try {
+    const u = new URL(value)
+    return u.origin === 'https://web.telegram.org' && !u.username && !u.password
+      && (u.pathname === '/a' || u.pathname.startsWith('/a/'))
+  } catch { return false }
+}
+
+export function isTelegramOrigin(value: string): boolean {
+  try { const u = new URL(value); return u.origin === 'https://web.telegram.org' && !u.username && !u.password } catch { return false }
+}
+
 export function isAppUrl(value: string, rendererDirectory: string, devUrl?: string): boolean {
   try {
     const candidate = new URL(value)

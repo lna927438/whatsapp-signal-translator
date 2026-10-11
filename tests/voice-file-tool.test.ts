@@ -4,7 +4,7 @@ import {JSDOM} from 'jsdom'
 import {voiceFileBundle} from './voice-file-fixture.ts'
 let bundle:string
 before(async()=>{bundle=await voiceFileBundle()})
-const result={text:'Good morning, synthetic test.',translation:'早上好，合成测试。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}
+const result={text:'Good morning, synthetic test.',englishTranslation:'Good morning, synthetic test.',translation:'早上好，合成测试。',audioId:'a'.repeat(64),targetLanguage:'zh-CN'}
 const tick=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,0))}
 function deferred<T=any>(){let resolve!:(value:T)=>void,reject!:(reason?:any)=>void;const promise=new Promise<T>((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject}}
 async function mount(options:{props?:any;decode?:(url:string)=>any;translate?:(...args:any[])=>any;create?:(file:File)=>string}={}){
@@ -23,9 +23,9 @@ async function mount(options:{props?:any;decode?:(url:string)=>any;translate?:(.
  return{w,d,urls,revoked,translations,input,choose,button,start,select,status:()=>d.querySelector('[role=status]')?.textContent||'',close:()=>{w.__dispose();dom.window.close()}}
 }
 
-test('selecting a file does not submit; one explicit click converts to Chinese with original collapsed',async()=>{
+test('selecting a file does not submit; one explicit click shows English and Chinese directly',async()=>{
  const pending=deferred(),h=await mount({props:{selectedId:'signal'},translate:()=>pending.promise})
- try{await h.choose();assert.equal(h.translations.length,0);assert.equal(h.urls.length,0);await h.start();h.button('正在转为中文…')?.click();await tick();assert.equal(h.translations.length,1);assert.equal(h.translations[0][0],'signal');assert.deepEqual(Array.from(h.translations[0][1]),[1,2,3]);pending.resolve(result);await tick();assert.equal(h.status(),'已转为中文');assert.equal(h.d.querySelector('.voice-file-result')?.textContent,result.translation);assert.equal((h.d.querySelector('details') as HTMLDetailsElement).open,false);assert.equal(h.d.querySelector('details p')?.textContent,result.text);assert.deepEqual(h.urls,h.revoked);assert.equal(h.button('转为中文'),undefined)}finally{h.close()}
+ try{await h.choose();assert.equal(h.translations.length,0);assert.equal(h.urls.length,0);await h.start();h.button('正在转为中文…')?.click();await tick();assert.equal(h.translations.length,1);assert.equal(h.translations[0][0],'signal');assert.deepEqual(Array.from(h.translations[0][1]),[1,2,3]);pending.resolve(result);await tick();assert.equal(h.status(),'已转为中文');assert.equal(h.d.querySelector('.voice-file-chinese')?.textContent,result.translation);assert.equal(h.d.querySelector('.voice-file-english')?.textContent,result.englishTranslation);assert.equal(h.d.querySelector('details'),null);assert.deepEqual(h.urls,h.revoked);assert.equal(h.button('转为中文'),undefined)}finally{h.close()}
 })
 test('Google Voice windows can be selected by the same file tool',async()=>{
  const id='gv-00000000-0000-4000-8000-000000000001',h=await mount({props:{accounts:[{id,platform:'google-voice',label:'Voice 窗口'}],selectedId:id}})

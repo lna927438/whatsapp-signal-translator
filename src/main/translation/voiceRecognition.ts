@@ -6,6 +6,11 @@ import { validateVoiceWav } from '../../shared/voiceAudio'
 import expectedManifest from '../../../resources/voice/manifest.json'
 
 interface VoiceManifest { files: Record<string, string>; model: string; executable: string }
+export interface RecognizedVoice { text: string; language?: string }
+export function recognizedVoice(value: unknown): RecognizedVoice {
+  const language = (value as { result?: { language?: unknown } })?.result?.language
+  return { text: voiceTranscript(value), ...(typeof language === 'string' && /^[a-z]{2,3}$/.test(language) ? { language } : {}) }
+}
 export function voiceTranscript(value: unknown): string {
   const rows = (value as {transcription?: unknown})?.transcription
   if (!Array.isArray(rows) || rows.length > 2000) throw new Error('语音识别没有返回完整结果，请重试。')
@@ -50,6 +55,9 @@ export class VoiceRecognition {
     })().catch(error => {this.verified=undefined;throw error})
   }
   async recognize(input: unknown, authorized: () => boolean): Promise<string> {
+    return (await this.recognizeWithLanguage(input, authorized)).text
+  }
+  async recognizeWithLanguage(input: unknown, authorized: () => boolean): Promise<RecognizedVoice> {
     if (this.disposed) throw new Error('语音组件已关闭，请重新打开 HelloDog。')
     if (this.running) throw new Error('上一条语音正在识别，请完成后重试。')
     if (!authorized()) throw new Error('登录状态已变化，请重新打开当前聊天。')
@@ -83,7 +91,7 @@ export class VoiceRecognition {
       })
       if (!current()) throw new Error('登录状态已变化。')
       const text=await readFile(output+'.json','utf8');if(!current())throw new Error('登录状态已变化。');if(text.length>2_000_000)throw new Error('语音识别结果过大。')
-      return voiceTranscript(JSON.parse(text))
+      return recognizedVoice(JSON.parse(text))
     } finally {
       if(directory){const relativePath=relative(resolve(this.temporaryRoot),resolve(directory));if(/^voice-[a-zA-Z0-9]+$/.test(relativePath))await rm(directory,{recursive:true,force:true}).catch(()=>undefined)}
       this.running=false

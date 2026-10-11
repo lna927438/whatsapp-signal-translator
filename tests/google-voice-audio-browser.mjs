@@ -13,7 +13,7 @@ try{
  await page.goto('https://voice.google.com/u/0/voicemail')
  await page.evaluate(()=>{
   const attach=Element.prototype.attachShadow;window.__roots=new Map();Element.prototype.attachShadow=function(options){const root=attach.call(this,options);window.__roots.set(this,root);return root}
-  window.__fixtureResult={text:'Synthetic audio fixture.',translation:'这是一条合成语音测试。',audioId:'b'.repeat(64),targetLanguage:'zh-CN'}
+  window.__fixtureResult={text:'Synthetic audio fixture.',englishTranslation:'Synthetic audio fixture.',translation:'这是一条合成语音测试。',audioId:'b'.repeat(64),targetLanguage:'zh-CN'}
   window.__wav=()=>{const count=16000,bytes=new Uint8Array(44+count*2),v=new DataView(bytes.buffer);const label=(at,text)=>{for(let i=0;i<text.length;i++)v.setUint8(at+i,text.charCodeAt(i))};label(0,'RIFF');v.setUint32(4,bytes.length-8,true);label(8,'WAVE');label(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,16000,true);v.setUint32(28,32000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);label(36,'data');v.setUint32(40,count*2,true);for(let i=0;i<count;i++)v.setInt16(44+i*2,Math.sin(i*2*Math.PI*440/16000)*8000,true);return bytes}
   window.__player=(options={})=>{const audio=document.createElement('audio');audio.controls=options.controls!==false;audio.preload='none';audio.src=options.src||URL.createObjectURL(new Blob([window.__wav()],{type:'audio/wav'}));if(options.hidden)audio.hidden=true;if(options.opacity)audio.style.opacity='0';document.querySelector('#players').append(audio);return audio}
   window.__root=()=>window.__roots.get(document.querySelector('[data-hellodog-voice-audio]'))

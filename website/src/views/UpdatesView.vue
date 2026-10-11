@@ -1,5 +1,12 @@
 <script setup lang="ts">
 const releases = [
+  { version: '0.5.21', date: '2026-10-12', title: '语音中英双语、Telegram 与翻译响应优化', points: [
+    '语音点击“转为中文”后，在原语音下方显示英文与中文；保留原语音，重复查看复用已完成结果。播放器无法直接读取时可选择保存的音频文件处理。',
+    '新增 Telegram 内嵌官方网页，支持独立账号、代理、多窗口、文字接收翻译与普通文字及图片说明的发送翻译保护。',
+    'Telegram 发送结果不明时提供人工核对入口，未核对前阻止同会话继续翻译发送，不自动重发；带文字的特殊编辑、定时或付费附件发送暂不放行。',
+    '优化译文缓存查找、同一请求的恢复和隐藏窗口扫描，减少重复查询与后台占用；实际处理速度仍取决于设备、网络和翻译服务。',
+    '本机已确认 Telegram 登录与已有会话显示，以及语音中英文字与稳定气泡。不同账号的实际送达和特殊场景仍需使用时按平台回执核对。'
+  ] },
   { version: '0.5.20', date: '2026-10-04', title: '翻译发送、网络恢复与后台计费稳定性更新', points: [
     '发送翻译保留原文主动输入的段落和间隔，减少翻译额外添加的空行和空格；改进 WhatsApp 输入框、图片说明和较长消息的发送检查。',
     '加强目标语言和草稿检查，阻止仍含中文的外语译文发送；翻译等待期间修改草稿、切换账号后，旧结果不会继续发送或显示到新账号。',
@@ -103,6 +110,6 @@ const releases = [
     <section class="release-timeline" aria-label="已发布版本">
       <article v-for="release in releases" :key="release.version" class="release-entry"><div class="release-label"><b>v{{ release.version }}</b><time v-if="release.date" :datetime="release.date">{{ release.date }}</time><span>Windows 桌面版</span></div><div><h2>{{ release.title }}</h2><ul><li v-for="point in release.points" :key="point">{{ point }}</li></ul></div></article>
     </section>
-    <section class="upgrade-note"><h2>安装更新前</h2><p>先退出正在运行的 HelloDog，再运行官网安装程序。正式版沿用已有数据目录，保留账号资料与本地草稿。独立测试窗口的数据不会自动合并到正式版。</p><p>更新记录描述的是相应版本的改进，翻译结果仍需结合上下文判断。平台页面变化或网络异常可能影响使用，可以参照 <RouterLink to="/guide#troubleshooting">问题排查说明</RouterLink>处理。</p><p>对应版本的源代码与开源许可可从 <RouterLink to="/download">下载页</RouterLink>获取。HelloDog 并非 WhatsApp 或 Signal 的官方产品。</p></section>
+    <section class="upgrade-note"><h2>安装更新前</h2><p>先退出正在运行的 HelloDog，再运行官网安装程序。正式版沿用已有数据目录，保留账号资料与本地草稿。独立测试窗口的数据不会自动合并到正式版。</p><p>更新记录描述的是相应版本的改进，翻译结果仍需结合上下文判断。平台页面变化或网络异常可能影响使用，可以参照 <RouterLink to="/guide#troubleshooting">问题排查说明</RouterLink>处理。</p><p>对应版本的源代码与开源许可可从 <RouterLink to="/download">下载页</RouterLink>获取。HelloDog 并非 WhatsApp、Signal 或 Telegram 的官方产品。</p></section>
   </main>
 </template>

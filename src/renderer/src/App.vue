@@ -26,6 +26,7 @@ import { RemoteSnapshot } from './lib/remoteSnapshot'
 import { parseCharacterWallet } from '../../shared/characterWallet'
 import { prepareBeforeRestart } from './lib/restartState'
 import { orderedAccounts } from '../../shared/accountOrder'
+import { chatPlatforms, platformLabel, isEmbeddedChat, type ChatPlatform } from '../../shared/chatPlatforms'
 import { useGoogleVoiceWorkspace, type GoogleVoiceWindow, type GoogleVoiceWindowOptions } from './lib/googleVoiceWorkspace'
 
 const props = defineProps<{ userId: string }>()
@@ -33,7 +34,7 @@ const props = defineProps<{ userId: string }>()
 type ContactPreference = { language?: string; translationQuality?: any; name?: string; updatedAt: number; source?: 'manual'|'auto' }
 type Account = {
   id: string
-  platform: 'whatsapp'|'signal'
+  platform: ChatPlatform
   label: string
   translationProvider?: 'deepseek' | 'openai'
   signalAccount?: string
@@ -64,7 +65,7 @@ type ConversationInfo = { id: string; name?: string }
 
 const accounts = ref<Account[]>([])
 const selected = ref<Account | null>(null)
-const setup = ref<{ platform: 'whatsapp' | 'signal'; account?: Account } | null>(null)
+const setup = ref<{ platform: ChatPlatform; account?: Account } | null>(null)
 const showSettings = ref(false)
 const showQuality = ref(false)
 async function openQuality() { await window.desktopAPI.setOverlayOpen(true); showQuality.value = true }
@@ -153,7 +154,7 @@ async function finishGoogleVoiceRename(save: boolean) {
 const platformFilter = ref('all'), groupFilter = ref('all')
 const unread = ref<Record<string, number>>({})
 const googleVoiceUnread = computed(() => Object.entries(unread.value).filter(([id]) => /^gv-[a-f0-9-]{36}$/.test(id)).reduce((sum, [, count]) => sum + count, 0))
-const activePlatform = ref<'whatsapp'|'signal'>('whatsapp')
+const activePlatform = ref<ChatPlatform>('whatsapp')
 const lastAccounts = new Map<string,string>()
 const navigationPosition = computed(() => settings.value?.accountNavigationPosition === 'side' ? 'side' : 'top')
 const platformAccounts = computed(() => orderedAccounts(accounts.value.filter(account => account.platform === activePlatform.value)))
@@ -173,12 +174,12 @@ async function reorderAccounts(ids: string[]) {
   finally { orderingAccounts.value = false }
 }
 function platformUnread(platform: string) { return accounts.value.filter(account => account.platform === platform).reduce((sum,account) => sum + (unread.value[account.id] || 0),0) }
-async function choosePlatform(platform: 'whatsapp'|'signal') {
+async function choosePlatform(platform: ChatPlatform) {
   const matching = accounts.value.filter(account => account.platform === platform)
   const account = matching.find(account => account.id === lastAccounts.get(platform)) || matching[0]
   if (account) await select(account); else await openSetup(platform)
 }
-function platformMenu(platform:'whatsapp'|'signal') { const account=accounts.value.find(account=>account.id===lastAccounts.get(platform)&&account.platform===platform)||accounts.value.find(account=>account.platform===platform); if(account)accountMenu(account);else void openSetup(platform) }
+function platformMenu(platform:ChatPlatform) { const account=accounts.value.find(account=>account.id===lastAccounts.get(platform)&&account.platform===platform)||accounts.value.find(account=>account.platform===platform); if(account)accountMenu(account);else void openSetup(platform) }
 async function openWebsite() { try { await window.desktopAPI.openOfficialWebsite() } catch { error.value = t('官网暂时无法打开，请稍后重试。') } }
 const groups = computed(() => [...new Set(accounts.value.map(item => item.group || '').filter(Boolean))])
 const filteredAccounts = computed(() => accounts.value.filter(item => item.label.toLowerCase().includes(search.value.toLowerCase()) && (platformFilter.value === 'all' || item.platform === platformFilter.value) && (groupFilter.value === 'all' || (item.group || '') === groupFilter.value)).sort((a,b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))))
@@ -340,7 +341,7 @@ const groupTranslate = computed(() => selected.value?.groupTranslate ?? false)
 const fontSize = computed(() => Number(selected.value?.fontSize || settings.value?.fontSize || 13))
 const translationColor = computed(() => selected.value?.translationColor || settings.value?.translationColor || '#c8d4e4')
 const selectedLiveStatus = computed<LiveStatus>(() => {
-  if (selected.value?.platform === 'whatsapp') {
+  if (selected.value && isEmbeddedChat(selected.value.platform)) {
     const page = chatPageStates.value[selected.value.id]
     if (page === 'loading') return { state: 'working', message: t('正在打开聊天…') }
     if (page === 'error') return { state: 'error', message: t('聊天页面连接中断，请刷新重试。') }
@@ -400,7 +401,7 @@ async function reloadProfile() {
 }
 
 
-async function openSetup(platform: 'whatsapp' | 'signal', account?: Account) {
+async function openSetup(platform: ChatPlatform, account?: Account) {
   await window.desktopAPI.setOverlayOpen(true)
   setup.value = { platform, account }
 }
@@ -408,6 +409,7 @@ async function closeSetup() { setup.value = null; await window.desktopAPI.setOve
 async function setupSaved(account: Account) { await closeSetup(); await reload(); await select(account) }
 async function addWhatsApp() { await openSetup('whatsapp') }
 async function addSignalRecord() { await openSetup('signal') }
+async function addTelegram() { await openSetup('telegram') }
 
 async function select(account: Account) {
   const revision = ++accountSelection
@@ -417,18 +419,18 @@ async function select(account: Account) {
   selected.value = account
   activePlatform.value = account.platform
   lastAccounts.set(account.platform, account.id)
-  if (account.platform === 'whatsapp' && !chatPageStates.value[account.id]) chatPageStates.value[account.id] = 'loading'
+  if (isEmbeddedChat(account.platform) && !chatPageStates.value[account.id]) chatPageStates.value[account.id] = 'loading'
   controlFeedback.value = { state: 'idle', message: '' }
   try {
     await syncContentBounds()
     if (!current()) return
     const result = await window.desktopAPI.focusPlatform({ platform: account.platform, accountId: account.id })
     if (!current()) return
-    if (account.platform === 'whatsapp' && result?.state === 'ready') chatPageStates.value[account.id] = 'ready'
+    if (isEmbeddedChat(account.platform) && result?.state === 'ready') chatPageStates.value[account.id] = 'ready'
     await window.desktopAPI.recordSwitchDuration(performance.now() - started)
   } catch (e: any) {
     if (!current()) return
-    if (account.platform === 'whatsapp') chatPageStates.value[account.id] = 'error'
+    if (isEmbeddedChat(account.platform)) chatPageStates.value[account.id] = 'error'
     error.value = e?.message || t('页面加载失败，请重新打开此账号。')
   }
 }
@@ -653,8 +655,8 @@ onUnmounted(() => {
     <aside class="sidebar compact-account-sidebar" :aria-label="t('账号与应用导航')">
       <nav class="platform-rail" :aria-label="t('应用种类')">
         <button class="brand compact-tool" @click="home" :title="t('HelloDog 工作台')" :aria-label="t('HelloDog 工作台')"><img src="/hellodog-icon.webp" alt="HelloDog" /><span class="rail-label">{{ t('主页') }}</span></button>
-        <button v-for="platform in (['whatsapp','signal'] as const)" :key="platform" class="platform-entry compact-tool" :class="{active:!googleVoiceActive && selected && activePlatform === platform}" :title="platform === 'whatsapp' ? 'WhatsApp' : 'Signal'" :aria-label="(platform === 'whatsapp' ? 'WhatsApp' : 'Signal') + (platformUnread(platform) ? ' · ' + platformUnread(platform) + t(' 条未读') : '')" @click="choosePlatform(platform)" @contextmenu.prevent="platformMenu(platform)">
-          <img :src="`./${platform}.svg`" alt="" /><span class="rail-label">{{ platform === 'whatsapp' ? 'WhatsApp' : 'Signal' }}</span><span v-if="platformUnread(platform)" class="unread-badge">{{ platformUnread(platform) > 99 ? '99+' : platformUnread(platform) }}</span>
+        <button v-for="platform in chatPlatforms" :key="platform" class="platform-entry compact-tool" :class="{active:!googleVoiceActive && selected && activePlatform === platform}" :title="platformLabel(platform)" :aria-label="platformLabel(platform) + (platformUnread(platform) ? ' · ' + platformUnread(platform) + t(' 条未读') : '')" @click="choosePlatform(platform)" @contextmenu.prevent="platformMenu(platform)">
+          <img :src="`./${platform}.svg`" alt="" /><span class="rail-label">{{ platformLabel(platform) }}</span><span v-if="platformUnread(platform)" class="unread-badge">{{ platformUnread(platform) > 99 ? '99+' : platformUnread(platform) }}</span>
         </button>
         <GoogleVoiceLauncher :active="googleVoiceActive" :unread="googleVoiceUnread" @select="googleVoice.enter" />
         <button class="compact-tool" @click="showAccountFinder" :title="t('搜索账号 (Ctrl+K)')" :aria-label="t('搜索账号')"><UiIcon name="search" /><span class="rail-label">{{ t('找窗口') }}</span></button>
@@ -673,9 +675,9 @@ onUnmounted(() => {
       <section class="compact-finder" role="dialog" aria-modal="true" :aria-label="t('搜索和添加账号')">
         <header><b>{{ t('聊天账号') }}</b><button class="icon-button" @click="closeAccountFinder" :aria-label="t('关闭账号搜索')">×</button></header>
         <label class="account-search"><UiIcon name="search" /><input v-model="search" :placeholder="t('搜索账号')" :aria-label="t('搜索账号')" /></label>
-        <div class="account-filters"><select v-model="platformFilter" :aria-label="t('平台筛选')"><option value="all">{{ t('全部平台') }}</option><option value="whatsapp">WhatsApp</option><option value="signal">Signal</option></select><select v-model="groupFilter" :aria-label="t('账号分组')"><option value="all">{{ t('全部分组') }}</option><option value="">{{ t('未分组') }}</option><option v-for="group in groups" :key="group">{{ group }}</option></select></div>
+        <div class="account-filters"><select v-model="platformFilter" :aria-label="t('平台筛选')"><option value="all">{{ t('全部平台') }}</option><option v-for="platform in chatPlatforms" :key="platform" :value="platform">{{ platformLabel(platform) }}</option></select><select v-model="groupFilter" :aria-label="t('账号分组')"><option value="all">{{ t('全部分组') }}</option><option value="">{{ t('未分组') }}</option><option v-for="group in groups" :key="group">{{ group }}</option></select></div>
         <div class="finder-accounts"><button v-for="account in filteredAccounts" :key="account.id" @click="selectFromFinder(account)" @contextmenu.prevent="accountMenu(account)"><img :src="`./${account.platform}.svg`" alt="" /><span>{{ account.label }}<small>{{ accountSummary(account.id) }}</small></span></button><p v-if="!filteredAccounts.length">{{ t('没有匹配的账号。') }}</p></div>
-        <footer><button @click="finderOpen = false; addWhatsApp()"><img :src="'./whatsapp.svg'" alt="" />{{ t('添加 WhatsApp') }}</button><button @click="finderOpen = false; addSignalRecord()"><img :src="'./signal.svg'" alt="" />{{ t('添加 Signal') }}</button></footer>
+        <footer><button v-for="platform in chatPlatforms" :key="platform" @click="finderOpen = false; openSetup(platform)"><img :src="`./${platform}.svg`" alt="" />{{ t('添加 {0}', platformLabel(platform)) }}</button></footer>
       </section>
     </div>
     <div class="workspace">
@@ -694,9 +696,9 @@ onUnmounted(() => {
         <div v-if="selected?.runtimeMode === 'paused'" v-show="!googleVoiceActive" class="paused-account"><h2>{{ t('此账号已暂停') }}</h2><p>{{ t('恢复后继续收消息和查询原翻译任务。') }}</p><button class="primary" @click="resumeSelected">{{ t('恢复此窗口') }}</button></div>
         <SignalNativeView v-show="!googleVoiceActive" v-else-if="selectedIsSignal && selected?.signalEngine === 'desktop'" :key="'desktop-' + selected!.id" :account-record="selected!" @changed="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
         <SignalView v-show="!googleVoiceActive" v-else-if="selectedIsSignal" :key="selected!.id" :account-record="selected!" :user-id="props.userId" @linked="reload" @conversation="info => { if (selected) conversations[selected.id] = info }" />
-        <div v-else-if="selected?.platform === 'whatsapp' && chatPageStates[selected.id] !== 'ready'" v-show="!googleVoiceActive" class="chat-page-placeholder" :role="chatPageStates[selected.id] === 'error' ? 'alert' : 'status'">
+        <div v-else-if="selected && isEmbeddedChat(selected.platform) && chatPageStates[selected.id] !== 'ready'" v-show="!googleVoiceActive" class="chat-page-placeholder" :role="chatPageStates[selected.id] === 'error' ? 'alert' : 'status'">
           <UiIcon :name="chatPageStates[selected.id] === 'error' ? 'refresh' : 'chat'" /><h2>{{ chatPageStates[selected.id] === 'error' ? t('聊天页面未能显示') : t('正在打开聊天…') }}</h2>
-          <p>{{ chatPageStates[selected.id] === 'error' ? t('账号和已保存的草稿仍保留，请刷新重试。') : t('正在连接 WhatsApp，可以继续切换其他窗口。') }}</p>
+          <p>{{ chatPageStates[selected.id] === 'error' ? t('账号和已保存的草稿仍保留，请刷新重试。') : t('正在连接 {0}，可以继续切换其他窗口。', platformLabel(selected.platform)) }}</p>
           <button class="secondary" :disabled="refreshingAccounts.has(selected.id)" @click="refreshCurrentChat">{{ refreshingAccounts.has(selected.id) ? t('正在刷新…') : t('刷新当前聊天') }}</button>
         </div>
         <div v-else-if="!selected" v-show="!googleVoiceActive" class="welcome app-home">
@@ -704,6 +706,7 @@ onUnmounted(() => {
             <div class="platform-cards">
               <button @click="addWhatsApp"><img :src="'./whatsapp.svg'" alt="" /><b>WhatsApp</b><small>{{ accounts.filter(a => a.platform === 'whatsapp').length }}{{ t(' 个窗口') }}</small><span>{{ t('创建窗口') }} ＋</span></button>
               <button @click="addSignalRecord"><img :src="'./signal.svg'" alt="" /><b>Signal</b><small>{{ accounts.filter(a => a.platform === 'signal').length }}{{ t(' 个窗口') }}</small><span>{{ t('创建窗口') }} ＋</span></button>
+              <button @click="addTelegram"><img :src="'./telegram.svg'" alt="" /><b>Telegram</b><small>{{ accounts.filter(a => a.platform === 'telegram').length }}{{ t(' 个窗口') }}</small><span>{{ t('创建窗口') }} ＋</span></button>
               <button @click="openGoogleVoiceWindowSetup()"><img :src="'./google-voice.svg'" alt="" /><b>Google Voice</b><small>{{ googleVoiceWindows.length }}{{ t(' 个窗口') }}</small><span>{{ t('创建窗口') }} ＋</span></button>
             </div><p class="home-hint">{{ t('已有窗口可从左侧应用继续打开，顶部标签支持拖动排序。') }}</p>
           </section>

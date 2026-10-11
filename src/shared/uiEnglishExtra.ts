@@ -1,4 +1,9 @@
 export const uiEnglishExtra: Readonly<Record<string,string>> = {
+  '正在连接 {0}，可以继续切换其他窗口。':'Connecting to {0}. You can continue using other windows.',
+  '仅用于此 {0} 窗口；关闭后使用系统网络':'Applies only to this {0} window. Turn off to use the system network.',
+  '连接常用聊天应用，让翻译融入每一次对话。用 HelloDog，轻松说 Hello。':'Connect your chat apps. Let translation be part of the conversation with HelloDog.',
+  '使用在线账号进入 HelloDog 翻译工作台':'Sign in to your HelloDog translation workspace',
+  '退出账号不会清除聊天应用的登录状态，也不会删除本地历史翻译缓存。字符余额保存在云端。':'Signing out keeps your chat app sessions and local translation history. Your character balance remains in the cloud.',
   '正在打开聊天…':'Opening chat…',
   '聊天页面连接中断，请刷新重试。':'The chat page disconnected. Refresh to reconnect.',
   '聊天页面未能显示':'The chat page could not be displayed',

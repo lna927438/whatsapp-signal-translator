@@ -10,7 +10,7 @@ const source=readFileSync(new URL('../src/main/ipc.ts',import.meta.url),'utf8')
 const deferred=()=>{let resolve!:(value?:any)=>void;const promise=new Promise<any>(yes=>{resolve=yes});return {promise,resolve}}
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0))
 function fixture(){
- const handlers=new Map<string,Function>(),calls:any[]=[],records=[{id:'wa-a',platform:'whatsapp'},{id:'wa-b',platform:'whatsapp'},{id:'sd',platform:'signal',signalEngine:'desktop'},{id:'cli',platform:'signal',signalEngine:'cli'}]
+ const handlers=new Map<string,Function>(),calls:any[]=[],records=[{id:'wa-a',platform:'whatsapp'},{id:'wa-b',platform:'whatsapp'},{id:'tg',platform:'telegram'},{id:'sd',platform:'signal',signalEngine:'desktop'},{id:'cli',platform:'signal',signalEngine:'cli'}]
  let visible='',holdList:Promise<any>|undefined,holdOpen:Promise<any>|undefined,holdRefresh:Promise<any>|undefined
  const context:any={WorkspaceFocus,Promise,Map,identityRevision:0,requireMain:(e:any)=>{if(e.sender!==1)throw Error('main only')},requireAuth:async()=>{},taskIdentity:()=>({authorized:()=>true}),
   boundedOperation:(work:Promise<any>,_ms:number,message:string)=>boundedOperation(work,20,message),
@@ -20,6 +20,8 @@ function fixture(){
   signalDesktop:{focus:(id:string)=>{calls.push(['sd-focus',id]);if(id)visible=id;else if(visible==='sd')visible=''},open:async(record:any,background:boolean)=>{calls.push(['sd-open',record.id,background]);await holdOpen;if(!background)visible=record.id;return {state:'starting'}},status:()=>({state:'stopped'}),reload:async()=>{calls.push(['sd-reload'])}},
   signal:{refreshAccount:async(id:string)=>calls.push(['cli-refresh',id])},googleVoice:{hide:()=>{calls.push(['hide-gv']);if(visible==='gv')visible=''},focus:async()=>{visible='gv';return {state:'ready'}},refresh:async(id:string)=>{calls.push(['gv-refresh',id]);return {state:'loading'}},close:async()=>true,list:async()=>[{id:'gv'}]},shell:{openExternal:async()=>{}}
  }
+ context.telegram={hideAll:()=>{calls.push(['hide-tg']);if(visible==='tg')visible=''},applyPreferences:()=>Promise.resolve(),focus:async(id:string)=>{visible=id;calls.push(['tg-focus',id]);return {state:'loading'}},reload:async(id:string)=>{calls.push(['tg-reload',id]);await holdRefresh}}
+ context.webAdapter=(platform:string)=>platform==='whatsapp'?context.whatsapp:platform==='telegram'?context.telegram:undefined
  const sections=[source.slice(source.indexOf('  const workspaceFocus='),source.indexOf('  const voice =')),source.slice(source.indexOf("  ipcMain.handle('google-voice:focus',"),source.indexOf("  ipcMain.handle('google-voice:back',")),source.slice(source.indexOf("  ipcMain.handle('platform:focus',"),source.indexOf("  ipcMain.handle('ui:set-overlay-open',")),source.slice(source.indexOf('  const refreshes ='),source.indexOf("  ipcMain.handle('accounts:unread-snapshot',"))]
  runInNewContext(ts.transpileModule(sections.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context)
  return {calls,records,visible:()=>visible,holdList:(value:Promise<any>)=>holdList=value,holdOpen:(value:Promise<any>)=>holdOpen=value,holdRefresh:(value:Promise<any>)=>holdRefresh=value,expire:()=>context.identityRevision++,invoke:(name:string,...args:any[])=>Promise.resolve().then(()=>handlers.get(name)!({sender:1},...args))}
@@ -60,4 +62,12 @@ test('hung refresh releases the UI with an error and remains independent from pl
 test('an identity change while reading the requested account cancels focus before any view action',async()=>{
  const h=fixture(),hold=deferred();h.holdList(hold.promise);const focus=h.invoke('platform:focus',{platform:'whatsapp',accountId:'wa-a'});await tick();h.expire();hold.resolve(h.records)
  assert.equal((await focus).state,'cancelled');assert.equal(h.calls.some(row=>row[0]==='wa-focus'),false)
+})
+
+test('Telegram focus and background refresh stay isolated from WhatsApp and Google Voice',async()=>{
+ const h=fixture();await h.invoke('platform:focus',{platform:'telegram',accountId:'tg'});assert.equal(h.visible(),'tg')
+ await h.invoke('platform:focus',{platform:'whatsapp',accountId:'wa-a'});assert.equal(h.visible(),'wa-a')
+ h.calls.length=0;await h.invoke('platform:refresh','tg');assert.equal(h.visible(),'wa-a');assert.deepEqual(h.calls.filter(row=>row[0]==='tg-reload'),[['tg-reload','tg']])
+ assert.equal(h.calls.some(row=>row[0].startsWith('hide')||row[0]==='tg-focus'),false)
+ await h.invoke('platform:focus',{platform:'telegram',accountId:'tg'});await h.invoke('google-voice:focus','gv');assert.equal(h.visible(),'gv')
 })

@@ -19,7 +19,7 @@ async function setup(original='原文', translated='translated text',expireAt=''
  const handlers=new Map<string,Function>()
  runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{
   ipcMain:{handle:(name:string,handler:Function)=>handlers.set(name,handler)},requireAuth:async()=>true,
-  whatsapp:{ownsSender:(account:string,sender:number)=>account==='wa'&&sender===7},normalizePayload:(value:any)=>value,
+  whatsapp:{ownsSender:(account:string,sender:number)=>account==='wa'&&sender===7},ownsWebSender:(account:string,sender:number)=>account==='wa'&&sender===7,normalizePayload:(value:any)=>value,
   accountRuntime:async()=>{if(expireAt==='runtime')authorized=false;return {localLanguage:'zh-CN'}},taskIdentity:()=>({owner:'owner',authorized:()=>authorized}),sendTasks:tasks,reusableDisplayOriginal,
   translator:{cached:async()=>{if(expireAt==='cache')authorized=false;return undefined},translateIncoming:async()=>{paid++;if(expireAt==='result')authorized=false;return 'new translation'},translate:async()=>{paid++;if(expireAt==='result')authorized=false;return 'new translation'}},
   detectContactLanguage:()=>{detected++;return undefined},announceConversation:()=>{}

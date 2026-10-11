@@ -19,7 +19,7 @@
 .app-shell[data-platform=signal] .account-row.active{border-color:#465e89}
 .app-shell .account{color:var(--text);min-width:0}.app-shell .account-label b{font-size:13px;font-weight:550}.app-shell .account-label small{margin-top:5px}
 .platform-avatar{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;border-radius:11px!important}
-.platform-avatar.whatsapp{background:#179d63!important}.platform-avatar.signal{background:#3a76f0!important}.platform-avatar img{width:24px;height:24px;display:block}
+.platform-avatar.whatsapp{background:#179d63!important}.platform-avatar.signal{background:#3a76f0!important}.platform-avatar.telegram{background:#229ed9!important}.platform-avatar img{width:24px;height:24px;display:block}
 .app-shell .icon-button{color:var(--muted);border-radius:8px;min-width:32px;min-height:32px}.app-shell .icon-button:hover{background:#ffffff0e;color:var(--text)}
 .app-shell .account-more{opacity:.65}.app-shell .account-row:hover .account-more,.app-shell .account-more:focus-visible{opacity:1}
 .app-shell .add-accounts .add{border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:9px;min-height:40px;font-size:12px}

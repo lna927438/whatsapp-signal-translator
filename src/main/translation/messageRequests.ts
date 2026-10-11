@@ -14,6 +14,30 @@ export function sameMessageText(a: string, b: string) { return a === b || Boolea
 export class MessageRequests {
   private store = new JsonStore<Record<string, TranslationRequest>>('message-requests-v1.json', {}, true)
   private chain: Promise<unknown> = Promise.resolve()
+  private identityIndexes = new WeakMap<Readonly<Record<string, TranslationRequest>>, Map<string, TranslationRequest[]>>()
+  private requestKey(request: TranslationRequest) {
+    return createHash('sha256').update(JSON.stringify([request.cacheUserId || '', request.accountId || '', request.messageId, request.sourceLanguage || 'auto', request.targetLanguage, request.text])).digest('hex')
+  }
+  private identityKey(request: TranslationRequest) {
+    return JSON.stringify([request.cacheUserId || '', request.accountId, request.messageId, request.sourceLanguage || 'auto', request.targetLanguage])
+  }
+  private find(entries: Readonly<Record<string, TranslationRequest>>, request: TranslationRequest) {
+    const exact = entries[this.requestKey(request)]
+    if (exact && this.matches(exact, request)) return exact
+    // Emoji compatibility needs a text comparison only within this immutable
+    // message identity, never against every message in the account history.
+    let index = this.identityIndexes.get(entries)
+    if (!index) {
+      index = new Map()
+      for (const item of Object.values(entries)) {
+        const key = this.identityKey(item), group = index.get(key)
+        if (group) group.push(item)
+        else index.set(key, [item])
+      }
+      this.identityIndexes.set(entries, index)
+    }
+    return index.get(this.identityKey(request))?.find(item => this.matches(item, request))
+  }
   private matches(a: TranslationRequest, b: TranslationRequest) {
     return (a.cacheUserId||'')===(b.cacheUserId||'') && a.accountId===b.accountId && a.messageId===b.messageId
       && (a.sourceLanguage||'auto')===(b.sourceLanguage||'auto') && a.targetLanguage===b.targetLanguage && sameMessageText(a.text,b.text)
@@ -23,19 +47,20 @@ export class MessageRequests {
     // Retry the actual durable read after a transient write failure. A rejected
     // queue tail is not evidence that the saved file remains unreadable.
     await this.chain.catch(() => undefined)
-    return Object.values(await this.store.read()).find(item => this.matches(item,request))
+    const found = this.find(await this.store.readSnapshot(), request)
+    return found ? structuredClone(found) : undefined
   }
   prepare(request: TranslationRequest): Promise<TranslationRequest> {
     if (!request.messageId || request.requestId) return Promise.resolve(request)
     // Platform message IDs include the peer identity. A display-name change
     // must not turn the same message into another translation request.
-    const scope = [request.cacheUserId || '', request.accountId || '', request.messageId, request.sourceLanguage || 'auto', request.targetLanguage, request.text]
-    const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+    const key = this.requestKey(request)
     const task = this.chain.catch(() => undefined).then(async () => {
-      const entries = await this.store.read()
-      if (entries[key]) return { ...entries[key], cacheUserId: request.cacheUserId }
-      const previous = Object.values(entries).find(item=>this.matches(item,request))
-      if (previous) { entries[key]=previous;await this.store.write(entries);return {...previous,cacheUserId:request.cacheUserId} }
+      const snapshot = await this.store.readSnapshot()
+      if (snapshot[key]) return { ...structuredClone(snapshot[key]), cacheUserId: request.cacheUserId }
+      const entries = { ...snapshot }
+      const previous = this.find(snapshot, request)
+      if (previous) { entries[key]=previous;await this.store.write(entries);return {...structuredClone(previous),cacheUserId:request.cacheUserId} }
       const saved = { ...request, requestId: `stored-message-${key}` }
       entries[key] = saved
       await this.store.write(entries)

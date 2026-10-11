@@ -12,26 +12,30 @@
         <section id="install" class="guide-section">
           <span class="eyebrow">01 · INSTALL</span><h2>安装与登录</h2>
           <ol><li>从 <RouterLink to="/download">HelloDog 官方下载页</RouterLink>获取 Windows x64 安装程序，核对页面上的版本和文件校验码。</li><li>升级前先退出正在运行的 HelloDog，再运行安装程序。正式版沿用已有数据目录，保留账号资料和本地草稿；独立测试窗口使用自己的数据目录。</li><li>打开客户端，使用 HelloDog 账号登录。首次注册需要完成邮箱验证；官网和客户端使用同一个 HelloDog 账号。</li></ol>
-          <p class="knowledge-note">HelloDog 登录账号用于管理字符和用量。WhatsApp、Signal 需要分别关联各自的聊天账号。</p>
+          <p class="knowledge-note">HelloDog 登录账号用于管理字符和用量。WhatsApp、Signal、Telegram 需要分别登录或关联各自的聊天账号。</p>
         </section>
         <section id="connect" class="guide-section">
-          <span class="eyebrow">02 · CONNECT</span><h2>关联 WhatsApp 与 Signal</h2>
+          <span class="eyebrow">02 · CONNECT</span><h2>连接 WhatsApp、Signal 与 Telegram</h2>
           <div class="guide-platforms">
             <article><img src="/whatsapp.svg" alt="" /><h3>WhatsApp</h3><p>在客户端点击添加账号，选择 WhatsApp。出现关联二维码后，在手机 WhatsApp 的已关联设备功能中扫描，完成登录。</p><p>等待聊天列表加载，再打开一个已有会话。需要使用代理时，在该账号的设置中配置，并先检查连接状态。</p></article>
             <article><img src="/signal.svg" alt="" /><h3>Signal</h3><p>添加 Signal 账号，按照客户端提示，在手机 Signal 的已关联设备功能中完成关联。</p><p>首次关联和媒体同步可能需要等待。关联完成后检查聊天列表和会话内容；各个 HelloDog 账号窗口独立保存关联资料。</p></article>
+          <article><img src="/telegram.svg" alt="" /><h3>Telegram</h3><p>在主页选择 Telegram 创建窗口，按内嵌官方网页提示使用二维码或手机号登录。等待会话加载后，设置双方语言和翻译通道。</p><p>每个 Telegram 窗口独立保存账号和代理配置。普通文字与图片说明经过翻译保护后发送；附件选择、联系人和聊天记录继续使用官方网页。</p></article>
           </div>
-          <p>HelloDog 是独立的聊天翻译软件。WhatsApp 和 Signal 的账号、设备关联及平台功能仍遵循各自服务的要求。当前独立账号代理设置仅支持 WhatsApp。</p>
+          <p>HelloDog 是独立的聊天翻译软件。各平台账号、设备关联与可用功能仍遵循官方服务要求。WhatsApp 与 Telegram 支持独立账号代理；代理可连接不代表消息必定送达。</p>
         </section>
         <section id="translation" class="guide-section">
           <span class="eyebrow">03 · TRANSLATE</span><h2>设置双向聊天翻译</h2>
           <ol><li>选中要使用的聊天账号，展开翻译面板，设置“我使用的语言”和对方使用的语言。</li><li>打开“接收翻译”，在对方的文字消息旁查看译文；打开“发送翻译”，让输入内容在发送前转成对方的语言。</li><li>例如你使用中文、对方使用英语，就将自己的语言设为中文，对方语言设为英语。首次使用时先与自己或同意测试的联系人核对一条短消息。</li><li>发送后查看消息状态。翻译完成、平台发送成功和对方已读是不同状态，平台回执才表示对应的发送进度。</li></ol>
-          <p>“拦截中文原文”用于避免翻译失败时误发中文原文。需要翻译群聊时还要打开“群组翻译”。发送不成功时先保留草稿，按状态提示处理。</p>
+          <p>发送保护用于避免翻译失败时误发中文原文。需要翻译群聊时还要打开“群组翻译”。发送不成功时先保留草稿，按状态提示处理。</p>
+          <p>Telegram 若显示“发送结果待确认”，请先查看官网聊天记录，再选择“我已核对，已经发送”或“我已核对，尚未发送”。按钮只更新原任务；尚未发送时尽可能恢复原稿，不自动重发。核对完成前，同一会话暂停新的翻译发送。</p>
+          <p>Telegram 的编辑保存、定时发送、付费附件等特殊发送方式暂未开放翻译放行，遇到提示请保留草稿并改用普通发送。首次空会话或翻看旧历史时，回执可能需要人工核对；通话不属于本次翻译支持范围。</p>
+          <h3>语音显示英文与中文</h3><p>在语音消息旁点击“转为中文”，完成后在原语音下方查看英文和中文，原语音继续保留。只有点击后才处理，不会自动发送识别文字。播放器无法直接读取时，先从官方页面保存语音，再选择该音频文件；也可使用设置中的语音文件入口。</p><p>识别在本机完成，需要翻译的文字使用当前窗口的翻译通道。原音已是某种目标语言时复用原文；需要分别翻译成中英文时会产生各自的翻译用量，重复查看已完成结果不新增翻译。长语音的处理时间取决于长度、电脑性能和网络。</p>
         </section>
         <section id="history" class="guide-section">
           <span class="eyebrow">04 · HISTORY</span><h2>历史消息、回复与表情</h2>
           <p>在翻译面板的“历史”选项中选择适合自己的方式：</p>
           <dl class="guide-definitions"><div><dt>新消息自动</dt><dd>主要处理新收到的消息，减少浏览旧聊天时触发翻译。</dd></div><div><dt>可见消息自动</dt><dd>滚动到历史消息后，为当前可见且需要翻译的内容处理译文。</dd></div><div><dt>点击翻译</dt><dd>需要时再对指定消息发起翻译，便于控制历史消息的用量。</dd></div></dl>
-          <p>带表情的文字按文字消息处理；纯表情无需付费翻译。查看回复消息时，注意区分引用内容和本次回复。图片中的文字识别、语音转写与普通文字消息翻译属于不同能力，请以客户端实际提供的功能为准。</p>
+          <p>带表情的文字按文字消息处理；纯表情无需付费翻译。查看回复消息时，注意区分引用内容和本次回复。图片中的文字识别、语音翻译和通话属于不同能力；本版语音翻译按点击触发，不提供实时通话翻译。</p>
           <p>历史译文未显示时，先确认“接收翻译”和“显示译文”已开启，群聊还需检查“群组翻译”。出现失败提示时使用该条消息的重试入口。</p>
         </section>
         <section id="characters" class="guide-section">

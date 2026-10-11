@@ -302,13 +302,14 @@ export class TranslationEngine {
   /** Audio recognition may differ slightly after a restart. A repeated click on
    * the same audio must recover its first transcript/receipt, not buy a new one. */
   async preserveVoiceRequest(request: TranslationRequest): Promise<TranslationRequest> {
-    if (!request.requestId?.startsWith('voice-zh-') || request.targetLanguage !== 'zh-CN') throw new Error('语音翻译请求无效。')
+    if (!(request.requestId?.startsWith('voice-zh-') && request.targetLanguage === 'zh-CN')
+      && !(request.requestId?.startsWith('voice-en-') && request.targetLanguage === 'en-US')) throw new Error('语音翻译请求无效。')
     const owner = this.onlineUserId, revision = this.sessionRevision
     const previous = await this.receipts.get(owner, request.requestId)
     if (revision !== this.sessionRevision || !owner) throw new Error('登录状态已变化。')
     if (previous) {
       if (previous.request.accountId !== request.accountId || previous.request.messageId !== request.messageId
-        || previous.request.conversationId !== request.conversationId || previous.request.targetLanguage !== 'zh-CN'
+        || previous.request.conversationId !== request.conversationId || previous.request.targetLanguage !== request.targetLanguage
         || previous.contentExpired || previous.contextCleared) throw new Error('原语音记录已失效，不能再次提交。')
       request = { ...previous.request }
     }

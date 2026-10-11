@@ -1,6 +1,6 @@
 import {voiceAudioWav} from '../shared/voiceAudio'
 
-export interface GoogleVoiceAudioResult {text:string;translation:string;audioId:string;targetLanguage:'zh-CN'}
+export interface GoogleVoiceAudioResult {text:string;translation:string;englishTranslation:string;audioId:string;targetLanguage:'zh-CN'}
 interface Options {
  translateAudio:(bytes:Uint8Array)=>Promise<GoogleVoiceAudioResult>
  decode?:(url:string)=>Promise<Uint8Array>
@@ -39,20 +39,22 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
   const button=document.createElement('button');button.type='button';button.textContent='转为中文'
   const status=document.createElement('p');status.setAttribute('role','status')
   const output=document.createElement('p');output.setAttribute('aria-label','中文译文')
+  output.lang='zh-CN'
+  const english=document.createElement('p');english.setAttribute('aria-label','英文译文');english.lang='en'
   const details=document.createElement('details'),summary=document.createElement('summary'),original=document.createElement('p');summary.textContent='查看识别原文';details.append(summary,original);details.hidden=true
   const note=document.createElement('small');note.textContent='仅处理这条播放器里的语音；不录制或翻译实时通话。'
-  box.append(button,status,output,details,note);shadow.append(style,box);audio.insertAdjacentElement('afterend',host)
+  box.append(button,status,english,output,details,note);shadow.append(style,box);audio.insertAdjacentElement('afterend',host)
   const entry:Entry={audio,source:url,page:view.location.href,host,button,status,output,original,revision:0,busy:false};entries.set(audio,entry)
   if(!allowed(url)){button.hidden=true;status.textContent=fallback;return}
   button.addEventListener('click',async event=>{
    // Page scripts cannot use the isolated button to initiate a paid task.
    if(!event.isTrusted||entry.busy||!current(entry,entry.revision))return
-   const revision=++entry.revision;entry.busy=true;button.disabled=true;status.textContent='正在转为中文…';output.textContent='';original.textContent='';details.hidden=true
+   const revision=++entry.revision;entry.busy=true;button.disabled=true;status.textContent='正在转为中文…';output.textContent='';english.textContent='';original.textContent='';details.hidden=true
    try{
     const bytes=await decode(entry.source);if(!current(entry,revision))return
     const result=await options.translateAudio(bytes);if(!current(entry,revision))return
-    if(!result||result.targetLanguage!=='zh-CN'||typeof result.text!=='string'||!result.text.trim()||Array.from(result.text).length>12000||typeof result.translation!=='string'||!result.translation.trim()||result.translation.length>40000||!/^[a-f0-9]{64}$/.test(result.audioId))throw Error('语音翻译返回无效，请重试。')
-    output.textContent=result.translation;original.textContent=result.text;details.hidden=false;status.textContent='已转为中文';button.hidden=true
+    if(!result||result.targetLanguage!=='zh-CN'||typeof result.text!=='string'||!result.text.trim()||Array.from(result.text).length>12000||typeof result.translation!=='string'||!result.translation.trim()||result.translation.length>40000||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim()||result.englishTranslation.length>40000||!/^[a-f0-9]{64}$/.test(result.audioId))throw Error('语音翻译返回无效，请重试。')
+    english.textContent=result.englishTranslation;output.textContent=result.translation;original.textContent=result.text;details.hidden=result.text===result.translation||result.text===result.englishTranslation;status.textContent='已转为中文';button.hidden=true
    }catch{
     if(current(entry,revision))status.textContent='这次未能转为中文，可重试；若音频无法读取，请保存文件后在 HelloDog 设置 → 语音翻译中打开。'
    }finally{if(current(entry,revision)){entry.busy=false;button.disabled=false}}
