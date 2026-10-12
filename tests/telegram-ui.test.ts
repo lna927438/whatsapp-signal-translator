@@ -383,3 +383,17 @@ test('Telegram icon-free edit, scheduled and paid caption submission buttons can
     const h=harness({caption:true});try{h.button.innerHTML=label;h.button.className='_send_abc_42';h.click();await until(()=>h.document.querySelector('.hd-tg-status')?.textContent.includes('暂不支持'));assert.equal(h.stats().nativeClicks,0);assert.equal(h.composer.textContent,'你好')}finally{h.close()}
   }
 })
+
+
+test('Telegram playback ticks keep the bilingual panel stable without scanning the whole message list',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h,'blob:https://web.telegram.org/owned'),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));
+  row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');await tick();await tick();
+  const box=row.querySelector('[data-rt-ui="voice"]'),english=row.querySelector('[data-voice-english]');let scans=0,mutations=0;
+  const query=h.win.Element.prototype.querySelectorAll;h.win.Element.prototype.querySelectorAll=function(selector:string){if(selector==='.Message[data-message-id]')scans++;return query.call(this,selector)};
+  const observer=new h.win.MutationObserver((items:any[])=>mutations+=items.length);observer.observe(box,{subtree:true,childList:true,characterData:true,attributes:true});
+  for(let i=0;i<20;i++){row.querySelector('.duration').textContent='0:'+String(i).padStart(2,'0');row.querySelector('.toggle-play').classList.toggle('playing');await tick()}
+  observer.disconnect();assert.equal(scans,0);assert.equal(mutations,0);assert.equal(row.querySelector('[data-rt-ui="voice"]'),box);assert.equal(row.querySelector('[data-voice-english]'),english);assert.equal(api.calls.length,1);
+  row.querySelector('.toggle-play').classList.add('icon-view-once');await until(()=>!row.querySelector('[data-rt-ui="voice"]'));assert.ok(scans>0);assert.equal(api.calls.length,1);
+ }finally{h.close()}
+})

@@ -11,8 +11,8 @@ const messageRows='[data-message-id],[data-voicemail-id],gv-voicemail-message,gv
 const liveControls='gv-active-call,gv-call-controls,gv-call-dialer,[gv-test-id="active-call"],[gv-test-id="call-controls"]'
 const ownUi='[data-hellodog-voice-audio]'
 const identities=['data-message-id','data-voicemail-id','data-id','id']
-type Candidate={player:HTMLElement;native:boolean;row:HTMLElement;identity:string;audio?:HTMLAudioElement;source:string}
-type Entry=Candidate&{page:string;host:HTMLElement;revision:number;busy:boolean;restoreWrap?:()=>void}
+type Candidate={player:HTMLElement;native:boolean;row:HTMLElement;identity:string;audio?:HTMLAudioElement;source:string;mediaUnloaded:boolean}
+type Entry=Candidate&{page:string;host:HTMLElement;revision:number;busy:boolean;completed:boolean;restoreWrap?:()=>void}
 // Context/provider changes reinstall this module on the same document. Keep
 // fallback row identities stable there, without sharing them across documents.
 const documentRowKeys=new WeakMap<Document,WeakMap<Element,string>>()
@@ -42,7 +42,9 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
   if(!audio||audio.srcObject)return ''
   const candidates=audio.querySelectorAll('source');if(!audio.src&&candidates.length>1)return ''
   const declared=audio.src||candidates[0]?.src||'',selected=audio.currentSrc
-  return declared&&selected&&declared!==selected?'':declared||selected
+  // Chromium can retain currentSrc after removeAttribute('src') and load().
+  // It is then a stale playback reference, not an owned source to read again.
+  return !declared||selected&&declared!==selected?'':declared
  }
  const allowed=(url:string)=>{try{const value=new URL(url);return value.protocol==='blob:'&&value.origin==='https://voice.google.com'}catch{return false}}
  const excluded=(element:Element)=>Boolean(element.closest(ownUi+','+liveControls))||/\/settings(?:\/|$)/.test(view.location.pathname)
@@ -90,12 +92,22 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
    if(previous===undefined){owners.set(directSource,owner);audioOwners.set(audio,owners)}
    else if(previous!==owner)directSource=''
   }
-  return {player,native,row,identity,audio,source:directSource}
+  // An empty/missing descendant is different from an ambiguous, foreign or
+  // recycled source. Only the former may keep an already completed result.
+  const mediaUnloaded=!native&&(audios.length===0||audios.length===1&&audio===audios[0]&&!audio.srcObject&&!audio.getAttribute('src')&&!audio.querySelector('source[src]'))
+  return {player,native,row,identity,audio,source:directSource,mediaUnloaded}
  }
- const same=(entry:Entry,next?:Candidate)=>Boolean(next&&next.row===entry.row&&next.identity===entry.identity&&next.audio===entry.audio&&next.source===entry.source)
+ const sameIdentity=(entry:Entry,next?:Candidate)=>Boolean(next&&next.row===entry.row&&next.identity===entry.identity)
+ const completedUnload=(entry:Entry,next?:Candidate)=>Boolean(entry.completed&&!entry.busy&&sameIdentity(entry,next)&&next?.mediaUnloaded)
+ const same=(entry:Entry,next?:Candidate)=>sameIdentity(entry,next)&&Boolean(next&&(next.audio===entry.audio&&next.source===entry.source||completedUnload(entry,next)))
  const current=(entry:Entry,revision:number)=>!disposed&&entry.revision===revision&&entries.get(entry.player)===entry&&entry.host.isConnected&&entry.page===view.location.href&&same(entry,candidate(entry.player,entry.native))
  const clear=(entry:Entry)=>{entry.revision++;entry.host.remove();entry.restoreWrap?.();entries.delete(entry.player)}
  const fingerprint=async(value:string)=>[...new Uint8Array(await view.crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,'0')).join('')
+ const bounded=async<T>(work:Promise<T>,milliseconds:number):Promise<T>=>{
+  let timer:number|undefined
+  try{return await Promise.race([work,new Promise<never>((_,reject)=>{timer=view.setTimeout(()=>reject(Error('voice-timeout')),milliseconds)})])}
+  finally{view.clearTimeout(timer)}
+ }
  function add(item:Candidate){
   const host=document.createElement('span');host.setAttribute('data-hellodog-voice-audio','');host.style.cssText='display:block;width:100%;max-width:100%;margin:8px 0;flex-basis:100%;grid-column:1 / -1;clear:both'
   const shadow=host.attachShadow({mode:'closed'}),style=document.createElement('style')
@@ -124,26 +136,32 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
    }
    item.row.append(host)
   }
-  const entry:Entry={...item,page:view.location.href,host,revision:0,busy:false,restoreWrap};entries.set(item.player,entry)
-  let selectionRevision:number|undefined,completed=false
-  const setBusy=(busy:boolean)=>{entry.busy=busy;button.disabled=busy||completed;fileButton.disabled=busy}
+  const entry:Entry={...item,page:view.location.href,host,revision:0,busy:false,completed:false,restoreWrap};entries.set(item.player,entry)
+  let selectionRevision:number|undefined
+  const setBusy=(busy:boolean)=>{entry.busy=busy;button.disabled=busy||entry.completed;fileButton.disabled=busy}
   async function translate(url:string,revision:number){
-   completed=false;setBusy(true);status.textContent='正在生成中英文字…';english.textContent='';chinese.textContent='';original.textContent='';details.hidden=true
+   entry.completed=false;setBusy(true);status.textContent='正在生成中英文字…';english.textContent='';chinese.textContent='';original.textContent='';details.hidden=true
    try{
-    const bytes=await decode(url);if(!current(entry,revision))return
+    const bytes=await bounded(decode(url),30000);if(!current(entry,revision))return
     const [routeId,messageId]=await Promise.all([fingerprint(entry.page),fingerprint(entry.page+'\0'+entry.identity)]);if(!current(entry,revision))return
-    const result=await options.translateAudio(bytes,{conversationId:'google-voice-audio:'+routeId,messageId:'voice:google-voice:'+messageId});if(!current(entry,revision))return
+    // The main process owns the five-minute processing deadline. This longer
+    // transport backstop also releases the UI if the IPC response is lost.
+    const result=await bounded(options.translateAudio(bytes,{conversationId:'google-voice-audio:'+routeId,messageId:'voice:google-voice:'+messageId}),330000);if(!current(entry,revision))return
     if(!result||result.targetLanguage!=='zh-CN'||typeof result.text!=='string'||!result.text.trim()||Array.from(result.text).length>12000||typeof result.translation!=='string'||!result.translation.trim()||result.translation.length>40000||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim()||result.englishTranslation.length>40000||!/^[a-f0-9]{64}$/.test(result.audioId))throw Error('invalid-result')
-    english.textContent=result.englishTranslation;chinese.textContent=result.translation;original.textContent=result.text;details.hidden=result.text===result.translation||result.text===result.englishTranslation;status.textContent='已转为中文';button.textContent='已显示中英文字';completed=true
+    english.textContent=result.englishTranslation;chinese.textContent=result.translation;original.textContent=result.text;details.hidden=result.text===result.translation||result.text===result.englishTranslation;status.textContent='已转为中文';button.textContent='已显示中英文字';entry.completed=true
    }catch{if(current(entry,revision))status.textContent='这次未能生成中英文字，可重试或选择这条语音的本地文件。'}
    finally{if(current(entry,revision))setBusy(false)}
   }
   function selectFile(event:Event){
    if(!event.isTrusted||entry.busy||!current(entry,entry.revision))return
+   // A completed player may have released its old audio node. An explicitly
+   // selected replacement file starts from the current, still-owned media.
+   const next=candidate(entry.player,entry.native)
+   if(completedUnload(entry,next)&&next){entry.audio=next.audio;entry.source=next.source;entry.mediaUnloaded=next.mediaUnloaded}
    selectionRevision=++entry.revision;fileInput.value='';fileInput.click()
   }
   button.addEventListener('click',event=>{
-   if(!event.isTrusted||entry.busy||completed||!current(entry,entry.revision))return
+   if(!event.isTrusted||entry.busy||entry.completed||!current(entry,entry.revision))return
    if(!allowed(entry.source)){selectFile(event);return}
    selectionRevision=undefined;void translate(entry.source,++entry.revision)
   })
@@ -158,7 +176,7 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
   })
  }
  function scan(){
-  scheduled=undefined;if(disposed)return
+  scheduled=undefined;if(disposed||document.hidden)return
   for(const entry of [...entries.values()])if(!current(entry,entry.revision))clear(entry)
   if(view.location.origin!=='https://voice.google.com')return
   const players=new Set<HTMLElement>()
@@ -171,7 +189,8 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
    const item=candidate(audio,true);if(item)add(item)
   }
  }
- const schedule=()=>{if(!disposed&&scheduled===undefined)scheduled=view.setTimeout(scan,120)}
+ const schedule=()=>{if(!disposed&&!document.hidden&&scheduled===undefined)scheduled=view.setTimeout(scan,120)}
+ const visibilityChanged=()=>{if(document.hidden){view.clearTimeout(scheduled);scheduled=undefined}else schedule()}
  const invalidate=()=>{for(const entry of [...entries.values()])clear(entry);schedule()}
  const observer=new view.MutationObserver(records=>{
   let changed=false
@@ -186,18 +205,22 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
     const attributeChanged=record.type==='attributes'&&record.oldValue!==(record.target as Element).getAttribute(record.attributeName!)
     const identityChanged=attributeChanged&&identities.includes(record.attributeName||'')&&(record.target===entry.row||record.target===entry.player)
     const sourceChanged=attributeChanged&&record.attributeName==='src'&&(record.target===entry.audio||Boolean(entry.audio?.contains(record.target)))
-    const removed=record.type==='childList'&&[...record.removedNodes].some(node=>node===entry.player||node===entry.row||node.contains(entry.player)||node===entry.audio)
-    if(identityChanged||sourceChanged||removed)clear(entry)
+    const rowRemoved=record.type==='childList'&&[...record.removedNodes].some(node=>node===entry.player||node===entry.row||node.contains(entry.player))
+    const audioRemoved=record.type==='childList'&&[...record.removedNodes].some(node=>node===entry.audio||Boolean(entry.audio&&node.contains(entry.audio)))
+    // Keep finished text when the official visible player frees its hidden
+    // media. Identity changes and pending work are always invalidated.
+    if(identityChanged||rowRemoved||(sourceChanged||audioRemoved)&&!completedUnload(entry,candidate(entry.player,entry.native)))clear(entry)
    }
   }
   if(changed)schedule()
  })
  observer.observe(document,{subtree:true,childList:true,attributes:true,attributeOldValue:true,attributeFilter:['src','controls','hidden','inert','aria-hidden','aria-label','style','class',...identities]})
  document.addEventListener('loadedmetadata',schedule,true);document.addEventListener('emptied',schedule,true)
+ document.addEventListener('visibilitychange',visibilityChanged)
  view.addEventListener('popstate',invalidate);view.addEventListener('hashchange',invalidate);view.addEventListener('resize',schedule)
  const interval=view.setInterval(schedule,2000)
  schedule()
- const stop=()=>{if(disposed)return;disposed=true;view.clearTimeout(scheduled);view.clearInterval(interval);observer.disconnect();for(const entry of [...entries.values()])clear(entry);document.removeEventListener('loadedmetadata',schedule,true);document.removeEventListener('emptied',schedule,true);view.removeEventListener('popstate',invalidate);view.removeEventListener('hashchange',invalidate);view.removeEventListener('resize',schedule);view.removeEventListener('pagehide',stop)}
+ const stop=()=>{if(disposed)return;disposed=true;view.clearTimeout(scheduled);view.clearInterval(interval);observer.disconnect();for(const entry of [...entries.values()])clear(entry);document.removeEventListener('loadedmetadata',schedule,true);document.removeEventListener('emptied',schedule,true);document.removeEventListener('visibilitychange',visibilityChanged);view.removeEventListener('popstate',invalidate);view.removeEventListener('hashchange',invalidate);view.removeEventListener('resize',schedule);view.removeEventListener('pagehide',stop)}
  view.addEventListener('pagehide',stop)
  return stop
 }

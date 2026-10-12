@@ -1,7 +1,7 @@
 {
-  "allowProduction": false,
-  "reason": "The owner requested fixing missing voice translation controls across all client apps, with bilingual text inside each original voice bubble, on 2026-10-12 and explicitly said 暂不上线. Local development, testing and review only; no production deployment, public installer or update metadata changes are authorized for this version.",
-  "ownerAuthorizedProduction": false,
+  "allowProduction": true,
+  "reason": "On 2026-10-12 the owner explicitly authorized completing comprehensive all-app voice tests and performance improvements, then publishing this release and cleaning obsolete artifacts afterward. This supersedes the earlier beta-only instruction. Release requires a clean final source, verified installer and corresponding source, signed update metadata, health checks and preserved rollback. Current real-account acceptance for the repaired WhatsApp, Telegram and Google Voice paths is unavailable and must remain disclosed.",
+  "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,
   "requireSignedManifest": true

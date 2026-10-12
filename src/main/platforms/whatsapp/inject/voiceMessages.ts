@@ -29,22 +29,23 @@ export const whatsappVoiceScript=String.raw`
   const messages=new Set([...candidates.keys()].filter(row=>!containers.has(row)));
   return [...messages].filter(row=>{for(let parent=row.parentElement;parent&&parent!==main;parent=parent.parentElement)if(messages.has(parent))return false;return true});
  };
- const current=()=>{
+ const current=knownRows=>{
   if(disposed||!window.document?.documentElement)return {main:null,header:null,peer:'',title:''};
   const main=document.querySelector('#main'),header=main?.querySelector('header');
-  const peers=new Set(rows(main).map(identity).filter(key=>key?.kind==='peer').map(key=>key.conversationId));
+  const peers=new Set((knownRows||rows(main)).map(identity).filter(key=>key?.kind==='peer').map(key=>key.conversationId));
   const title=Array.from(header?.querySelectorAll('[data-testid="conversation-info-header-chat-title"],span[title][dir="auto"]')||[]).find(node=>!node.closest('[data-rt-ui]'));
   return {main,header,peer:peers.size===1?[...peers][0]:'',title:title?.getAttribute('title')||title?.textContent||''};
  };
  function interrupt(record){if(!record.busy)return;record.run++;record.cancelSelection?.();record.busy=false;record.button.disabled=false;record.fileButton.disabled=false;record.button.textContent='重试转中文';record.status.textContent='页面或语音已变化，请在原消息上重试。'}
- function refreshContext(){const next=current();if(context&&(next.main!==context.main||next.header!==context.header||next.peer!==context.peer||next.title!==context.title)){epoch++;for(const record of mounted)interrupt(record)}context=next;return next}
+ function refreshContext(knownRows){const next=current(knownRows);if(context&&(next.main!==context.main||next.header!==context.header||next.peer!==context.peer||next.title!==context.title)){epoch++;for(const record of mounted)interrupt(record)}context=next;return next}
  const source=audio=>audio?.currentSrc||audio?.src||audio?.querySelector('source[src]')?.src||'';
  const localSource=url=>/^(?:blob:|hellodog-media:)/.test(url);
- const audioFor=row=>{
+ const audioIndex=()=>{const index=new Map();for(const audio of document.querySelectorAll('audio')){if(audio.closest(quoteSelector)||!source(audio))continue;const id=identity(audio)?.messageId;if(id){const matches=index.get(id)||[];matches.push(audio);index.set(id,matches)}}return index};
+ const audioFor=(row,index)=>{
   const key=identity(row);if(!key)return null;
   // An external player is usable only with the exact durable message ID.
   // Never infer its owner from the last click, playback time, or DOM proximity.
-  const matches=Array.from(document.querySelectorAll('audio')).filter(audio=>!audio.closest(quoteSelector)&&identity(audio)?.messageId===key.messageId&&source(audio));
+  const matches=(index||audioIndex()).get(key.messageId)||[];
   if(matches.length!==1)return null;
   const audio=matches[0],declared=audio.src||audio.querySelector('source[src]')?.src||'',url=source(audio),previous=audioBindings.get(audio);
   if(audio.currentSrc&&declared&&audio.currentSrc!==declared)return null;
@@ -62,9 +63,9 @@ export const whatsappVoiceScript=String.raw`
   timer=setTimeout(()=>finish(null,new Error('文件选择已结束，请在这条语音上重试。')),120000);
   try{input.click()}catch{finish(null,new Error('无法打开文件选择，请重试。'))}
  })}
- function mount(row){
+ function mount(row,index){
   const key=identity(row);if(!key)return;
-  const ownedAudio=audioFor(row);
+  const ownedAudio=audioFor(row,index);
   let record=records.get(row);
   if(record?.id===key.messageId&&record.owner===key.node&&record.box.isConnected){
    mounted.add(record);
@@ -107,35 +108,38 @@ export const whatsappVoiceScript=String.raw`
   };
   button.onclick=()=>start();fileButton.onclick=()=>start(true);
  }
- function scan(){scheduled=false;scanTimer=undefined;if(disposed||!window.document?.documentElement)return;refreshContext();
+ function scan(){clearTimeout(scanTimer);scheduled=false;scanTimer=undefined;if(disposed||!window.document?.documentElement||document.hidden)return;const messageRows=rows(document.querySelector('#main'));refreshContext(messageRows);const index=audioIndex();
   for(const record of mounted)if(!record.row.isConnected||!voiceControl(record.row)){interrupt(record);record.box.remove();records.delete(record.row);mounted.delete(record)}
-  for(const row of rows(document.querySelector('#main'))){
-   if(voiceControl(row))mount(row);
+  for(const row of messageRows){
+   if(voiceControl(row))mount(row,index);
   }
  }
  const observer=new MutationObserver(changes=>{
   if(disposed||!window.document?.documentElement)return;
   if(changes.every(change=>(change.target instanceof Element?change.target:change.target.parentElement)?.closest('[data-rt-ui]')))return;
-  refreshContext();
+  // Idle page mutations coalesce into one scan. Only in-flight work needs an
+  // immediate context check, including while the window is in the background.
+  if([...mounted].some(record=>record.busy))refreshContext();
   for(const record of mounted){
    if(!record.busy)continue;
    const changed=changes.some(change=>change.type==='attributes'&&change.attributeName==='data-id'&&(change.target.contains(record.row)||record.row.contains(change.target))||change.type==='childList'&&Array.from(change.removedNodes).some(node=>node===record.row||node.contains?.(record.row)));
    if(changed)interrupt(record);
   }
-  if(!scheduled){scheduled=true;scanTimer=setTimeout(scan,100)}
+  if(!document.hidden&&!scheduled){scheduled=true;scanTimer=setTimeout(scan,100)}
  });
  // Capture navigation intent before React can replace and restore the same row.
  const navigate=event=>{const target=event.target instanceof Element?event.target:event.target?.parentElement;if(target&&!target.closest('#main')&&!target.closest('[data-rt-ui]')){epoch++;for(const record of mounted)interrupt(record)}};
  const navigateKey=event=>{if(event.key==='Enter'||event.key===' ')navigate(event)};
+ const visibility=()=>{if(document.hidden){clearTimeout(scanTimer);scanTimer=undefined;scheduled=false}else scan()};
  const cleanup=()=>{
   disposed=true;epoch++;observer.disconnect();clearTimeout(scanTimer);scheduled=false;
-  document.removeEventListener('pointerdown',navigate,true);document.removeEventListener('keydown',navigateKey,true);
+  document.removeEventListener('visibilitychange',visibility);document.removeEventListener('pointerdown',navigate,true);document.removeEventListener('keydown',navigateKey,true);
   window.removeEventListener('pagehide',pagehide);
   for(const record of mounted){interrupt(record);record.button.onclick=null;record.fileButton.onclick=null}mounted.clear();context=null;
  };
  const pagehide=event=>{if(!event.persisted&&!disposed)cleanup()};
  try{
-  document.addEventListener('pointerdown',navigate,true);document.addEventListener('keydown',navigateKey,true);window.addEventListener('pagehide',pagehide);
+  document.addEventListener('visibilitychange',visibility);document.addEventListener('pointerdown',navigate,true);document.addEventListener('keydown',navigateKey,true);window.addEventListener('pagehide',pagehide);
   observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeOldValue:true,characterData:true,attributeFilter:['data-id','src','title','data-icon','data-testid','aria-label']});scan();
   window.__HD_VOICE_INSTALLED__=true;
  }catch(error){for(const record of mounted)record.box.remove();cleanup();throw error}

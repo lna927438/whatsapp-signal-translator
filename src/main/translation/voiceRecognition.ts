@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import { createReadStream } from 'fs'
 import { spawn } from 'child_process'
 import { mkdir, mkdtemp, readFile, writeFile, rm, readdir } from 'fs/promises'
 import { join, resolve, relative } from 'path'
@@ -48,7 +49,11 @@ export class VoiceRecognition {
       if((await readdir(this.resources)).some(name=>!/^[a-zA-Z0-9._-]+$/.test(name)||!Object.hasOwn(manifest.files,name)))throw new Error('语音组件目录包含未通过验证的文件，请重新安装最新版。')
       for (const [name, expected] of Object.entries(manifest.files)) {
         if (!/^[a-zA-Z0-9._-]+$/.test(name) || !/^[a-f0-9]{64}$/.test(expected)) throw new Error('语音组件清单无效。')
-        const digest=createHash('sha256').update(await readFile(join(this.resources,name))).digest('hex')
+        // Verify every job without allocating the whole model in the main
+        // process. Bounded asynchronous chunks leave the UI event loop free.
+        const hash=createHash('sha256')
+        for await (const chunk of createReadStream(join(this.resources,name),{highWaterMark:256*1024})) hash.update(chunk)
+        const digest=hash.digest('hex')
         if (digest!==expected) throw new Error('语音组件校验失败，请重新安装最新版。')
       }
       return manifest

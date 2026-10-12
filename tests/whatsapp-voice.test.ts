@@ -309,3 +309,33 @@ test('a native player whose current source still points to previous media is not
   Object.defineProperty(audio,'currentSrc',{configurable:true,value:''});await h.click();assert.equal(h.requests.length,1);assert.deepEqual(h.reads,['blob:https://web.whatsapp.com/replacement'])
  }finally{h.close()}
 })
+
+
+test('WhatsApp batches idle mutation context checks and indexes audio once for a multi-voice scan',async()=>{
+ let rowScans=0,audioScans=0;
+ const h=await mount({html:Array.from({length:40},(_,i)=>row('voice-'+i)).join(''),beforeEval:w=>{
+  const query=w.Element.prototype.querySelectorAll;w.Element.prototype.querySelectorAll=function(selector:string){if(selector==='.message-in,.message-out,[data-testid="msg-container"],[data-id]')rowScans++;return query.call(this,selector)};
+  const all=w.document.querySelectorAll.bind(w.document);w.document.querySelectorAll=(selector:string)=>{if(selector==='audio')audioScans++;return all(selector)};
+ }});try{
+  assert.equal(h.d.querySelectorAll('.rt-voice-translation').length,40);assert.ok(audioScans<=2,'audio discovery must be once per batch, not once per voice');rowScans=audioScans=0;
+  // Separate microtask mutation deliveries, all before the one batched timer.
+  for(let i=0;i<30;i++){h.d.querySelector('header span').title='Alex '+i;await Promise.resolve()}
+  await tick();assert.equal(rowScans,1);assert.equal(audioScans,1);assert.equal(h.requests.length,0);
+ }finally{h.close()}
+})
+
+test('WhatsApp hidden idle tabs skip voice scans and mount current messages when visible',async()=>{
+ let scans=0;const h=await mount({beforeEval:w=>{Object.defineProperty(w.document,'hidden',{configurable:true,value:true});const query=w.Element.prototype.querySelectorAll;w.Element.prototype.querySelectorAll=function(selector:string){if(selector.includes('.message-in,.message-out'))scans++;return query.call(this,selector)}}});try{
+  assert.equal(h.button(),null);for(let i=0;i<20;i++)h.d.querySelector('header span').title='Alex '+i;await tick();assert.equal(scans,0);assert.equal(h.requests.length,0);
+  Object.defineProperty(h.d,'hidden',{configurable:true,value:false});h.d.dispatchEvent(new h.w.Event('visibilitychange'));await tick();assert.equal(h.button().textContent,'转为中文');assert.equal(h.requests.length,0);
+ }finally{h.close()}
+})
+
+test('WhatsApp hidden in-flight voice still rejects removed-and-restored original rows',async()=>{
+ const gate=deferred(),h=await mount({translate:()=>gate.promise});try{
+  await h.click();Object.defineProperty(h.d,'hidden',{configurable:true,value:true});h.d.dispatchEvent(new h.w.Event('visibilitychange'));
+  const original=h.d.querySelector('#one');original.remove();h.d.querySelector('#main').append(original);await tick();gate.resolve(answer);await tick();
+  assert.equal(h.requests.length,1);assert.equal(h.output().hidden,true);assert.equal(h.button().disabled,false);
+  Object.defineProperty(h.d,'hidden',{configurable:true,value:false});h.d.dispatchEvent(new h.w.Event('visibilitychange'));await tick();assert.equal(h.output().hidden,true);
+ }finally{h.close()}
+})

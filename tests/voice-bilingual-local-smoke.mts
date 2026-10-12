@@ -34,7 +34,7 @@ try {
   assert.deepEqual(readdirSync(temporary), [])
   const result = { passed: true, language: recognized.language, transcript: recognized.text, elapsedMs: Date.now() - started,
     source: 'synthetic Microsoft Zira speech', realRecognizer: true, temporaryAudioRemoved: true, cloudRequests: 0, realChatSends: 0 }
-  const evidence = join(root, 'verification/voice-bilingual-20261012'); mkdirSync(evidence, { recursive: true })
+  const evidence = join(root, 'verification/voice-release-20261012'); mkdirSync(evidence, { recursive: true })
   writeFileSync(join(evidence, 'local-asr-language.json'), JSON.stringify(result, null, 2) + '\n')
   console.log(JSON.stringify(result))
 } finally {

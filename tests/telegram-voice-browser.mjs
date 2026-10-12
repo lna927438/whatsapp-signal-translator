@@ -7,7 +7,7 @@ import { mainHarness } from './main-harness.ts'
 
 const { chromium } = createRequire(import.meta.url)('D:/UserAppData/OpenAI/DevelopmentRuntime/codex-primary-runtime/dependencies/node/node_modules/playwright')
 const modules=mainHarness(),{telegramInjectionScript}=modules.load('src/main/platforms/telegram/inject/script.ts')
-const output=new URL('../verification/voice-all-apps-20261012/telegram/',import.meta.url)
+const output=new URL('../verification/voice-performance-20261012/telegram/',import.meta.url)
 await mkdir(output,{recursive:true})
 // Synthesized non-speech PCM only; the provider is mocked and receives no network request.
 const audio=Buffer.alloc(32044);audio.write('RIFF',0);audio.writeUInt32LE(32036,4);audio.write('WAVEfmt ',8);audio.writeUInt32LE(16,16);audio.writeUInt16LE(1,20);audio.writeUInt16LE(1,22);audio.writeUInt32LE(16000,24);audio.writeUInt32LE(32000,28);audio.writeUInt16LE(2,32);audio.writeUInt16LE(16,34);audio.write('data',36);audio.writeUInt32LE(32000,40);for(let n=0;n<16000;n++)audio.writeInt16LE(Math.round(Math.sin(n*2*Math.PI*440/16000)*3000),44+n*2)

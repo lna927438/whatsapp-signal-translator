@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url'
 import {mainHarness} from './main-harness.ts'
 const require=createRequire(import.meta.url),{chromium}=require('D:/UserAppData/OpenAI/DevelopmentRuntime/codex-primary-runtime/dependencies/node/node_modules/playwright')
 const modules=mainHarness(),{whatsappVoiceScript}=modules.load('src/main/platforms/whatsapp/inject/voiceMessages.ts')
-const folder=fileURLToPath(new URL('../verification/voice-all-apps-20261012/whatsapp/',import.meta.url));await mkdir(folder,{recursive:true})
+const folder=fileURLToPath(new URL('../verification/voice-performance-20261012/whatsapp/',import.meta.url));await mkdir(folder,{recursive:true})
 const browser=await chromium.launch({channel:'msedge',headless:true}),errors=[],checks=[]
 try{
  const page=await browser.newPage({viewport:{width:820,height:900}});page.on('pageerror',error=>errors.push(error.message));await page.route('**/*',route=>route.abort())

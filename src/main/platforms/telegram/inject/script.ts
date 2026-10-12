@@ -360,8 +360,16 @@ export const telegramInjectionScript = String.raw`
   for(const row of candidates)mountRow(row);
  }
  function schedule(delay=180){if(disposed)return;const ms=typeof delay==='number'?Math.max(1,delay):180,due=Date.now()+ms;if(timer&&timerDue<=due)return;clearTimeout(timer);timerDue=due;timer=setTimeout(()=>void scan(),ms)}
- const observer=new MutationObserver(changes=>{if(changes.every(change=>{const node=change.target.nodeType===1?change.target:change.target.parentElement;return node?.closest('[data-rt-ui]')}))return;schedule()});
- observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-message-id','src','class']});
+ // Progress ticks do not change the message, its audio owner or send receipt.
+ // Keep this narrow: structural edits, media sources and view-once changes still scan.
+ const playbackOnly=change=>{
+  const node=change.target.nodeType===1?change.target:change.target.parentElement,owner=node?.closest('.Audio.inline');if(!owner||node===owner)return false;
+  if(change.type==='attributes'&&change.attributeName==='class')return Boolean(node.closest('.waveform,.waveform-wrapper,.toggle-play,.duration,.voice-duration'))&&!node.matches('.Audio,.icon-view-once')&&!/(?:^|\s)(?:Audio|icon-view-once)(?:\s|$)/.test(change.oldValue||'');
+  if(!node.closest('.duration,.voice-duration'))return false;
+  return change.type==='characterData'||change.type==='childList'&&[...change.addedNodes,...change.removedNodes].every(item=>item.nodeType===3);
+ };
+ const observer=new MutationObserver(changes=>{if(changes.every(change=>{const node=change.target.nodeType===1?change.target:change.target.parentElement;return node?.closest('[data-rt-ui]')||playbackOnly(change)}))return;schedule()});
+ observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeOldValue:true,attributeFilter:['data-message-id','src','class']});
  window.addEventListener('hashchange',()=>{refreshContext();schedule()});
  const reconnect=()=>{settingsAt=0;incomingPausedUntil=0;incomingFailures=0;for(const record of mounted)record.failed=false;schedule()};
  window.addEventListener('online',reconnect);document.addEventListener('visibilitychange',()=>{if(!document.hidden)schedule()});document.addEventListener('scroll',schedule,{passive:true,capture:true});
