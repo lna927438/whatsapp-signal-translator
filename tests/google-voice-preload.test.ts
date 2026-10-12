@@ -60,10 +60,12 @@ test('Google Voice unread installs only in the trusted isolated document and use
   assert.deepEqual(Object.keys(f.view), ['top'])
 })
 
-test('Google Voice audio sends only PCM bytes over its own trusted-page IPC without an account or URL',async()=>{
+test('Google Voice audio sends PCM plus bounded message context over private IPC without an account or URL',async()=>{
  const f=fixture(),bytes=new Uint8Array([1,2,3]);assert.ok(f.audioInstalled)
- await f.audioInstalled.translateAudio(bytes)
- assert.deepEqual(f.requests,[['google-voice:voice-audio',bytes]])
+ const context={conversationId:'google-voice-audio:'+'a'.repeat(64),messageId:'voice:google-voice:'+'b'.repeat(64)}
+ await f.audioInstalled.translateAudio(bytes,{...context,accountId:'must-not-forward',url:'https://must-not-forward.invalid'})
+ assert.equal(f.requests[0][0],'google-voice:voice-audio');assert.equal(f.requests[0][1].bytes,bytes)
+ assert.equal(JSON.stringify(Object.fromEntries(Object.entries(f.requests[0][1]).filter(([key])=>key!=='bytes'))),JSON.stringify(context))
  assert.deepEqual(Object.keys(f.view),['top'])
 })
 test('context invalidation subscription carries no host payload and detaches on runtime cleanup', () => {

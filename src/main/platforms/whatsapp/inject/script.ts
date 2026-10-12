@@ -4,7 +4,7 @@ import { whatsappVoiceScript } from './voiceMessages'
 import { readWhatsAppComposerText } from './composerText'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
 import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
-export const whatsappInjectionScript = String.raw`
+const whatsappTextScript = String.raw`
 (() => {
   if (window.__RT_TRANSLATOR_INSTALLED__) return;
   window.__RT_TRANSLATOR_INSTALLED__ = true;
@@ -1066,4 +1066,16 @@ export const whatsappInjectionScript = String.raw`
     void recoverPending(); void translateVisible(); }, 1400);
   void translateVisible();
 })();
-` + whatsappSidebarScript + whatsappPresenceScript + whatsappVoiceScript;
+`;
+
+// Optional page enhancements must not suppress one another. Keep a core error
+// observable by the adapter so its bootstrap send guard stays closed.
+const optionalFeature = (name: string, script: string) => `try {\n${script}\n} catch { console.warn(${JSON.stringify('HelloDog ' + name + ' initialization failed')}); }\n`
+export const whatsappInjectionScript = `try {\n`
+  + 'if (window.__RT_TRANSLATOR_BOOTSTRAP_FAILED__) throw new Error("文字翻译组件未完成加载，请刷新此窗口。");\n'
+  + whatsappTextScript
+  + '\n} catch (error) { window.__RT_TRANSLATOR_BOOTSTRAP_FAILED__ = true; throw error; } finally {\n'
+  + optionalFeature('voice', whatsappVoiceScript)
+  + optionalFeature('sidebar', whatsappSidebarScript)
+  + optionalFeature('presence', whatsappPresenceScript)
+  + '}\n'

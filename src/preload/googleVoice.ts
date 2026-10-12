@@ -14,11 +14,12 @@ if (process.isMainFrame && window === window.top && location.origin === 'https:/
   // Unread badges are independent: their setup must not prevent translation.
   try { installGoogleVoiceUnread(document, value => ipcRenderer.invoke('google-voice:unread', value)) } catch { /* no page details logged */ }
   try {
-    let stopAudio=installGoogleVoiceAudio(document,{translateAudio:bytes=>ipcRenderer.invoke('google-voice:voice-audio',bytes)})
-    const changed=()=>{stopAudio();stopAudio=installGoogleVoiceAudio(document,{translateAudio:bytes=>ipcRenderer.invoke('google-voice:voice-audio',bytes)})}
+    const installAudio=()=>installGoogleVoiceAudio(document,{translateAudio:(bytes,context)=>ipcRenderer.invoke('google-voice:voice-audio',{bytes,conversationId:context.conversationId,messageId:context.messageId})})
+    let stopAudio=installAudio()
+    const changed=()=>{stopAudio();stopAudio=installAudio()}
     ipcRenderer.on('google-voice:context-changed',changed)
     window.addEventListener('unload',()=>{stopAudio();ipcRenderer.removeListener('google-voice:context-changed',changed)},{once:true})
-  } catch { /* Missing native controls keep the explicit Settings file fallback. */ }
+  } catch { /* Voice setup must not prevent the official page or text translation. */ }
   try { installGoogleVoiceRuntime({
     onHealth: reportHealth,
     sendRequest: message => ipcRenderer.invoke('google-voice:translate-request', message),

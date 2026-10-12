@@ -13,3 +13,10 @@ export interface VoiceMessageAudio {
   conversationId: string
   messageId: string
 }
+
+/** Isolated Google Voice preload supplies hashed page/message identities.
+ * The owning account is always derived by main from the registered window. */
+export interface GoogleVoiceAudioMessage extends VoiceMessageAudio {
+  conversationId: `google-voice-audio:${string}`
+  messageId: `voice:google-voice:${string}`
+}

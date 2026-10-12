@@ -250,6 +250,118 @@ test('Telegram detached global audio is never assigned to an unrelated voice mes
   }finally{h.close()}
 })
 
+// Official Web A Audio.tsx -> TrackRow.tsx: inline voice uses waveform/voice-duration;
+// playable audio attachments use title/meta/duration and a detached media-pool audio.
+// https://github.com/Ajaxy/telegram-tt/blob/master/src/components/common/TrackRow.tsx
+function audioFixture(h:ReturnType<typeof harness>,source=''){
+  const row=h.document.querySelector('.Message');row.querySelector('.message-content').innerHTML='<div class="Audio inline" dir="ltr"><div class="toogle-play-wrapper"><button class="toggle-play" aria-label="Play audio"></button></div><div class="content"><p class="title">voice-message.ogg</p><div class="meta"><span class="duration">0:18</span></div></div></div>';
+  if(source){const audio=h.document.createElement('audio');audio.src=source;row.querySelector('.Audio').append(audio)}
+  return row;
+}
+function voiceApi(h:ReturnType<typeof harness>){
+  const calls:any[]=[],fetched:string[]=[],revoked:string[]=[];
+  h.win.AbortSignal=AbortSignal;h.win.fetch=async(url:string)=>{fetched.push(url);let sent=false;return {ok:true,headers:{get:()=>null},body:{getReader:()=>({read:async()=>sent?{done:true}:(sent=true,{done:false,value:new Uint8Array([1,2,3])}),cancel:async()=>{}})}}};
+  h.win.AudioContext=class{decodeAudioData(){return Promise.resolve({duration:1})}close(){return Promise.resolve()}};
+  h.win.OfflineAudioContext=class{destination={};createBufferSource(){return {connect(){},start(){}}}startRendering(){return Promise.resolve({getChannelData:()=>new Float32Array(16000).fill(.05)})}};
+  h.win.URL.createObjectURL=()=> 'blob:https://web.telegram.org/selected-file';h.win.URL.revokeObjectURL=(url:string)=>revoked.push(url);
+  h.win.realtimeTranslator.translateVoiceMessage=async(value:any)=>{calls.push(value);return {text:'Hello',englishTranslation:'Hello',translation:'你好',targetLanguage:'zh-CN',audioId:'a'.repeat(64)}};
+  return {calls,fetched,revoked};
+}
+test('Telegram official inline audio has a manual entry before remote settings finish, without loading or translating audio',async()=>{
+  const h=harness({delaySettings:true});try{
+    const row=audioFixture(h),api=voiceApi(h);
+    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"] button')));
+    assert.equal(row.querySelector('[data-rt-ui="voice"] button').textContent,'转为中文');assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(h.stats().settingsCalls,1);assert.equal(row.querySelector('[data-rt-ui="voice"]').parentElement,row.querySelector('.message-content'));
+    row.querySelector('.Audio .content').insertAdjacentHTML('beforeend','<div class="waveform-wrapper"><div class="waveform"><canvas></canvas></div></div><p class="voice-duration">0:18</p>');h.releaseSettings();await tick();await tick();assert.equal(row.querySelectorAll('[data-rt-ui="voice"]').length,1);
+  }finally{h.close()}
+})
+test('Telegram visible older audio gets its manual entry even with more than 120 later messages',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h),list=row.closest('.messages-container');
+    for(let id=11;id<152;id++){const later=h.document.createElement('div');later.className='Message';later.dataset.messageId=String(id);later.innerHTML='<div class="message-content"><div class="text-content">Later</div></div>';later.getBoundingClientRect=()=>({x:0,y:3000,top:3000,left:0,right:100,bottom:3050,width:100,height:50});list.append(later)}
+    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));assert.equal(row.querySelector('[data-rt-ui="voice"] button').textContent,'转为中文');assert.equal(h.stats().nativeClicks,0);
+  }finally{h.close()}
+})
+test('Telegram hiding ordinary translations cannot conceal explicitly requested bilingual voice results',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/owned'),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));
+    h.win.__RT_APPLY_SETTINGS__({translationsVisible:false,translationColor:'#00aa00'});const box=row.querySelector('[data-rt-ui="voice"]');assert.equal(box.hidden,false);assert.equal(box.querySelector('button').hidden,false);
+    box.querySelector('button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');assert.equal(box.hidden,false);assert.equal(row.querySelector('[data-voice-chinese]').hidden,false);assert.equal(row.querySelector('[data-voice-english]').hidden,false);assert.ok(box.textContent.includes('已完成'));
+    h.win.__RT_APPLY_SETTINGS__({translationsVisible:true});assert.equal(row.querySelector('[data-voice-english]').hidden,false);assert.equal(row.querySelector('[data-voice-chinese]').hidden,false);assert.equal(api.calls.length,1);
+  }finally{h.close()}
+})
+test('Telegram a downloaded audio file is translated in the original bubble with its message identity and no native action',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h),api=voiceApi(h);let pickerInside=false;
+    h.win.HTMLInputElement.prototype.click=function(){pickerInside=this.closest('[data-rt-ui="voice"]')?.closest('.Message')===row;Object.defineProperty(this,'files',{value:[new h.win.File([new Uint8Array([1,2,3])],'this-voice.ogg',{type:'audio/ogg'})]});this.dispatchEvent(new h.win.Event('change'))};
+    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
+    assert.equal(pickerInside,true);assert.equal(api.calls.length,1);assert.equal(api.calls[0].messageId,'voice:telegram:12345:0:10');assert.deepEqual(api.fetched,['blob:https://web.telegram.org/selected-file']);assert.deepEqual(api.revoked,['blob:https://web.telegram.org/selected-file']);assert.equal(h.document.querySelector('input[type="file"]'),null);assert.equal(h.stats().nativeClicks,0);assert.equal(h.stats().prepares,0);
+  }finally{h.close()}
+})
+test('Telegram changing conversations cancels the old file picker and its late selection cannot trigger paid work',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h),api=voiceApi(h);let input:any;h.win.HTMLInputElement.prototype.click=function(){input=this};
+    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>Boolean(input));
+    h.win.location.hash='#98765';h.win.dispatchEvent(new h.win.HashChangeEvent('hashchange'));await tick();assert.equal(input.isConnected,false);
+    Object.defineProperty(input,'files',{value:[new h.win.File(['different'],'wrong.ogg')]});input.dispatchEvent(new h.win.Event('change'));await tick();assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(h.document.querySelector('input[type="file"]'),null);
+  }finally{h.close()}
+})
+test('Telegram old voice controls remaining during a route transition cannot translate under the new conversation',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/old-row'),api=voiceApi(h);let pickers=0;h.win.HTMLInputElement.prototype.click=function(){pickers++};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));
+    h.win.location.hash='#98765';h.win.dispatchEvent(new h.win.HashChangeEvent('hashchange'));row.querySelector('[data-rt-ui="voice"] button').click();await tick();assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(pickers,0);
+  }finally{h.close()}
+})
+test('Telegram late bilingual results do not attach to a recycled message row',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/old-row');voiceApi(h);let release:any,calls=0;h.win.realtimeTranslator.translateVoiceMessage=async()=>{calls++;return new Promise(resolve=>release=resolve)};
+    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>calls===1);row.dataset.messageId='11';await tick();await tick();release({englishTranslation:'Old message',translation:'旧消息',targetLanguage:'zh-CN'});await tick();assert.equal(row.querySelector('[data-voice-chinese]').textContent,'');assert.equal(calls,1);assert.equal(row.querySelector('[data-rt-ui="voice"] button').disabled,false);
+  }finally{h.close()}
+})
+test('Telegram disposing the page removes an open audio selector without fetching or translating',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h),api=voiceApi(h);h.win.HTMLInputElement.prototype.click=function(){};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();assert.ok(h.document.querySelector('input[type="file"]'));
+    h.win.dispatchEvent(new h.win.PageTransitionEvent('pagehide'));await tick();assert.equal(h.document.querySelector('input[type="file"]'),null);assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);
+  }finally{h.close()}
+})
+test('Telegram a revoked lazy audio URL does not erase already completed bilingual text or ask for payment again',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/owned'),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
+    row.querySelector('audio').remove();await tick();await tick();assert.equal(row.querySelector('[data-voice-chinese]').textContent,'中文：你好');assert.equal(row.querySelector('[data-rt-ui="voice"] button').hidden,true);assert.equal(api.calls.length,1);
+  }finally{h.close()}
+})
+test('Telegram removing the actual voice control removes completed bilingual output from the same message ID',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/owned'),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
+    row.querySelector('.Audio').remove();await until(()=>!row.querySelector('[data-rt-ui="voice"]'));assert.equal(api.calls.length,1);assert.equal(row.dataset.messageId,'10');
+  }finally{h.close()}
+})
+test('Telegram replacing a voice control cancels its pending file selection and mounts a fresh usable entry',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h),api=voiceApi(h);let input:any;h.win.HTMLInputElement.prototype.click=function(){input=this};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>Boolean(input));
+    const previous=row.querySelector('[data-rt-ui="voice"]');row.querySelector('.Audio').outerHTML='<div class="Audio inline"><div class="content"><div class="waveform"></div><p class="voice-duration">0:20</p></div></div>';
+    await until(()=>!previous.isConnected&&Boolean(row.querySelector('[data-rt-ui="voice"]')));assert.equal(input.isConnected,false);assert.equal(row.querySelector('[data-rt-ui="voice"] button').disabled,false);assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);
+    Object.defineProperty(input,'files',{value:[new h.win.File(['old'],'previous.ogg')]});input.dispatchEvent(new h.win.Event('change'));await tick();assert.equal(api.calls.length,0);
+  }finally{h.close()}
+})
+test('Telegram does not fetch an old currentSrc after the audio declares a different loading source',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/new-loading'),api=voiceApi(h);Object.defineProperty(row.querySelector('audio'),'currentSrc',{value:'blob:https://web.telegram.org/previous'});let pickers=0;
+    h.win.HTMLInputElement.prototype.click=function(){pickers++;this.dispatchEvent(new h.win.Event('cancel'))};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('已取消'));assert.equal(pickers,1);assert.equal(api.fetched.length,0);assert.equal(api.calls.length,0);
+  }finally{h.close()}
+})
+test('Telegram quoted audio never acquires the containing message identity',async()=>{
+  const h=harness();try{
+    const row=h.document.querySelector('.Message');row.querySelector('.message-content').insertAdjacentHTML('beforeend','<div class="embedded-message"><div class="Audio inline"><div class="waveform"></div><audio src="blob:https://web.telegram.org/quoted"></audio></div></div>');const api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="translation"]')));await tick();assert.equal(row.querySelector('[data-rt-ui="voice"]'),null);assert.equal(api.calls.length,0);
+  }finally{h.close()}
+})
+test('Telegram voice failures keep downloaded-file recovery in the same bubble',async()=>{
+  const h=harness();try{
+    const row=audioFixture(h,'blob:https://web.telegram.org/unreadable'),api=voiceApi(h);h.win.fetch=async()=>{throw new Error('语音尚未下载完成')};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();
+    await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('语音尚未下载完成'));const buttons=row.querySelectorAll('[data-rt-ui="voice"] button');assert.equal(buttons[0].disabled,false);assert.equal(buttons[1].hidden,false);assert.equal(buttons[1].textContent,'选择已下载的语音');assert.equal(api.calls.length,0);assert.equal(h.stats().nativeClicks,0);
+  }finally{h.close()}
+})
+
 test('Telegram bootstrap blocks text and caption send until the translator is installed',()=>{
   const dom=new JSDOM('<div class="Composer"><div id="editable-message-text" contenteditable="true">你好</div><button class="main-button send"></button><button class="main-button record"></button></div><div class="Modal"><div id="editable-message-text-modal" contenteditable="true">说明</div><button class="caption"><i class="icon-new-send"></i></button></div>',{url:'https://web.telegram.org/a/',runScripts:'outside-only'})
   const win=dom.window as any;let blocked=0;win.__ready=false;win.__blocked=()=>blocked++

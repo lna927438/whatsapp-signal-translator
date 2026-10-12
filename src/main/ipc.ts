@@ -39,7 +39,7 @@ import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread, clearAc
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
 import { VoiceTranslationService } from './translation/voiceTranslation'
-import type { VoiceMessageAudio } from '../shared/voiceTranslation'
+import type { VoiceMessageAudio, GoogleVoiceAudioMessage } from '../shared/voiceTranslation'
 import { GoogleVoiceWorkspace } from './platforms/googleVoice/workspace'
 import { GoogleVoiceRecords, type GoogleVoiceData } from './platforms/googleVoice/windowRecords'
 import { GoogleVoiceEmbeddedTranslation, type GoogleVoiceEmbeddedDraftData } from './platforms/googleVoice/embeddedTranslation'
@@ -216,7 +216,11 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!owns()) throw new Error('语音不属于当前聊天窗口。')
     if (record.platform === 'whatsapp') {
       const match = input.messageId.match(/^voice:(?:true|false)_([^_\s]+@[^_\s]+)_.+$/)
-      if (!match || conversationId !== 'peer:' + match[1]) throw new Error('语音与当前会话不匹配，请重新打开这条语音。')
+      // Modern opaque IDs identify one message, not a peer inferred from a
+      // display name. Keep their scope stable without merging same-name chats.
+      const opaque = input.messageId.match(/^voice:whatsapp-message:([A-Za-z0-9-]{8,128})$/)
+      if (!(match && conversationId === 'peer:' + match[1])
+        && !(opaque && conversationId === 'whatsapp-message:' + opaque[1])) throw new Error('语音与当前会话不匹配，请重新打开这条语音。')
     } else if (record.platform === 'telegram') {
       const prefix = 'voice:' + conversationId + ':'
       if (!/^telegram:-?\d+(?::\d+)?$/.test(conversationId) || !input.messageId.startsWith(prefix) || !/^[1-9]\d{0,19}$/.test(input.messageId.slice(prefix.length))) throw new Error('语音与当前 Telegram 会话不匹配。')
@@ -230,10 +234,16 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
   })
   // Dedicated Google Voice IPC: never expose the trusted shell's generic IPC
   // bridge, accept a file path, or let a page choose another account/window.
-  electronIpcMain.handle('google-voice:voice-audio', async (event, bytes: Uint8Array) => {
-    const page = googleVoice.trustedPage(event), runtime = await voiceRuntime(page.accountId, page.owner)
-    return voiceTranslations.translate({ owner: page.owner, accountId: page.accountId, conversationId: 'google-voice-audio',
-      bytes, authorized: page.authorized, quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
+  electronIpcMain.handle('google-voice:voice-audio', async (event, input: GoogleVoiceAudioMessage) => {
+    const page = googleVoice.trustedPage(event)
+    if (!input || typeof input !== 'object'
+      || Object.keys(input).some(key => !['bytes', 'conversationId', 'messageId'].includes(key))
+      || typeof input.conversationId !== 'string' || !/^google-voice-audio:[a-f0-9]{64}$/.test(input.conversationId)
+      || typeof input.messageId !== 'string' || !/^voice:google-voice:[a-f0-9]{64}$/.test(input.messageId)) throw new Error('语音消息标识无效，请重新打开这条语音。')
+    const runtime = await voiceRuntime(page.accountId, page.owner)
+    return voiceTranslations.translate({ owner: page.owner, accountId: page.accountId, conversationId: input.conversationId,
+      messageId: input.messageId, bytes: input.bytes, authorized: page.authorized,
+      quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
   })
   const embeddedVoiceTranslation = new GoogleVoiceEmbeddedTranslation<Electron.IpcMainInvokeEvent>({
     trustedPage:event=>googleVoice.trustedPage(event),

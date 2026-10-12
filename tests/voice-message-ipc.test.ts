@@ -27,13 +27,14 @@ function fixture(options: { recognize?: () => Promise<string>; runtime?: () => P
   const h = mainHarness(), { createSecureIpc } = h.load('src/main/secureIpc.ts'), { normalizeSignalPeer } = h.load('src/shared/signalProtocol.ts')
   const { VoiceTranslationService } = h.load('src/main/translation/voiceTranslation.ts')
   const handlers = new Map<string, Function>(), closed: Function[] = [], recognitions: unknown[] = [], prepared: any[] = [], translated: any[] = [], runtimes: any[] = [], tracked: any[] = [], preferences: string[] = []
-  const records: any[] = [{ id: 'wa', platform: 'whatsapp' }, { id: 'signal', platform: 'signal' }, { id: 'native', platform: 'signal', signalEngine: 'desktop' }, { id: 'paused', platform: 'signal', signalEngine: 'desktop', runtimeMode: 'paused' }]
-  let owner = 'owner', revision = 0, ownsWa = true, gvCurrent = true, gvProvider = 'openai'
+  const records: any[] = [{ id: 'wa', platform: 'whatsapp' }, { id: 'telegram', platform: 'telegram' }, { id: 'signal', platform: 'signal' }, { id: 'native', platform: 'signal', signalEngine: 'desktop' }, { id: 'paused', platform: 'signal', signalEngine: 'desktop', runtimeMode: 'paused' }]
+  let owner = 'owner', revision = 0, ownsWa = true, ownsTelegram = true, gvCurrent = true, gvProvider = 'openai'
   let disposed = 0, quits = 0
   const app = Object.assign(new EventEmitter(), { quit: () => { quits++ } })
   const mainWindow = { webContents: { id: 1 }, once: (name: string, fn: Function) => { assert.equal(name, 'closed'); closed.push(fn) } }
   const whatsapp = { ownsSender: (id: string, sender: number) => ownsWa && id === 'wa' && sender === 7 }
-  const raw = { handle: (name: string, fn: Function) => { assert.ok(!handlers.has(name)); handlers.set(name, fn) } }, ipcMain = createSecureIpc(raw, mainWindow, whatsapp)
+  const telegram = { ownsSender: (id: string, sender: number) => ownsTelegram && id === 'telegram' && sender === 8 }
+  const raw = { handle: (name: string, fn: Function) => { assert.ok(!handlers.has(name)); handlers.set(name, fn) } }, ipcMain = createSecureIpc(raw, mainWindow, whatsapp, telegram)
   const requestChannelPreference = async (value: string) => { preferences.push(value); if (!['deepseek', 'openai'].includes(value)) throw Error('unavailable provider'); return value }
   const translator = {
     preserveVoiceRequest: async (request: any) => { prepared.push(request); return request },
@@ -41,7 +42,7 @@ function fixture(options: { recognize?: () => Promise<string>; runtime?: () => P
     trackContent: async (updates: any[]) => { tracked.push(...updates) }
   }
   const scope: any = {
-    ipcMain, electronIpcMain: raw, mainWindow, whatsapp, webAdapter: (platform: string) => platform === 'whatsapp' ? whatsapp : undefined, VoiceTranslationService, normalizeSignalPeer, app,
+    ipcMain, electronIpcMain: raw, mainWindow, whatsapp, webAdapter: (platform: string) => platform === 'whatsapp' ? whatsapp : platform === 'telegram' ? telegram : undefined, VoiceTranslationService, normalizeSignalPeer, app,
     accounts: { list: async () => records }, translator,
     voice: { recognizeWithLanguage: async (bytes: unknown) => { recognitions.push(bytes); return { text: options.recognize ? await options.recognize() : 'Can you call me tomorrow morning?', language: 'en' } }, get busy() { return options.busy?.() ?? false }, dispose: () => { disposed++; return options.dispose?.() ?? Promise.resolve() } },
     taskIdentity: () => { if (!owner) throw Error('请先登录'); const current = owner, version = revision; return { owner, authorized: () => owner === current && revision === version } },
@@ -69,12 +70,50 @@ function fixture(options: { recognize?: () => Promise<string>; runtime?: () => P
   runInNewContext(ts.transpileModule(source.slice(start, end) + '\nglobalThis.voiceCallback = ' + signalCallback, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, scope)
   const invoke = (name: string, args: unknown[], sender = event()) => Promise.resolve().then(() => { assert.ok(handlers.has(name)); return handlers.get(name)!(sender, ...args) })
   return { ...h, invoke, signal: (id: string, input: any, current = () => true) => scope.voiceCallback(id, input, current), records, recognitions, prepared, translated, runtimes, tracked, preferences, app, disposed: () => disposed, quits: () => quits,
-    setOwner: (value: string) => { owner = value; revision++ }, revokeWa: () => { ownsWa = false }, revokeGv: () => { gvCurrent = false }, setGvProvider: (value: string) => { gvProvider = value },
+    setOwner: (value: string) => { owner = value; revision++ }, revokeWa: () => { ownsWa = false }, revokeTelegram: () => { ownsTelegram = false }, revokeGv: () => { gvCurrent = false }, setGvProvider: (value: string) => { gvProvider = value },
     closeWindow: () => closed.forEach(fn => fn()), close: () => { closed.forEach(fn => fn()); assert.match(relative(resolve(process.env.TEMP || ''), resolve(h.directory)), /^hellodog-test-[a-zA-Z0-9]+$/); rmSync(h.directory, { recursive: true, force: true }) }
   }
 }
 const waInput = (patch: any = {}) => ({ conversationId: 'peer:123@c.us', messageId: 'voice:false_123@c.us_FIXTURE', bytes: wav(), ...patch })
 const gvEvent = () => event(12, 'https://voice.google.com/u/0/messages')
+const gvInput = (patch: any = {}) => ({ bytes: wav(), conversationId: 'google-voice-audio:' + 'a'.repeat(64), messageId: 'voice:google-voice:' + 'b'.repeat(64), ...patch })
+const telegramInput = (message = '123') => ({ bytes: wav(), conversationId: 'telegram:-100123:99', messageId: 'voice:telegram:-100123:99:' + message })
+
+test('Telegram voice reaches the shared bilingual service with exact message ownership and retry receipts', async () => {
+  const h = fixture(), sender = event(8, 'https://web.telegram.org/a/')
+  try {
+    const first = await h.invoke('voice:translate-message', ['telegram', telegramInput()], sender)
+    const retry = await h.invoke('voice:translate-message', ['telegram', telegramInput()], sender)
+    assert.equal(first.translation, '你明天早上能给我打电话吗？'); assert.equal(first.englishTranslation, 'Can you call me tomorrow morning?')
+    assert.deepEqual(first, retry); assert.equal(h.recognitions.length, 1); assert.equal(h.translated.length, 1)
+    await h.invoke('voice:translate-message', ['telegram', telegramInput('124')], sender)
+    assert.equal(h.translated.length, 2); assert.notEqual(h.translated[0].requestId, h.translated[1].requestId)
+    assert.equal(h.translated[0].conversationId, telegramInput().conversationId); assert.equal(h.translated[0].providerPreference, 'deepseek')
+  } finally { h.close() }
+})
+
+test('Telegram voice rejects foreign windows and mismatched thread identity before recognition', async () => {
+  const h = fixture()
+  try {
+    for (const sender of [event(7, 'https://web.telegram.org/a/'), event(8, 'https://web.whatsapp.com/'), event(8, 'https://web.telegram.org/a/', true)]) {
+      await assert.rejects(h.invoke('voice:translate-message', ['telegram', telegramInput()], sender))
+    }
+    for (const input of [telegramInput('0'), telegramInput('malformed'), { ...telegramInput(), conversationId: 'telegram:-100123:100' }]) {
+      await assert.rejects(h.invoke('voice:translate-message', ['telegram', input], event(8, 'https://web.telegram.org/a/')))
+    }
+    assert.equal(h.recognitions.length, 0); assert.equal(h.translated.length, 0)
+  } finally { h.close() }
+})
+
+test('Telegram account switch while ASR is running prevents paid work and stale bubble results', async () => {
+  const gate = deferred<string>(), h = fixture({ recognize: () => gate.promise })
+  try {
+    const job = h.invoke('voice:translate-message', ['telegram', telegramInput()], event(8, 'https://web.telegram.org/a/'))
+    const rejected = assert.rejects(job, /状态已变化/)
+    await until(() => h.recognitions.length === 1); h.revokeTelegram(); gate.resolve('Old voice content.')
+    await rejected; assert.equal(h.translated.length, 0)
+  } finally { h.close() }
+})
 
 test('owning WhatsApp main-frame voice registers one Chinese translation with exact message/peer and account provider', async () => {
   const h = fixture()
@@ -113,6 +152,30 @@ test('WhatsApp sender revocation during recognition suppresses transcript and pa
   } finally { h.close() }
 })
 
+test('WhatsApp opaque messages use isolated message scopes and stable retry receipts', async () => {
+  const h = fixture()
+  const input = (id: string) => waInput({ conversationId: 'whatsapp-message:' + id, messageId: 'voice:whatsapp-message:' + id })
+  try {
+    const sender = event(7, 'https://web.whatsapp.com/')
+    const first = await h.invoke('voice:translate-message', ['wa', input('3EB0A123456789')], sender)
+    const retry = await h.invoke('voice:translate-message', ['wa', input('3EB0A123456789')], sender)
+    assert.deepEqual(first, retry)
+    assert.equal(h.translated.length, 1)
+    await h.invoke('voice:translate-message', ['wa', input('3EB0B123456789')], sender)
+    assert.equal(h.translated.length, 2)
+    assert.notEqual(h.translated[0].requestId, h.translated[1].requestId)
+    assert.equal(h.translated[0].conversationId, 'whatsapp-message:3EB0A123456789')
+    assert.equal(h.translated[0].providerPreference, 'deepseek')
+    for (const invalid of [input('short'), input('a'.repeat(129)), input('bad_id_123'),
+      { ...input('3EB0A123456789'), conversationId: 'whatsapp-message:3EB0B123456789' },
+      { ...input('3EB0A123456789'), conversationId: 'peer:123@c.us' }]) {
+      await assert.rejects(h.invoke('voice:translate-message', ['wa', invalid], sender))
+    }
+    await assert.rejects(h.invoke('voice:translate-message', ['wa', input('3EB0A123456789')], event(9, 'https://web.whatsapp.com/')))
+    assert.equal(h.translated.length, 2)
+  } finally { h.close() }
+})
+
 test('account runtime await cannot carry a voice job into a new signed-in owner', async () => {
   const hold = deferred<void>(), h = fixture({ runtime: () => hold.promise })
   try {
@@ -138,10 +201,10 @@ test('all three registered byte entry points reject malformed, non-PCM, silent a
     for (const bytes of [null, [1, 2], new Uint8Array([1]), wav().fill(0), new Uint8Array(9_600_046)]) {
       await assert.rejects(h.invoke('voice:translate-file-audio', ['wa', bytes]))
       await assert.rejects(h.invoke('voice:translate-message', ['wa', waInput({ bytes })]))
-      await assert.rejects(h.invoke('google-voice:voice-audio', [bytes], gvEvent()))
+      await assert.rejects(h.invoke('google-voice:voice-audio', [gvInput({ bytes })], gvEvent()))
     }
     const wrongRate = wav(); new DataView(wrongRate.buffer).setUint32(24, 48000, true)
-    await assert.rejects(h.invoke('google-voice:voice-audio', [wrongRate], gvEvent()))
+    await assert.rejects(h.invoke('google-voice:voice-audio', [gvInput({ bytes: wrongRate })], gvEvent()))
     assert.equal(h.recognitions.length, 0); assert.equal(h.prepared.length, 0); assert.equal(h.translated.length, 0)
   } finally { h.close() }
 })
@@ -149,11 +212,11 @@ test('all three registered byte entry points reject malformed, non-PCM, silent a
 test('Google raw voice handler requires trustedPage and cannot accept an account ID from the page', async () => {
   const h = fixture()
   try {
-    for (const sender of [event(), event(13, 'https://voice.google.com/u/0/messages'), event(12, 'https://accounts.google.com/'), event(12, 'https://voice.google.com/u/0/messages', true)]) await assert.rejects(h.invoke('google-voice:voice-audio', [wav()], sender), /untrusted/)
+    for (const sender of [event(), event(13, 'https://voice.google.com/u/0/messages'), event(12, 'https://accounts.google.com/'), event(12, 'https://voice.google.com/u/0/messages', true)]) await assert.rejects(h.invoke('google-voice:voice-audio', [gvInput()], sender), /untrusted/)
     await assert.rejects(h.invoke('google-voice:voice-audio', [{ accountId: 'other', bytes: wav() }], gvEvent()))
     assert.equal(h.recognitions.length, 0)
-    await h.invoke('google-voice:voice-audio', [wav(), 'other-account'], gvEvent())
-    assert.equal(h.translated[0].accountId, 'gv-fixture'); assert.equal(h.translated[0].conversationId, 'google-voice-audio'); assert.equal(h.translated[0].providerPreference, 'openai'); assert.equal(h.translated[0].targetLanguage, 'zh-CN')
+    await h.invoke('google-voice:voice-audio', [gvInput(), 'other-account'], gvEvent())
+    assert.equal(h.translated[0].accountId, 'gv-fixture'); assert.equal(h.translated[0].conversationId, gvInput().conversationId); assert.equal(h.translated[0].messageId, gvInput().messageId); assert.equal(h.translated[0].providerPreference, 'openai'); assert.equal(h.translated[0].targetLanguage, 'zh-CN')
     assert.ok(h.preferences.includes('openai'))
   } finally { h.close() }
 })
@@ -162,7 +225,7 @@ test('Google page revocation after ASR or during text translation blocks late re
   for (const stage of ['recognize', 'translate'] as const) {
     const hold = deferred<string>(), h = fixture({ [stage]: () => hold.promise })
     try {
-      const job = h.invoke('google-voice:voice-audio', [wav()], gvEvent()), rejected = assert.rejects(job, /状态已变化/)
+      const job = h.invoke('google-voice:voice-audio', [gvInput()], gvEvent()), rejected = assert.rejects(job, /状态已变化/)
       await until(() => stage === 'recognize' ? h.recognitions.length === 1 : h.translated.length === 1)
       h.revokeGv(); hold.resolve(stage === 'recognize' ? 'Private transcript.' : '旧页面译文'); await rejected
       if (stage === 'recognize') assert.equal(h.translated.length, 0)
@@ -172,7 +235,32 @@ test('Google page revocation after ASR or during text translation blocks late re
 
 test('disabled Google provider fails before recognition and never silently falls back to a paid provider', async () => {
   const h = fixture()
-  try { h.setGvProvider('disabled'); await assert.rejects(h.invoke('google-voice:voice-audio', [wav()], gvEvent()), /unavailable provider/); assert.equal(h.recognitions.length, 0); assert.equal(h.translated.length, 0) } finally { h.close() }
+  try { h.setGvProvider('disabled'); await assert.rejects(h.invoke('google-voice:voice-audio', [gvInput()], gvEvent()), /unavailable provider/); assert.equal(h.recognitions.length, 0); assert.equal(h.translated.length, 0) } finally { h.close() }
+})
+
+test('Google voice rejects missing, mixed-account and malformed row identity before ASR', async () => {
+  const h = fixture()
+  try {
+    for (const input of [null, wav(), gvInput({ accountId: 'other' }), gvInput({ url: 'https://example.invalid/audio' }),
+      gvInput({ messageId: 'voice:google-voice:' + 'b'.repeat(63) }), gvInput({ messageId: 'voice:unowned' }),
+      gvInput({ conversationId: 'google-voice-audio' }), gvInput({ conversationId: 'google-voice-audio:' + 'A'.repeat(64) })]) {
+      await assert.rejects(h.invoke('google-voice:voice-audio', [input], gvEvent()), /语音消息标识/)
+    }
+    assert.equal(h.recognitions.length, 0); assert.equal(h.prepared.length, 0)
+  } finally { h.close() }
+})
+
+test('same Google audio in different message bubbles keeps separate receipts; retry preserves its own receipt', async () => {
+  const h = fixture()
+  try {
+    await h.invoke('google-voice:voice-audio', [gvInput()], gvEvent())
+    await h.invoke('google-voice:voice-audio', [gvInput()], gvEvent())
+    assert.equal(h.recognitions.length, 1); assert.equal(h.translated.length, 1)
+    await h.invoke('google-voice:voice-audio', [gvInput({ messageId: 'voice:google-voice:' + 'c'.repeat(64) })], gvEvent())
+    await h.invoke('google-voice:voice-audio', [gvInput({ conversationId: 'google-voice-audio:' + 'd'.repeat(64) })], gvEvent())
+    assert.equal(h.recognitions.length, 3); assert.equal(h.translated.length, 3)
+    assert.equal(new Set(h.translated.map(request => request.requestId)).size, 3)
+  } finally { h.close() }
 })
 
 test('trusted-shell Signal messages normalize peers, reject invalid peers and keep distinct peers isolated', async () => {

@@ -16,7 +16,7 @@ export const telegramInjectionScript = String.raw`
  let sending=false, active, nativeClick, locked=false, preview, previewResolve, status, composing=new WeakSet();
  let incomingCount=0, incomingPausedUntil=0, incomingFailures=0;
  let pendingPanel,pendingRead,pendingAt=0,pendingRevision=0,resolving;
- const rowRecords=new WeakMap(), audioOwners=new WeakMap(), listOwners=new WeakMap(), historyBaselines=new WeakMap(), mounted=new Set(), approvedHistory=new Set();
+ const rowRecords=new WeakMap(), audioOwners=new WeakMap(), listOwners=new WeakMap(), historyBaselines=new WeakMap(), mounted=new Set(), approvedHistory=new Set(), voicePickers=new Set();
  const MAX_AUTO_CONCURRENCY=2, MAX_ROWS=120;
  const visible=node=>{if(!node?.isConnected||node.closest('[hidden],[aria-hidden="true"],.Transition_slide-inactive')||getComputedStyle(node).display==='none')return false;const slide=node.closest('.messages-layout > .Transition > .Transition_slide');return !slide||slide.matches('.Transition_slide-active,.Transition_slide-to')};
  const onScreen=node=>{const rect=node.getBoundingClientRect();return rect.width===0&&rect.height===0||rect.bottom>=0&&rect.top<=innerHeight&&rect.right>=0&&rect.left<=innerWidth};
@@ -255,60 +255,93 @@ export const telegramInjectionScript = String.raw`
   }catch(error){if(valid()){record.output.textContent=error?.message||'翻译暂不可用，请重试';record.button.textContent='重试翻译';record.failed=true;incomingFailures++;incomingPausedUntil=Date.now()+Math.min(60000,2000*2**Math.min(incomingFailures,5))}}
   finally{record.busy=false;record.button.disabled=false;incomingCount--;schedule()}
  }
+ // Web A renders both voice notes and playable audio attachments through Audio/TrackRow.
+ // Audio attachments have .duration rather than the voice-only waveform/duration selectors.
+ // Quoted/embedded audio belongs to another message and must not acquire this row's identity.
+ function voiceMedia(row){
+  const host=bubble(row);if(!host)return null;
+  const candidates=Array.from(host.querySelectorAll('.Audio.inline,.Audio .waveform,.Audio .voice-duration,audio')).filter(node=>node.closest(rowSelector)===row&&!node.closest('[data-rt-ui],.embedded-message,.message-reply,.WebPage,.web-page,.message-summary'));
+  const unique=[...new Set(candidates.map(node=>node.closest('.Audio')||node))].filter(node=>!node.querySelector('.icon-view-once')&&!node.classList.contains('non-interactive'));
+  return unique.length===1?unique[0]:null;
+ }
  function audioUrl(row){
-  const audios=Array.from(row.querySelectorAll('audio')).filter(audio=>audio.closest(rowSelector)===row&&/^(?:blob:)/.test(audio.currentSrc||audio.src));
+  const media=voiceMedia(row);if(!media)return '';
+  const audios=(media.matches('audio')?[media]:Array.from(media.querySelectorAll('audio'))).filter(audio=>audio.closest(rowSelector)===row&&/^(?:blob:)/.test(audio.currentSrc||audio.src||audio.querySelector('source[src]')?.src||''));
   if(audios.length!==1)return '';
-  const audio=audios[0],url=audio.currentSrc||audio.src,identity=current()?.id+':'+rowId(row),previous=audioOwners.get(audio);
+  const audio=audios[0],declared=audio.src||audio.querySelector('source[src]')?.src||'',url=audio.currentSrc||declared,identity=current()?.id+':'+rowId(row),previous=audioOwners.get(audio);
+  // Chromium may retain the previous currentSrc while a newly declared source loads.
+  if(audio.currentSrc&&declared&&audio.currentSrc!==declared)return '';
   if(previous&&previous.url===url&&previous.identity!==identity)return '';
   audioOwners.set(audio,{url,identity});return url;
  }
- function chooseAudio(){return new Promise(resolve=>{
-  const input=document.createElement('input');input.type='file';input.accept='audio/*,.ogg,.opus,.mp3,.m4a,.wav,.webm';input.dataset.rtUi='voice-file';input.style.display='none';document.body.append(input);
-  const finish=file=>{clearTimeout(wait);input.remove();resolve(file)};const wait=setTimeout(()=>finish(null),120000);
-  input.onchange=()=>finish(input.files?.[0]||null);input.oncancel=()=>finish(null);input.click();
+ function chooseAudio(record){return new Promise(resolve=>{
+  const input=document.createElement('input');input.type='file';input.accept='audio/*,.ogg,.opus,.mp3,.m4a,.wav,.webm';input.dataset.rtUi='voice-file';input.hidden=true;record.voiceBox.append(input);
+  let settled=false;const cancel=()=>finish(null),finish=file=>{if(settled)return;settled=true;clearTimeout(wait);input.remove();voicePickers.delete(cancel);if(record.cancelVoicePicker===cancel)record.cancelVoicePicker=null;resolve(file)},wait=setTimeout(cancel,120000);
+  voicePickers.add(cancel);record.cancelVoicePicker=cancel;input.onchange=()=>finish(input.files?.[0]||null);input.oncancel=cancel;try{input.click()}catch{cancel()}
  })}
- async function translateVoice(record){
+ function applyVoiceAppearance(record){
+  if(!record.voiceBox)return;
+  // A manual voice request explicitly asks to show its result. The ordinary
+  // message-translation visibility setting must not conceal that result.
+  record.voiceBox.hidden=false;record.english.hidden=record.chinese.hidden=false;
+  record.english.style.color=record.chinese.style.color=settings.translationColor||'';
+  if(Number.isFinite(settings.fontSize))record.voiceBox.style.fontSize=Math.max(10,Math.min(30,settings.fontSize))+'px';
+  if(record.voiceComplete)record.voiceStatus.textContent='已完成';
+ }
+ function clearVoice(record){
+  record.cancelVoicePicker?.();record.voiceRun=(record.voiceRun||0)+1;record.voiceBox?.remove();record.voiceBox=null;record.voiceBusy=false;record.voiceComplete=false;record.voiceSource='';record.voiceElement=null;
+ }
+ async function translateVoice(record,selectFile=false){
   const conversation=current(),id=rowId(record.row),version=epoch,linkedUrl=audioUrl(record.row);if(!conversation||!id||record.voiceBusy||record.voiceComplete)return;
-  const valid=()=>!disposed&&epoch===version&&record.row.isConnected&&record.voiceBox.isConnected&&rowId(record.row)===id&&current()?.id===conversation.id&&(!linkedUrl||audioUrl(record.row)===linkedUrl);
-  record.voiceBusy=true;record.voiceButton.disabled=true;let ownedUrl='';
+  const list=messageList(),media=voiceMedia(record.row);if(!media||!list?.contains(record.row)||record.identity!==conversation.id+':'+id)return;
+  const run=record.voiceRun=(record.voiceRun||0)+1;
+  const valid=()=>!disposed&&record.voiceRun===run&&epoch===version&&messageList()===list&&list.contains(record.row)&&record.identity===conversation.id+':'+id&&rowRecords.get(record.row)===record&&record.row.isConnected&&record.voiceBox?.isConnected&&rowId(record.row)===id&&current()?.id===conversation.id&&voiceMedia(record.row)===media&&(!linkedUrl||audioUrl(record.row)===linkedUrl);
+  record.voiceBusy=true;record.voiceButton.disabled=true;record.fileButton.disabled=true;let ownedUrl='';
   try{
-   let url=linkedUrl;
-   if(!url){record.voiceStatus.textContent='请选择从这条语音下载的音频文件，结果会显示在当前气泡内。';const file=await chooseAudio();if(!file||!valid()){record.voiceStatus.textContent='已取消，原语音保留。';return}if(file.size>20*1024*1024)throw new Error('请选择 20 MB 以内的语音文件。');ownedUrl=URL.createObjectURL(file);url=ownedUrl}
+   if(typeof api?.translateVoiceMessage!=='function')throw new Error('语音翻译组件尚未就绪，请刷新当前窗口后重试。');
+   let url=selectFile?'':linkedUrl;
+   if(!url){record.voiceStatus.textContent='请选择从这条语音下载的音频文件，中英文会显示在当前气泡内。';record.fileButton.hidden=false;const file=await chooseAudio(record);if(!file||!valid()){if(valid())record.voiceStatus.textContent='已取消，原语音保留。';return}if(!file.size||file.size>20*1024*1024)throw new Error('请选择非空且 20 MB 以内的语音文件。');ownedUrl=URL.createObjectURL(file);url=ownedUrl}
    record.voiceStatus.textContent='正在识别并生成中英双语…';const bytes=await decodeVoice(url);if(!valid())return;
    const result=await timeout(api.translateVoiceMessage({bytes,conversationId:conversation.id,messageId:'voice:'+conversation.id+':'+id}),120000,'语音翻译超时，请重试');
    if(!valid())return;
    if(result?.targetLanguage!=='zh-CN'||typeof result.translation!=='string'||!result.translation.trim()||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim())throw new Error('尚未取得完整中英双语，请重试');
-   record.english.textContent='English: '+result.englishTranslation;record.chinese.textContent='中文：'+result.translation;record.voiceStatus.textContent='已完成';record.voiceComplete=true;record.voiceSource=linkedUrl;record.voiceButton.hidden=true;
-  }catch(error){if(valid()){record.voiceStatus.textContent=error?.message||'语音翻译失败，请重试';record.voiceButton.textContent='重试转中文'}}
-  finally{if(ownedUrl)URL.revokeObjectURL(ownedUrl);record.voiceBusy=false;record.voiceButton.disabled=Boolean(record.voiceComplete);if(!valid()&&record.voiceBox.isConnected)record.voiceStatus.textContent='语音或会话已变化，请在原消息上重试。'}
+   record.english.textContent='English: '+result.englishTranslation;record.chinese.textContent='中文：'+result.translation;record.voiceComplete=true;record.voiceSource=linkedUrl;record.voiceButton.hidden=record.fileButton.hidden=true;applyVoiceAppearance(record);
+  }catch(error){if(valid()){record.voiceStatus.textContent=error?.message||'语音翻译失败，请重试';record.voiceButton.textContent='重试转为中文';record.fileButton.hidden=false}}
+  finally{if(ownedUrl)URL.revokeObjectURL(ownedUrl);if(record.voiceRun===run){record.voiceBusy=false;record.voiceButton.disabled=record.fileButton.disabled=Boolean(record.voiceComplete);if(!valid()&&record.voiceBox?.isConnected)record.voiceStatus.textContent='语音或会话已变化，请在原消息上重试。'}}
  }
- function mountRow(row){
+ function mountRow(row,withText=true){
   const conversation=current(),id=rowId(row),host=bubble(row);if(!conversation||!id||!host)return;
   const original=messageText(row),identity=conversation.id+':'+id;let record=rowRecords.get(row);
-  if(record&&(record.identity!==identity||record.original!==original||record.box&&!record.box.isConnected||record.voiceBox&&!record.voiceBox.isConnected)){record.box?.remove();record.voiceBox?.remove();mounted.delete(record);record=null}
+  if(record&&(record.identity!==identity||record.original!==original||record.box&&!record.box.isConnected||record.voiceBox&&!record.voiceBox.isConnected)){record.cancelVoicePicker?.();record.box?.remove();record.voiceBox?.remove();mounted.delete(record);record=null}
   if(!record){record={row,identity,original,busy:false,complete:false,failed:false};rowRecords.set(row,record);mounted.add(record)}
-  if(record.voiceComplete&&record.voiceSource&&record.voiceSource!==audioUrl(row)){record.voiceComplete=false;record.english.textContent='';record.chinese.textContent='';record.voiceButton.hidden=false;record.voiceButton.disabled=false;record.voiceStatus.textContent='语音已变化，请重新转为中文。'}
-  if(original&&!record.box){
+  const media=voiceMedia(row);if(record.voiceBox&&record.voiceElement!==media)clearVoice(record);
+  if(record.voiceComplete&&record.voiceSource&&audioUrl(row)&&record.voiceSource!==audioUrl(row)){record.voiceComplete=false;record.english.textContent='';record.chinese.textContent='';record.voiceButton.hidden=false;record.voiceButton.disabled=record.fileButton.disabled=false;record.voiceStatus.textContent='语音已变化，请重新转为中文。'}
+  if(withText&&original&&!record.box){
    const box=document.createElement('div');box.dataset.rtUi='translation';box.className='hd-tg-translation';const output=document.createElement('div');output.dataset.translationText='true';const item=button('翻译此消息',()=>void translateRow(record,true));box.append(item,output);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{box,output,button:item});
   }
-  if(!record.voiceBox&&row.querySelector('.Audio .waveform,.Audio .voice-duration,audio')){
-   const box=document.createElement('div');box.dataset.rtUi='voice';box.className='hd-tg-voice';const voiceStatus=document.createElement('div'),english=document.createElement('div'),chinese=document.createElement('div');english.lang='en';chinese.lang='zh-CN';english.dataset.voiceEnglish='true';chinese.dataset.voiceChinese='true';const item=button('转为中文',()=>void translateVoice(record));box.append(item,voiceStatus,english,chinese);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{voiceBox:box,voiceButton:item,voiceStatus,english,chinese});
+  if(!record.voiceBox&&media){
+   const box=document.createElement('div');box.dataset.rtUi='voice';box.className='hd-tg-voice';const voiceStatus=document.createElement('div'),english=document.createElement('div'),chinese=document.createElement('div');voiceStatus.setAttribute('role','status');english.lang='en';chinese.lang='zh-CN';english.dataset.voiceEnglish='true';chinese.dataset.voiceChinese='true';const item=button('转为中文',()=>void translateVoice(record)),fileButton=button('选择已下载的语音',()=>void translateVoice(record,true));fileButton.hidden=true;box.append(item,fileButton,voiceStatus,english,chinese);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{voiceBox:box,voiceElement:media,voiceButton:item,fileButton,voiceStatus,english,chinese});
   }
+  applyVoiceAppearance(record);
   if(record.box){record.box.hidden=settings.translationsVisible===false;record.box.style.color=settings.translationColor||'';if(Number.isFinite(settings.fontSize))record.box.style.fontSize=Math.max(10,Math.min(30,settings.fontSize))+'px'}
   if(record.nextCacheAt>Date.now()&&!record.complete)schedule(record.nextCacheAt-Date.now()+10);
-  if(!document.hidden&&onScreen(row)&&settings.receiveAutoTranslate&&settings.historyMode!=='manual'&&(!conversation.group||settings.groupTranslate)&&incomingCount<MAX_AUTO_CONCURRENCY&&!record.busy&&!record.complete&&!record.failed&&original&&Date.now()>=incomingPausedUntil&&Date.now()>=(record.nextCacheAt||0)&&(!own(row)||!sending&&!active?.dispatched)&&(settings.historyMode==='visible'||approvedHistory.has(identity)))void translateRow(record);
+  if(withText&&!document.hidden&&onScreen(row)&&settings.receiveAutoTranslate&&settings.historyMode!=='manual'&&(!conversation.group||settings.groupTranslate)&&incomingCount<MAX_AUTO_CONCURRENCY&&!record.busy&&!record.complete&&!record.failed&&original&&Date.now()>=incomingPausedUntil&&Date.now()>=(record.nextCacheAt||0)&&(!own(row)||!sending&&!active?.dispatched)&&(settings.historyMode==='visible'||approvedHistory.has(identity)))void translateRow(record);
  }
  function refreshContext(){
   const route=routeKey();if(route===lastRoute)return;
-  lastRoute=route;epoch++;settingsAt=0;settingsPromise=null;settings={};closePreview(null);clearPending();pendingAt=0;locked=false;active=null;approvedHistory.clear();
+  lastRoute=route;epoch++;for(const cancel of voicePickers)cancel();settingsAt=0;settingsPromise=null;settings={};closePreview(null);clearPending();pendingAt=0;locked=false;active=null;approvedHistory.clear();
   const conversation=current();if(conversation)api.reportConversation?.({id:conversation.id,name:document.querySelector('#MiddleColumn .chat-info .title')?.textContent?.trim()||'Telegram'});
  }
  async function scan(){
   clearTimeout(timer);timer=null;if(disposed)return;refreshContext();
-  for(const record of mounted)if(!record.row.isConnected){mounted.delete(record)}
+  for(const record of mounted)if(!record.row.isConnected){record.cancelVoicePicker?.();mounted.delete(record)}
   const connection=navigator.onLine===false?'offline':document.querySelector('#auth-qr-form,#auth-phone-number-form,.Auth')?'login-required':document.querySelector('#LeftColumn')?'page-ready':'loading';if(connection!==lastConnection){lastConnection=connection;api.reportConnection?.(connection)}
   const titleCount=document.title.match(/^\((\d+)\)/),unread=titleCount?Number(titleCount[1]):0;if(unread!==lastUnread){lastUnread=unread;api.reportUnread?.(unread)}
   const version=epoch,listBeforeSettings=messageList();if(document.hidden||!current()||!listBeforeSettings)return;
+  // Manual voice actions do not need remote translation settings or incur any work on mount.
+  // Prioritize the visible part of a long history instead of starving it behind the newest 120 rows.
+  const present=rows(),voiceRows=[...new Set([...present.filter(onScreen),...present.slice(-MAX_ROWS)])].slice(0,MAX_ROWS);
+  for(const row of voiceRows)mountRow(row,false);
   void recoverPending();
   try{await runtime()}catch{showStatus('翻译连接暂不可用，聊天页面和草稿已保留。',true)}
   if(disposed||document.hidden||version!==epoch||!current()||messageList()!==listBeforeSettings)return;
@@ -334,11 +367,11 @@ export const telegramInjectionScript = String.raw`
  window.addEventListener('online',reconnect);document.addEventListener('visibilitychange',()=>{if(!document.hidden)schedule()});document.addEventListener('scroll',schedule,{passive:true,capture:true});
  window.__RT_RESUME_TRANSLATIONS__=reconnect;
  window.__RT_REFRESH_TRANSLATIONS__=()=>{settingsAt=0;for(const record of mounted){record.complete=false;record.failed=false;record.output&&(record.output.textContent='');record.button&&(record.button.hidden=false)}schedule()};
- window.__RT_APPLY_SETTINGS__=value=>{Object.assign(settings,value||{});for(const record of mounted){if(record.box){record.box.hidden=value?.translationsVisible===false;record.box.style.color=value?.translationColor||''}if(record.voiceBox)record.voiceBox.hidden=value?.translationsVisible===false}schedule()};
+ window.__RT_APPLY_SETTINGS__=value=>{Object.assign(settings,value||{});for(const record of mounted){if(record.box){record.box.hidden=value?.translationsVisible===false;record.box.style.color=value?.translationColor||''}applyVoiceAppearance(record)}schedule()};
  window.__RT_SAVE_WORKSPACE__=async()=>{const composer=editor(),conversation=current();if(composer&&conversation&&!composer.id.endsWith('-modal'))await api.saveDraft({conversationId:conversation.id,targetKey:targetKey()},text(composer));return {busy:sending||locked,editing:composing.has(composer),media:Boolean(document.querySelector('#editable-message-text-modal')),capturing:Boolean(document.querySelector('.main-button.recording'))}};
  window.__RT_INSERT_DRAFT__=value=>{const composer=editor();if(!composer||text(composer)||sending||locked||!messageList()||!current()?.writable)return false;return window.__RT_EDIT_ATOMIC__({text:value,expected:'',targetKey:targetKey(),conversationId:current()?.id})};
  const heartbeat=setInterval(()=>{if(!document.hidden)schedule()},15000);
- window.addEventListener('pagehide',event=>{if(event.persisted)return;disposed=true;observer.disconnect();clearTimeout(timer);clearInterval(heartbeat);closePreview(null);mounted.clear()});
+ window.addEventListener('pagehide',event=>{if(event.persisted)return;disposed=true;for(const cancel of voicePickers)cancel();observer.disconnect();clearTimeout(timer);clearInterval(heartbeat);closePreview(null);mounted.clear()});
  void scan();
 })();
 `
