@@ -11,22 +11,33 @@ const answer={text:'I will call tomorrow.',englishTranslation:'I will call tomor
 const row=(id='one',peer='123',audio=true)=>`<div id="${id}" class="message-in" data-id="false_${peer}@c.us_${id}"><button data-icon="audio-play">Play</button>${audio?`<audio src="blob:https://web.whatsapp.com/${id}"></audio>`:''}</div>`
 const tick=async()=>{for(let n=0;n<6;n++)await new Promise(resolve=>setTimeout(resolve,2))}
 function deferred<T=any>(){let resolve!:(value:T)=>void,reject!:(e:unknown)=>void;const promise=new Promise<T>((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}}
-async function mount(options:{html?:string;translate?:(payload:any)=>any;decode?:()=>Promise<void>;chooseFile?:(input:HTMLInputElement,w:any)=>void;script?:string;beforeEval?:(w:any)=>void;expectedError?:RegExp}={}){
+async function mount(options:{html?:string;translate?:(payload:any)=>any;decode?:()=>Promise<void>;models?:boolean;modelDownload?:(model:any,w:any)=>Promise<void>;mediaSize?:number;script?:string;beforeEval?:(w:any)=>void;expectedError?:RegExp}={}){
  const errors:string[]=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message))
  const dom=new JSDOM(`<div id="side"><button>Other chat</button></div><div id="main"><header><span title="Alex" dir="auto">Alex</span></header>${options.html??row()}</div>`,{url:'https://web.whatsapp.com',runScripts:'outside-only',pretendToBeVisual:true,virtualConsole:vc}),w=dom.window as any,d=w.document
  const requests:any[]=[],reads:string[]=[],created:string[]=[],revoked:string[]=[],pickers:HTMLInputElement[]=[];let plays=0,pauses=0,closed=0
  w.URL.createObjectURL=()=>{const url='blob:https://web.whatsapp.com/selected-'+created.length;created.push(url);return url};w.URL.revokeObjectURL=(url:string)=>revoked.push(url)
- w.HTMLInputElement.prototype.click=function(){pickers.push(this);if(options.chooseFile)options.chooseFile(this,w);else this.dispatchEvent(new w.Event('cancel'))}
+ w.HTMLInputElement.prototype.click=function(){pickers.push(this);this.dispatchEvent(new w.Event('cancel'))}
  w.AbortSignal=AbortSignal;w.fetch=async(url:string)=>{reads.push(url);return new Response(new Uint8Array([1,2,3]))}
  w.HTMLMediaElement.prototype.play=function(){plays++;return Promise.resolve()};w.HTMLMediaElement.prototype.pause=function(){pauses++}
  w.AudioContext=class{async decodeAudioData(){await options.decode?.();return {duration:.15}}async close(){closed++}}
  w.OfflineAudioContext=class{count:number;destination={};constructor(_channels:number,count:number){this.count=count}createBufferSource(){return {connect(){},start(){}}}async startRendering(){return {getChannelData:()=>new Float32Array(this.count).fill(.2)}}}
  const timeout=w.setTimeout.bind(w);w.setTimeout=(fn:()=>void,ms:number)=>timeout(fn,ms===100?1:ms)
  w.realtimeTranslator={getRuntimeSettings:async()=>({receiveAutoTranslate:false}),translateVoiceMessage:async(payload:any)=>{requests.push(payload);return options.translate?options.translate(payload):answer}}
+ const models=new Map<string,any>(),downloads:string[]=[]
+ if(options.models||options.modelDownload){
+  for(const node of d.querySelectorAll('[data-id]')){
+   const domId=node.getAttribute('data-id'),serialized=/^(?:true|false)_/.test(domId)?domId:'false_123@c.us_'+domId
+   const model:any={id:{_serialized:serialized,id:domId.replace(/^(?:true|false)_[^_]+_/,'' )},type:'ptt',filehash:'hash-'+domId,mediaData:{}}
+   const attach=()=>{model.mediaData.mediaBlob={forceToBlob:()=>new w.Blob([new Uint8Array(options.mediaSize??4)],{type:'audio/ogg'})}}
+   model.downloadMedia=async()=>{downloads.push(serialized);await options.modelDownload?.(model,w);attach()}
+   if(!options.modelDownload)attach()
+   models.set(serialized,model);if(serialized!==domId)Object.defineProperty(node,'__reactProps$fixture',{value:{message:model},configurable:true,enumerable:true})
+  }
+  w.require=(name:string)=>name==='WAWebCollections'?{Msg:{get:(id:string)=>models.get(id),getMessagesById:async(ids:string[])=>({messages:ids.map(id=>models.get(id)).filter(Boolean)})}}:undefined
+ }
  options.beforeEval?.(w);if(options.expectedError)assert.throws(()=>w.eval(options.script??whatsappVoiceScript),options.expectedError);else w.eval(options.script??whatsappVoiceScript);await tick()
- return {w,d,requests,reads,errors,created,revoked,pickers,button:(id='one')=>d.querySelector('#'+id+' .rt-voice-translation button') as HTMLButtonElement,output:(id='one')=>d.querySelector('#'+id+' [data-voice-translation]') as HTMLElement,status:(id='one')=>d.querySelector('#'+id+' [role=status]')?.textContent,async click(id='one'){this.button(id).click();await tick()},get plays(){return plays},get pauses(){return pauses},get closed(){return closed},close:()=>dom.window.close()}
+ return {w,d,requests,reads,errors,created,revoked,pickers,models,downloads,button:(id='one')=>d.querySelector('#'+id+' .rt-voice-translation button') as HTMLButtonElement,output:(id='one')=>d.querySelector('#'+id+' [data-voice-translation]') as HTMLElement,status:(id='one')=>d.querySelector('#'+id+' [role=status]')?.textContent,async click(id='one'){this.button(id).click();await tick()},get plays(){return plays},get pauses(){return pauses},get closed(){return closed},close:()=>{w.dispatchEvent(new w.Event('pagehide'));dom.window.close()}}
 }
-function selectFile(input:HTMLInputElement,w:any,size=4){Object.defineProperty(input,'files',{value:[new w.File([new Uint8Array(size)],'this-voice.ogg',{type:'audio/ogg'})]});input.dispatchEvent(new w.Event('change'))}
 
 test('one deliberate click shows English and Chinese directly and never changes or plays original audio',async()=>{
  const h=await mount();try{
@@ -60,7 +71,7 @@ test('WhatsApp mounts bilingual output inside the identified message bubble and 
 test('an unowned external player is never assigned by click or playback recency',async()=>{
  const h=await mount({html:row('one','123',false)});try{
   const audio=h.d.createElement('audio');audio.src='blob:https://web.whatsapp.com/unrelated';h.d.body.append(audio);h.d.querySelector('#one button').click();await audio.play();await h.click()
-  assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.match(h.status()!,/已取消选择/);assert.doesNotMatch(h.status()!,/设置|记录与恢复/);assert.equal(h.button().disabled,false);assert.equal(h.pickers.length,1)
+  assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.match(h.status()!,/无法读取这条语音/);assert.doesNotMatch(h.status()!,/设置|记录与恢复/);assert.equal(h.button().disabled,false);assert.equal(h.pickers.length,0)
  }finally{h.close()}
 })
 
@@ -168,43 +179,60 @@ test('voice detection excludes quoted audio and generic video play controls',asy
  }finally{h.close()}
 })
 
-test('explicit per-bubble file selection renders both languages without reading the shared player or settings',async()=>{
- const h=await mount({html:row('one','123',false),chooseFile:selectFile});try{
+test('exact message-model media renders both languages without a file picker, shared player or settings',async()=>{
+ const h=await mount({html:row('one','123',false),models:true});try{
   const audio=h.d.createElement('audio');audio.src='blob:https://web.whatsapp.com/global';h.d.body.append(audio)
-  await h.click();assert.equal(h.pickers.length,1);assert.deepEqual(h.reads,h.created);assert.deepEqual(h.revoked,h.created);assert.equal(h.requests.length,1)
+  await h.click();assert.equal(h.pickers.length,0);assert.deepEqual(h.reads,h.created);assert.deepEqual(h.revoked,h.created);assert.equal(h.requests.length,1)
   assert.equal(h.requests[0].messageId,'voice:false_123@c.us_one');assert.equal(h.requests[0].conversationId,'peer:123@c.us');assert.equal(h.output().textContent,answer.translation);assert.equal(h.d.querySelector('#one [lang=en]').textContent,answer.englishTranslation)
   assert.equal(h.d.querySelector('input[type=file]'),null);assert.equal(h.plays,0);assert.equal(h.pauses,0)
   const output=h.output(),box=h.button().parentElement;h.d.querySelector('#one button[data-icon]').setAttribute('data-icon','audio-pause');await tick();assert.equal(h.output(),output);assert.equal(h.button().parentElement,box);assert.equal(output.hidden,false);assert.equal(h.requests.length,1)
  }finally{h.close()}
 })
 
-test('cancelled or oversized file selection makes no audio reads or paid requests and stays retryable',async()=>{
- for(const chooseFile of [undefined,(input:HTMLInputElement,w:any)=>selectFile(input,w,20*1024*1024+1)]){
-  const h=await mount({html:row('one','123',false),chooseFile});try{await h.click();assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.created.length,0);assert.equal(h.button().disabled,false);assert.match(h.status()!,/取消选择|20 MB/);assert.equal(h.d.querySelector('input[type=file]'),null)}finally{h.close()}
+test('unavailable or oversized exact model media makes no audio reads or paid requests and stays retryable',async()=>{
+ for(const config of [{},{models:true,mediaSize:20*1024*1024+1}]){
+  const h=await mount({html:row('one','123',false),...config});try{await h.click();assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.created.length,0);assert.equal(h.button().disabled,false);assert.match(h.status()!,/无法读取这条语音/);assert.equal(h.d.querySelector('input[type=file]'),null);assert.equal(h.pickers.length,0)}finally{h.close()}
  }
 })
 
-test('navigation or recycled row while selecting a file cancels without decoding or billing',async()=>{
+test('navigation or recycled row while the official model loads cancels without decoding or billing',async()=>{
  for(const change of [(h:any)=>h.d.querySelector('#side button').dispatchEvent(new h.w.Event('pointerdown',{bubbles:true})),(h:any)=>h.d.querySelector('#one').dataset.id='false_123@c.us_recycled']){
-  const h=await mount({html:row('one','123',false),chooseFile:()=>{}});try{
-   await h.click();assert.equal(h.pickers.length,1);change(h);await tick();selectFile(h.pickers[0],h.w);await tick();assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.created.length,0);assert.equal(h.button().disabled,false);assert.equal(h.d.querySelector('input[type=file]'),null)
+  const gate=deferred<void>(),h=await mount({html:row('one','123',false),modelDownload:()=>gate.promise});try{
+   await h.click();assert.equal(h.downloads.length,1);assert.equal(h.pickers.length,0);change(h);await tick();gate.resolve();await tick();assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.created.length,0);assert.equal(h.button().disabled,false);assert.equal(h.d.querySelector('input[type=file]'),null)
   }finally{h.close()}
  }
 })
 
-test('selected-file decode and translation reject stale owners and always revoke the temporary media URL',async()=>{
+test('model-media decode and translation reject stale owners and always revoke the temporary media URL',async()=>{
  for(const phase of ['decode','translate']){
-  const gate=deferred<any>(),h=await mount({html:row('one','123',false),chooseFile:selectFile,...(phase==='decode'?{decode:()=>gate.promise}:{translate:()=>gate.promise})});try{
+  const gate=deferred<any>(),h=await mount({html:row('one','123',false),models:true,...(phase==='decode'?{decode:()=>gate.promise}:{translate:()=>gate.promise})});try{
    await h.click();assert.equal(h.created.length,1);h.d.querySelector('#side button').dispatchEvent(new h.w.Event('pointerdown',{bubbles:true}));gate.resolve(answer);await tick()
    assert.equal(h.requests.length,phase==='decode'?0:1);assert.equal(h.output().hidden,true);assert.equal(h.button().disabled,false);assert.deepEqual(h.revoked,h.created);assert.doesNotMatch(h.d.body.textContent,/我明天打电话/)
   }finally{h.close()}
  }
 })
 
-test('a failed owned decode exposes an explicit same-bubble file retry instead of repeatedly reading the unusable source',async()=>{
- let count=0;const h=await mount({chooseFile:selectFile,decode:async()=>{if(count++===0)throw Error('无法读取录音')}});try{
-  await h.click();assert.equal(h.requests.length,0);const fileButton=h.d.querySelector('.rt-voice-translation button:nth-child(2)');assert.equal(fileButton.hidden,false);fileButton.click();await tick()
-  assert.equal(h.requests.length,1);assert.equal(h.pickers.length,1);assert.equal(h.output().textContent,answer.translation);assert.deepEqual(h.reads,['blob:https://web.whatsapp.com/one',...h.created]);assert.deepEqual(h.revoked,h.created);assert.equal(fileButton.hidden,true)
+test('a stalled official media load ends in a bounded retry and its late blob cannot decode or bill',async()=>{
+ const gate=deferred<void>(),h=await mount({html:row('one','123',false),modelDownload:()=>gate.promise,beforeEval:w=>{const timeout=w.setTimeout.bind(w);w.setTimeout=(fn:()=>void,ms:number)=>timeout(fn,ms===45000?25:ms)}});try{
+  await h.click();await new Promise(resolve=>setTimeout(resolve,40));assert.equal(h.button().disabled,false);assert.match(h.status()!,/读取语音超时/);assert.equal(h.downloads.length,1)
+  gate.resolve();await tick();assert.equal(h.created.length,0);assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.pickers.length,0)
+ }finally{h.close()}
+})
+
+test('completed model output is invalidated when its store owner or media signature changes',async()=>{
+ for(const change of ['replace','delete','hash']){
+  const h=await mount({html:row('one','123',false),models:true});try{
+   await h.click();assert.equal(h.output().hidden,false);const id='false_123@c.us_one',model=h.models.get(id)
+   if(change==='replace')h.models.set(id,{...model});else if(change==='delete')h.models.delete(id);else model.filehash='changed-media'
+   h.d.querySelector('#one > button').setAttribute('data-icon','audio-pause');await tick();assert.equal(h.output().hidden,true);assert.equal(h.output().textContent,'');assert.equal(h.button().hidden,false);assert.equal(h.requests.length,1);assert.deepEqual(h.revoked,h.created)
+  }finally{h.close()}
+ }
+})
+
+test('a failed owned decode stays retryable in the same bubble and never opens a file picker',async()=>{
+ let count=0;const h=await mount({decode:async()=>{if(count++===0)throw Error('无法读取录音')}});try{
+  await h.click();assert.equal(h.requests.length,0);assert.equal(h.d.querySelectorAll('.rt-voice-translation button').length,1);assert.equal(h.button().textContent,'重试转中文');await h.click()
+  assert.equal(h.requests.length,1);assert.equal(h.pickers.length,0);assert.equal(h.output().textContent,answer.translation);assert.deepEqual(h.reads,['blob:https://web.whatsapp.com/one','blob:https://web.whatsapp.com/one']);assert.equal(h.created.length,0)
  }finally{h.close()}
 })
 
@@ -221,15 +249,15 @@ test('voice deletion on a connected same-ID row removes completed text and the o
  }finally{h.close()}
 })
 
-test('removing or replacing the selected voice control cancels file work even while row and message ID stay unchanged',async()=>{
- for(const phase of ['picker','decode','translate']){
-  const gate=deferred<any>(),h=await mount({html:row('one','123',false),chooseFile:phase==='picker'?()=>{}:selectFile,...(phase==='decode'?{decode:()=>gate.promise}:phase==='translate'?{translate:()=>gate.promise}:{})});try{
+test('removing or replacing the selected voice control cancels model work even while row and message ID stay unchanged',async()=>{
+ for(const phase of ['model','decode','translate']){
+  const gate=deferred<any>(),h=await mount({html:row('one','123',false),models:true,...(phase==='model'?{modelDownload:()=>gate.promise}:phase==='decode'?{decode:()=>gate.promise}:{translate:()=>gate.promise})});try{
    await h.click();const oldControl=h.d.querySelector('#one > button');oldControl.remove();await tick()
-   if(phase==='picker')selectFile(h.pickers[0],h.w);else gate.resolve(answer);await tick()
+   gate.resolve(answer);await tick()
    assert.equal(h.d.querySelector('#one .rt-voice-translation'),null);assert.equal(h.requests.length,phase==='translate'?1:0);assert.deepEqual(h.revoked,h.created);assert.doesNotMatch(h.d.querySelector('#one').textContent,/I will call tomorrow|我明天打电话/)
   }finally{h.close()}
  }
- const gate=deferred(),h=await mount({html:row('one','123',false),chooseFile:selectFile,translate:()=>gate.promise});try{
+ const gate=deferred(),h=await mount({html:row('one','123',false),models:true,translate:()=>gate.promise});try{
   await h.click();const button=h.d.querySelector('#one > button');button.replaceWith(button.cloneNode(true));await tick();gate.resolve(answer);await tick();assert.equal(h.output().hidden,true);assert.equal(h.button().disabled,false);assert.deepEqual(h.revoked,h.created)
  }finally{h.close()}
 })
@@ -272,27 +300,27 @@ test('a late core bootstrap failure remains fail-closed on a second injection ev
 
 const opaqueRow=(id='3EB0000000000000000001',domId='one')=>`<div id="${domId}" data-id="${id}"><div role="button" aria-label="Play voice note"></div></div>`
 test('opaque official message IDs have separate stable voice identities without deriving a peer from the header name',async()=>{
- const h=await mount({html:opaqueRow()+opaqueRow('3EB0000000000000000002','two'),chooseFile:selectFile});try{
+ const h=await mount({html:opaqueRow()+opaqueRow('3EB0000000000000000002','two'),models:true});try{
   assert.equal(h.d.querySelectorAll('.rt-voice-translation').length,2);await h.click();await h.click('two');assert.equal(h.requests.length,2)
   assert.deepEqual(h.requests.map((p:any)=>[p.conversationId,p.messageId]),[['whatsapp-message:3EB0000000000000000001','voice:whatsapp-message:3EB0000000000000000001'],['whatsapp-message:3EB0000000000000000002','voice:whatsapp-message:3EB0000000000000000002']]);assert.equal(h.output().hidden,false);assert.equal(h.output('two').hidden,false);assert.equal(h.plays,0)
  }finally{h.close()}
 })
 
 test('legacy peer IDs and opaque IDs coexist without a generated container swallowing either voice entry',async()=>{
- const h=await mount({html:'<div data-id="generated-wrapper">'+row()+opaqueRow('3EB0000000000000000002','two')+'</div>',chooseFile:selectFile});try{
+ const h=await mount({html:'<div data-id="generated-wrapper">'+row()+opaqueRow('3EB0000000000000000002','two')+'</div>',models:true});try{
   assert.equal(h.d.querySelectorAll('.rt-voice-translation').length,2);await h.click();await h.click('two');assert.equal(h.requests.length,2);assert.equal(h.requests[0].conversationId,'peer:123@c.us');assert.equal(h.requests[1].conversationId,'whatsapp-message:3EB0000000000000000002');assert.equal(h.output('two').textContent,answer.translation)
  }finally{h.close()}
 })
 
 test('opaque-ID retries retain exact identity and never merge different same-text voice rows',async()=>{
- let attempts=0;const h=await mount({html:opaqueRow(),chooseFile:selectFile,translate:()=>{if(!attempts++)throw Error('识别暂时繁忙');return answer}});try{
+ let attempts=0;const h=await mount({html:opaqueRow(),models:true,translate:()=>{if(!attempts++)throw Error('识别暂时繁忙');return answer}});try{
   await h.click();assert.equal(h.button().disabled,false);await h.click();assert.equal(h.requests.length,2);assert.equal(h.requests[0].messageId,h.requests[1].messageId);assert.equal(h.requests[0].conversationId,h.requests[1].conversationId);assert.deepEqual(h.requests[0].bytes,h.requests[1].bytes)
  }finally{h.close()}
 })
 
 test('opaque row recycling, same-name chat replacement, and A-B-A identity changes all reject late bilingual results',async()=>{
  for(const change of [(h:any)=>h.d.querySelector('#one').dataset.id='3EB0000000000000000002',(h:any)=>{const node=h.d.querySelector('#one');node.dataset.id='3EB0000000000000000002';node.dataset.id='3EB0000000000000000001'},(h:any)=>{const header=h.d.querySelector('header');header.replaceWith(header.cloneNode(true))}]){
-  const gate=deferred(),h=await mount({html:opaqueRow(),chooseFile:selectFile,translate:()=>gate.promise});try{
+  const gate=deferred(),h=await mount({html:opaqueRow(),models:true,translate:()=>gate.promise});try{
    await h.click();change(h);await tick();gate.resolve(answer);await tick();assert.equal(h.output().hidden,true);assert.equal(h.button().disabled,false);assert.doesNotMatch(h.d.querySelector('#one').textContent,/我明天打电话/);assert.deepEqual(h.revoked,h.created)
   }finally{h.close()}
  }
@@ -305,7 +333,7 @@ test('invalid opaque IDs and quoted opaque audio do not create voice controls',a
 test('a native player whose current source still points to previous media is not decoded under its updated source',async()=>{
  const h=await mount();try{
   const audio=h.d.querySelector('audio');Object.defineProperty(audio,'currentSrc',{configurable:true,value:'blob:https://web.whatsapp.com/previous'});audio.src='blob:https://web.whatsapp.com/replacement';await tick();await h.click()
-  assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.pickers.length,1);assert.match(h.status()!,/已取消选择/)
+  assert.equal(h.requests.length,0);assert.equal(h.reads.length,0);assert.equal(h.pickers.length,0);assert.match(h.status()!,/无法读取这条语音/)
   Object.defineProperty(audio,'currentSrc',{configurable:true,value:''});await h.click();assert.equal(h.requests.length,1);assert.deepEqual(h.reads,['blob:https://web.whatsapp.com/replacement'])
  }finally{h.close()}
 })
@@ -338,4 +366,15 @@ test('WhatsApp hidden in-flight voice still rejects removed-and-restored origina
   assert.equal(h.requests.length,1);assert.equal(h.output().hidden,true);assert.equal(h.button().disabled,false);
   Object.defineProperty(h.d,'hidden',{configurable:true,value:false});h.d.dispatchEvent(new h.w.Event('visibilitychange'));await tick();assert.equal(h.output().hidden,true);
  }finally{h.close()}
+})
+
+test('WhatsApp decode and reply deadlines restore inline retry and discard late completion',async()=>{
+ for(const phase of ['decode','reply']){
+  const gate=deferred<any>(),h=await mount({...phase==='decode'?{decode:()=>gate.promise}:{translate:()=>gate.promise},beforeEval:w=>{
+   const timer=w.setTimeout.bind(w);w.setTimeout=(fn:()=>void,ms:number)=>timer(fn,ms===(phase==='decode'?45000:330000)?5:ms)
+  }});try{
+   await h.click();assert.equal(h.button().disabled,false);assert.match(h.status()!,phase==='decode'?/解码超时/:/翻译超时/);assert.equal(h.requests.length,phase==='decode'?0:1)
+   gate.resolve(answer);await tick();assert.equal(h.output().hidden,true);assert.equal(h.pickers.length,0)
+  }finally{h.close()}
+ }
 })

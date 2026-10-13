@@ -6,7 +6,7 @@ import { mainHarness } from './main-harness.ts'
 const flush = async () => { for (let i = 0; i < 48; i++) await Promise.resolve() }
 function deferred() { let resolve!: (value?: any) => void, reject!: (error: Error) => void; const promise = new Promise<any>((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 
-function fixture(t: any) {
+function fixture(t: any, platform: 'whatsapp' | 'telegram' = 'whatsapp') {
   const views: FakeView[] = [], actions: any[] = [], health: any[] = [], proxyCalls: any[] = [], gates: ReturnType<typeof deferred>[] = []
   let configure: (session: any, proxy: any) => Promise<any> = async () => undefined
   class FakeContents extends EventEmitter {
@@ -44,8 +44,8 @@ function fixture(t: any) {
     '../../webSecurity': { installWebSecurity() {} }, './inject/script': { whatsappInjectionScript: '/* synthetic injection */' },
     '../../runtimeHealth': { markSwitch() {}, setAccountState: (...value: any[]) => health.push(value) }
   })
-  const { WhatsAppAdapter } = h.load('src/main/platforms/whatsapp/whatsAppAdapter.ts')
-  const adapter = new WhatsAppAdapter(); adapter.attachMainWindow(parent)
+  const Adapter = platform === 'whatsapp' ? h.load('src/main/platforms/whatsapp/whatsAppAdapter.ts').WhatsAppAdapter : h.load('src/main/platforms/telegram/TelegramAdapter.ts').TelegramAdapter
+  const adapter = new Adapter(); adapter.attachMainWindow(parent)
   adapter.setContentBounds({ x: 120, y: 180, width: 1080, height: 620 })
   t.after(async () => { adapter.resetViews(); for (const gate of gates) gate.resolve(); await flush() })
   return { adapter, views, actions, health, parent, proxyCalls, gate() { const gate = deferred(); gates.push(gate); return gate }, setConfigure(value: typeof configure) { configure = value } }
@@ -247,4 +247,19 @@ test('native WhatsApp composer accepts the full authorized translation length an
   const count = h.views[0].webContents.scripts.length
   assert.equal(await h.adapter.editComposer('a', { ...base, text: 'a'.repeat(20001), expected: '' }), false)
   assert.equal(h.views[0].webContents.scripts.length, count)
+})
+
+for(const platform of ['whatsapp','telegram'] as const)for(const pause of ['select','edit'] as const)test(`${platform} policy change during native ${pause} stops old Chinese dispatch`,async t=>{
+ const h=fixture(t,platform);(h.parent as any).isFocused=()=>true;await h.adapter.focus('a');await flush()
+ const gate=h.gate();let entered=false,commits=0
+ h.views[0].webContents.execute=async script=>{
+  if(script.includes('__RT_SEND_SELECT__')){if(pause==='select'){entered=true;await gate.promise}return {text:'中文原稿'}}
+  if(script.includes('__RT_SEND_COMMIT__')){commits++;return {confirmed:true}}
+  return undefined
+ }
+ h.adapter.editComposer=async()=>{if(pause==='edit'){entered=true;await gate.promise}return true}
+ const task={id:'policy-test',accountId:'a',conversationId:'conversation',targetKey:'peer:a',request:{text:'中文原稿',targetLanguage:'en'},translated:'中文原稿',blockChinese:false}
+ const result=h.adapter.submitTask(task,()=>true);const rejected=assert.rejects(result,/草稿|译文|窗口/)
+ await flush();assert.equal(entered,true);await h.adapter.invalidateSendPolicy('a');gate.resolve();await rejected;assert.equal(commits,0)
+ assert.ok(h.views[0].webContents.scripts.some(script=>script.includes('__RT_SEND_INVALIDATE__')))
 })

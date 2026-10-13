@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto'
 import type { TranslationRequest, Platform } from '../types'
 import { hasSignalMedia, mediaIntent, type SignalPayload } from '../../shared/signalMedia'
-import { alreadyInTargetLanguage, hasBlockedChinese } from './outgoingPolicy'
+import { alreadyInTargetLanguage, assertOutgoingSendPolicy, chineseOriginalPassThrough } from './outgoingPolicy'
 import { validateTranslation } from './translationValidation'
 
 export type SendState = 'draft' | 'translating' | 'ready' | 'submitting' | 'uncertain' | 'sent' | 'cancelled'
@@ -96,14 +96,21 @@ export class SendTasks {
       if (!owner || !input.accountId || !input.conversationId || (!input.request.text.trim() && !(input.platform === 'signal' && hasSignalMedia(input.signalPayload)))) {
         throw new Error('无法确认发送账号、对话或草稿，已阻止发送。')
       }
-      const text = input.request.text.trim()
-      const replay = input.intentId && data.tasks.find(task => task.owner === owner && task.intentId === input.intentId)
+      // Plain Chinese is an intentional raw send. Preserve every user-entered
+      // space/newline and never put it through a translation or billing request.
+      const rawChinese = chineseOriginalPassThrough(input.request.text, input.blockChinese)
+      const text = rawChinese ? input.request.text : input.request.text.trim()
+      input = { ...input, translate: rawChinese ? false : input.translate }
+      const policyMatches = (task: SendTask) => (task.blockChinese !== false) === (input.blockChinese !== false) && task.translate === input.translate
+      const replay = input.intentId && [...data.tasks].reverse().find(task => task.owner === owner && task.intentId === input.intentId && task.state !== 'cancelled')
       if (replay) {
         if (replay.platform !== input.platform || replay.accountId !== input.accountId || replay.conversationId !== input.conversationId
-          || !sameTarget(replay, input.targetKey) || replay.signalAccount !== input.signalAccount || replay.recipient !== input.recipient || replay.request.text !== text || mediaIntent(replay.signalPayload) !== mediaIntent(input.signalPayload)) {
+          || !sameTarget(replay, input.targetKey) || replay.signalAccount !== input.signalAccount || replay.recipient !== input.recipient
+          || (replay.request.text !== text && (policyMatches(replay) || replay.request.text.trim() !== text.trim())) || mediaIntent(replay.signalPayload) !== mediaIntent(input.signalPayload)) {
           throw new Error('发送操作与已保存的消息不一致，请重新编辑后发送。')
         }
-        return replay
+        if (policyMatches(replay) || ['sent', 'submitting', 'uncertain'].includes(replay.state)) return replay
+        replay.state = 'cancelled'; replay.updatedAt = Date.now()
       }
       const unresolved = [...data.tasks].reverse().find(task => task.owner === owner
         && ['uncertain', 'submitting'].includes(task.state) && task.platform === input.platform
@@ -119,7 +126,8 @@ export class SendTasks {
         && task.request.text === text && mediaIntent(task.signalPayload) === mediaIntent(input.signalPayload))
       // Incomplete tasks retain their original language and context, even after
       // renderer reloads or new messages arriving while an API response is lost.
-      if (previous) return previous
+      if (previous && policyMatches(previous)) return previous
+      if (previous) { previous.state = 'cancelled'; previous.updatedAt = Date.now() }
       const id = `send-${randomUUID()}`
       const now = Date.now()
       const task: SendTask = { ...structuredClone(input), id, owner, state: 'draft',
@@ -169,16 +177,25 @@ export class SendTasks {
       if (task.state === 'sent') return task
       if (task.translated !== undefined) return task
       if (['uncertain','submitting'].includes(task.state)) throw new Error(uncertainSendMessage)
-      await this.update(owner, id, { state: 'translating' })
+      await this.transaction(data => {
+        const current = this.owned(data, owner, id)
+        if (current.state === 'cancelled') throw new Error('此任务已取消，请按当前设置重新发送。')
+        if (['sent','submitting','uncertain'].includes(current.state)) throw new Error(uncertainSendMessage)
+        Object.assign(current, { state: 'translating', updatedAt: Date.now() })
+      })
       try {
-        const translated = task.translate && !alreadyInTargetLanguage(task.request) ? await run(task.request) : task.request.text
+        const translated = task.translate && !chineseOriginalPassThrough(task.request.text, task.blockChinese) && !alreadyInTargetLanguage(task.request) ? await run(task.request) : task.request.text
         if (!translated.trim() && !hasSignalMedia(task.signalPayload)) throw new Error('翻译结果为空，草稿已保留。')
-        const ready = await this.update(owner, id, { translated, state: 'ready' })
+        const ready = await this.transaction(data => {
+          const current = this.owned(data, owner, id)
+          if (current.state === 'cancelled') throw new Error('中文发送设置或原任务已变化，译文不会自动发送。')
+          return Object.assign(current, { translated, state: 'ready' as const, updatedAt: Date.now() })
+        })
         if (!authorized()) throw new Error('登录状态已变化，译文已保存但未发送。')
         return ready
       } catch (error) {
         const latest = await this.get(owner, id)
-        if (latest.translated === undefined) await this.update(owner, id, { state: 'draft' })
+        if (latest.translated === undefined && latest.state !== 'cancelled') await this.update(owner, id, { state: 'draft' })
         throw error
       }
     })().finally(() => { this.translations.delete(key) })
@@ -197,15 +214,18 @@ export class SendTasks {
       if (task.state === 'cancelled') throw new SendNotStartedError('此任务已取消。')
       if (task.state === 'uncertain' || task.state === 'submitting') throw new Error(uncertainSendMessage)
       if (task.translated === undefined) throw new SendNotStartedError('译文尚未确认，草稿已保留。')
-      if (hasBlockedChinese(task.translated, task.request.targetLanguage)) {
-        throw new SendNotStartedError('结果仍包含中文，已阻止发送并保留草稿。')
-      }
+      try { assertOutgoingSendPolicy(task.request.text, task.translated, task.blockChinese, task.blockChinese) }
+      catch (error) { throw new SendNotStartedError((error as Error).message) }
       if (task.translate && task.translated.trim()) {
         try { validateTranslation(task.request, task.translated) }
         catch (error) { throw new SendNotStartedError((error as Error).message) }
       }
       // A crash after this write is treated as uncertain; never auto-resend.
-      await this.update(owner, id, { state: 'submitting' })
+      await this.transaction(data => {
+        const current = this.owned(data, owner, id)
+        if (current.state !== 'ready' || current.translated !== task.translated) throw new SendNotStartedError('发送任务或译文已变化，原稿已保留。')
+        Object.assign(current, { state: 'submitting', updatedAt: Date.now() })
+      })
       try {
         if (!authorized()) throw new SendNotStartedError('登录状态已变化，已阻止发送。')
         const result = await run(task)

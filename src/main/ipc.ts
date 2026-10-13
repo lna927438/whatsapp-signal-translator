@@ -34,7 +34,7 @@ import { signalNeedsTranslation, type SignalPayload } from '../shared/signalMedi
 import { SignalDesktopHost } from './platforms/signal/signalDesktopHost'
 import { validateTranslation } from './translation/translationValidation'
 import { reusableDisplayOriginal } from '../shared/translationResult'
-import { alreadyInTargetLanguage, hasBlockedChinese } from './translation/outgoingPolicy'
+import { alreadyInTargetLanguage, blocksChineseSend, chineseOriginalPassThrough, shouldTranslateOutgoing, assertOutgoingSendPolicy } from './translation/outgoingPolicy'
 import { accountUnreadSnapshot, updateAccountUnread, clearAccountUnread, clearAccountNotifications } from './desktopRuntime'
 import { join } from 'path'
 import { VoiceRecognition } from './translation/voiceRecognition'
@@ -245,19 +245,24 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       messageId: input.messageId, bytes: input.bytes, authorized: page.authorized,
       quality: runtime.translationQuality, providerPreference: runtime.providerPreference })
   })
+  let sendPolicyRevision = 0
+  let sendPolicyChanging = 0
   const embeddedVoiceTranslation = new GoogleVoiceEmbeddedTranslation<Electron.IpcMainInvokeEvent>({
     trustedPage:event=>googleVoice.trustedPage(event),
     translate:createGoogleVoiceTranslator(translator,outgoingCredit,async accountId=>{
+      if(sendPolicyChanging)throw new Error('中文发送设置正在保存，请稍后重试。')
       const {owner,authorized}=taskIdentity(),base=await settings.runtime(),record=await googleVoiceRecords.get(owner,accountId)
       const providerPreference=record.translationProvider ? await requestChannelPreference(record.translationProvider) : undefined
       if(!authorized())throw new Error('登录状态已变化。')
+      if(sendPolicyChanging)throw new Error('中文发送设置正在保存，请稍后重试。')
       return {...base,translationProvider:record.translationProvider||'deepseek',providerPreference}
-    },new GoogleVoiceDispatchLedger(new JsonStore<GoogleVoiceDispatchData>('google-voice-dispatch-v1.json',{records:[]},true))),
+    },new GoogleVoiceDispatchLedger(new JsonStore<GoogleVoiceDispatchData>('google-voice-dispatch-v1.json',{records:[]},true)),()=>sendPolicyRevision),
     storage:new JsonStore<GoogleVoiceEmbeddedDraftData>('google-voice-embedded-drafts-v1.json',{records:{}},true)
   })
   // This channel has its own registered-webContents, main-frame and owner check.
   // Google pages never receive the trusted shell's general IPC permissions.
   electronIpcMain.handle('google-voice:translate-request',(event,message)=>embeddedVoiceTranslation.request(event,message))
+  electronIpcMain.handle('google-voice:context-ack',(event,token)=>googleVoice.acknowledgeContext(event,token))
   electronIpcMain.handle('google-voice:unread',(event,message)=>{try{return googleVoice.observeUnread(event,message)}catch{return false}})
   electronIpcMain.handle('google-voice:runtime-health',(event,message)=>{try{return googleVoice.observeRuntimeHealth(event,message)}catch{return false}})
   ipcMain.handle('google-voice:list',event=>{requireMain(event);return googleVoice.list()})
@@ -326,7 +331,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       targetLanguage: contact?.language || account.targetLanguage || base.targetLanguage,
       receiveAutoTranslate: account.receiveAutoTranslate ?? base.receiveAutoTranslate,
       sendAutoTranslate: account.sendAutoTranslate ?? base.sendAutoTranslate,
-      blockChineseSend: true,
+      blockChineseSend: account.blockChineseSend ?? base.blockChineseSend,
       groupTranslate: account.groupTranslate ?? base.groupTranslate,
       fontSize: Number(account.fontSize || base.fontSize || 13),
       translationColor: account.translationColor || base.translationColor || '#c8d4e4',
@@ -351,6 +356,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     () => cloudRequest('/api/notices'), value => postNoticeReceipt(String(onlineIdentity?.accessToken || ''), value))
   const signalDesktop = new SignalDesktopHost(mainWindow, () => onlineIdentity?.userId || '', async (accountId, raw, startedAt) => {
     const { owner, authorized } = taskIdentity()
+    if(raw.direction==='outgoing'&&sendPolicyChanging)throw new Error('中文发送设置正在保存，请稍后重试。')
     const record = (await accounts.list()).find(item => item.id === accountId && item.platform === 'signal' && item.signalEngine === 'desktop' && item.runtimeMode !== 'paused')
     if (!authorized()) throw new Error('登录状态已变化。')
     if (!record) throw new Error('Signal 账号不可用。')
@@ -362,12 +368,22 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       if (raw.expiresAt <= Date.now()) throw new Error('此消息已删除或过期，不能再次翻译。')
     }
     if (raw.direction === 'display') return { enabled:runtime.translationsVisible, fontSize:runtime.fontSize, color:runtime.translationColor, uiLanguage:runtime.uiLanguage }
+    if(raw.dispatchPolicyOnly){
+      if(sendPolicyChanging)throw new Error('中文发送设置正在保存，请稍后重试。')
+      const current=await accountRuntime(accountId,conversationId)
+      if(!authorized())throw new Error('登录状态已变化，消息未发送。')
+      if(sendPolicyChanging)throw new Error('中文发送设置正在保存，请稍后重试。')
+      if(blocksChineseSend(raw.text,current.blockChineseSend))throw new Error('仍含中文原文，已阻止发送。请开启发送翻译后重试。')
+      return {authorized:true,text:raw.text}
+    }
     if (raw.authorizationOnly) {
       const { request: original, text } = await translator.restoreSignalOutgoing(raw.requestId!, accountId, conversationId, raw.id, raw.text, raw.editTimestamp)
       if (!authorized()) throw new Error('登录状态已变化。')
-      if (hasBlockedChinese(text, original.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
+      assertOutgoingSendPolicy(original.text, text, runtime.blockChineseSend, runtime.blockChineseSend)
       validateTranslation(original, text)
       await outgoingCredit.check(owner, original, true, true)
+      if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
+      assertOutgoingSendPolicy(original.text, text, runtime.blockChineseSend, (await accountRuntime(accountId, conversationId)).blockChineseSend)
       if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
       return { authorized: true, text, requestId: original.requestId }
     }
@@ -376,12 +392,15 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     let request: import('./types').TranslationRequest = { text: raw.text, accountId, conversationId, messageId: raw.id, requestId, sourceLanguage: outgoing ? runtime.localLanguage : 'auto', targetLanguage: outgoing ? runtime.targetLanguage : runtime.localLanguage, quality: runtime.translationQuality, providerPreference: runtime.providerPreference }
     if (outgoing && raw.editTimestamp !== undefined) request.signalEditTimestamp = raw.editTimestamp
     if(raw.text.includes('\ufffc')) request.quality={...request.quality,glossary:[{source:'\ufffc',target:'\ufffc'},...(request.quality?.glossary||[]).filter(item=>item.source!=='\ufffc')]}
-    if (outgoing) request = await translator.preserveOutgoingRequest(request)
-    else request = await translator.preserveIncomingRequest(request)
+    // An explicit raw-Chinese send does not create a paid translation receipt.
+    if (outgoing && !chineseOriginalPassThrough(raw.text, runtime.blockChineseSend)) request = await translator.preserveOutgoingRequest(request)
+    else if (!outgoing) request = await translator.preserveIncomingRequest(request)
     if (!authorized()) throw new Error('登录状态已变化。')
     if (outgoing) {
-      if (!runtime.sendAutoTranslate || !signalNeedsTranslation(raw.text) || alreadyInTargetLanguage({...request,quality:runtime.translationQuality,providerPreference:runtime.providerPreference})) {
-        if (hasBlockedChinese(raw.text, runtime.targetLanguage)) throw new Error('仍含中文原文，已阻止发送。请开启发送翻译后重试。')
+      if (!shouldTranslateOutgoing(raw.text, runtime) || !signalNeedsTranslation(raw.text) || alreadyInTargetLanguage({...request,quality:runtime.translationQuality,providerPreference:runtime.providerPreference})) {
+        if (blocksChineseSend(raw.text, runtime.blockChineseSend)) throw new Error('仍含中文原文，已阻止发送。请开启发送翻译后重试。')
+        assertOutgoingSendPolicy(raw.text, raw.text, runtime.blockChineseSend, (await accountRuntime(accountId, conversationId)).blockChineseSend)
+        if (!authorized()) throw new Error('登录状态已变化。')
         return { enabled: false }
       }
       request = await translator.prepareOutgoingRequest(request)
@@ -390,9 +409,11 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
       if (!authorized()) throw new Error('登录状态已变化。')
       const text = await translator.translate(request)
       if (!authorized()) throw new Error('登录状态已变化。')
-      if (hasBlockedChinese(text, runtime.targetLanguage)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
+      if (blocksChineseSend(text, runtime.blockChineseSend)) throw new Error('译文仍含中文，已阻止发送并保留草稿。')
       validateTranslation(request, text)
       await outgoingCredit.check(owner, request, true, true)
+      if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
+      assertOutgoingSendPolicy(raw.text, text, runtime.blockChineseSend, (await accountRuntime(accountId, conversationId)).blockChineseSend)
       if (!authorized()) throw new Error('登录状态已变化，消息未发送。')
       return { enabled: true, text, requestId: request.requestId }
     }
@@ -515,7 +536,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const identity=taskIdentity()
     if (!['whatsapp', 'signal', 'telegram'].includes(args.platform)) throw new Error('不支持的应用类型。')
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
-    args = {...args, options:{...args.options,translationProvider:args.options?.translationProvider || (await settings.get()).translationProvider || 'deepseek'}}
+    const defaults = await settings.get()
+    args = {...args, options:{...args.options,blockChineseSend:args.options?.blockChineseSend ?? defaults.blockChineseSend ?? true,translationProvider:args.options?.translationProvider || defaults.translationProvider || 'deepseek'}}
     await requireSelectableChannel(args.options.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
     return accounts.add(args.platform, args.label, args.signalAccount, args.options)
@@ -525,7 +547,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const identity=taskIdentity()
     if (!['whatsapp', 'signal', 'telegram'].includes(args.platform)) throw new Error('不支持的应用类型。')
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
-    args = {...args, options:{...args.options,translationProvider:args.options?.translationProvider || (await settings.get()).translationProvider || 'deepseek'}}
+    const defaults = await settings.get()
+    args = {...args, options:{...args.options,blockChineseSend:args.options?.blockChineseSend ?? defaults.blockChineseSend ?? true,translationProvider:args.options?.translationProvider || defaults.translationProvider || 'deepseek'}}
     await requireSelectableChannel(args.options.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
     return accounts.addBatch(args.platform, args.label, args.count, args.options || {})
@@ -543,7 +566,15 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if(patch.translationProvider!==undefined && patch.translationProvider!==existing.translationProvider)await requireSelectableChannel(patch.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
     if (existing?.platform === 'signal' && patch.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
-    const updated = await accounts.update(id, patch)
+    const policyChange=patch.blockChineseSend !== undefined
+    if(policyChange){sendPolicyRevision++;sendPolicyChanging++}
+    let updated:import('./types').AccountRecord|undefined
+    try{
+      if(policyChange)await Promise.all([webAdapter(existing.platform)?.invalidateSendPolicy(id),existing.platform==='signal'?signalDesktop.invalidateSendPolicy(id):undefined])
+      if(!identity.authorized())throw new Error('登录状态已变化。')
+      updated=await accounts.update(id,patch)
+      if(policyChange)await webAdapter(existing.platform)?.invalidateSendPolicy(id)
+    }finally{if(policyChange)sendPolicyChanging--}
     if (patch.proxy !== undefined) webAdapter(existing.platform)?.remove(id)
     if (updated) await webAdapter(updated.platform)?.applyPreferences(id, updated)
     if (updated?.platform === 'signal') await signal.resumeReceiving()
@@ -730,7 +761,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (!authorized()) throw new Error('登录状态已变化。')
     return sendTasks.prepare(owner, { platform: input.platform, accountId: input.accountId, intentId: input.intentId,
       conversationId: input.conversationId, targetKey: input.targetKey, signalAccount: input.signalAccount, recipient: input.recipient,
-      signalPayload, translate: runtime.sendAutoTranslate && (input.platform !== 'signal' || signalNeedsTranslation(String(input.text || ''))), blockChinese: true,
+      signalPayload, translate: shouldTranslateOutgoing(String(input.text || ''), runtime) && (input.platform !== 'signal' || signalNeedsTranslation(String(input.text || ''))), blockChinese: runtime.blockChineseSend !== false,
       request: { text: String(input.text || ''), accountId: input.accountId, conversationId: input.conversationId,
         sourceLanguage: runtime.localLanguage, targetLanguage: runtime.targetLanguage, quality: runtime.translationQuality, providerPreference: runtime.providerPreference,
         context: input.platform === 'signal' ? signal.contextForTask(input.accountId, input.recipient || '') : input.context || [] } })
@@ -739,6 +770,8 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     const { owner, authorized } = taskIdentity()
     const original = await sendTasks.get(owner, id)
     assertTaskSender(event, original)
+    const runtime = await accountRuntime(original.accountId, original.conversationId)
+    if ((original.blockChinese !== false) !== (runtime.blockChineseSend !== false)) throw new Error('中文发送设置已变化，请重新发送原稿。')
     if (!['sent', 'uncertain', 'submitting'].includes(original.state) && original.translated !== undefined) await outgoingCredit.check(owner, original.request, original.translate)
     const task = await sendTasks.translate(owner, id, async request => {
       const retry = await translator.prepareOutgoingRequest(request)
@@ -769,7 +802,10 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     try {
     const result = await sendTasks.submit(owner, id, async task => {
       try {
+        const runtime = await accountRuntime(task.accountId, task.conversationId)
+        assertOutgoingSendPolicy(task.request.text, task.translated || '', task.blockChinese, runtime.blockChineseSend)
         await outgoingCredit.check(owner, task.request, task.translate, true)
+        assertOutgoingSendPolicy(task.request.text, task.translated || '', task.blockChinese, (await accountRuntime(task.accountId, task.conversationId)).blockChineseSend)
         accountStatus.assertAvailable()
         if (!authorized()) throw new Error('登录状态已变化。')
       } catch (error: any) { throw new SendNotStartedError(String(error?.message || error)) }
@@ -839,9 +875,22 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     return settings.publicSettings()
   })
   ipcMain.handle('settings:save', async (event, value) => { requireMain(event); await requireAuth(); const identity=taskIdentity(),previous = await settings.get();
+    value = { ...value, blockChineseSend: value?.blockChineseSend ?? previous.blockChineseSend ?? true }
     if(value?.translationProvider!==undefined && value.translationProvider!==previous.translationProvider)await requireSelectableChannel(value.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
-    try { applyDesktopOptions(value); await settings.save(value) } catch (error) { applyDesktopOptions(previous); throw error }
+    const chinesePolicyChanged = (value.blockChineseSend !== false) !== (previous.blockChineseSend !== false)
+    if (chinesePolicyChanged) { sendPolicyRevision++; sendPolicyChanging++ }
+    try {
+      if (chinesePolicyChanged) await Promise.all([whatsapp.invalidateSendPolicy(), telegram?.invalidateSendPolicy(), googleVoice.invalidateSendContext(), signalDesktop.invalidateSendPolicy()])
+      if(!identity.authorized())throw new Error('登录状态已变化。')
+      applyDesktopOptions(value); await settings.save(value)
+      if (chinesePolicyChanged) {
+        try { await accounts.setChineseSendPolicy(value.blockChineseSend !== false) }
+        catch (error) { await settings.save(previous); throw error }
+        await Promise.all([whatsapp.invalidateSendPolicy(), telegram?.invalidateSendPolicy()])
+      }
+    } catch (error) { applyDesktopOptions(previous); throw error }
+    finally { if(chinesePolicyChanged)sendPolicyChanging-- }
     mainWindow.webContents.send('settings:ui-language-changed', value.uiLanguage || 'system')
     setCloudRoute(value.cloudRoute); whatsapp.resumeTranslations(); telegram?.resumeTranslations(); signalDesktop.refresh(); googleVoice.invalidateContext(); return true })
   ipcMain.handle('translator:get-runtime-settings', async (_e, accountId?: string, conversationId?: string) => { await requireAuth(); return accountRuntime(accountId, conversationId) })

@@ -51,7 +51,7 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
         button.onclick = event => { event.preventDefault(); event.stopPropagation(); void run(state!); };
         panel.appendChild(button);
         const status = deps.document.createElement('div'); status.setAttribute('role', 'status'); status.style.cssText = 'padding-top:6px;white-space:pre-wrap';
-        status.textContent = state.result ? '已完成中英双译' : state.error || (item.ready ? '点击后在语音下方显示英文和中文。' : '请先用 Signal 下载这条语音，再点击转为中文。');
+        status.textContent = state.result ? '已完成中英双译' : state.error || (state.busy ? item.ready ? '正在识别并翻译语音…' : '正在读取这条语音…' : '点击后在语音下方显示英文和中文。');
         panel.appendChild(status);
         if (state.result) {
           button.hidden = true;
@@ -67,7 +67,6 @@ export function createSignalVoiceUi(deps: SignalVoiceDependencies) {
   async function run(state: State): Promise<void> {
     const item = state.item, generation = revision;
     if (state.busy || state.result || !allowed(item)) return;
-    if (!item.ready) { state.error = '请先下载语音，再重试。'; scan(); return; }
     const current = () => generation === revision && states.get(key(item)) === state && allowed(item);
     state.busy = true; state.error = ''; scan();
     try {

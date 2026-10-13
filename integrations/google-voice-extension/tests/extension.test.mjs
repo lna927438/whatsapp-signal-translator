@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { ExtensionBridge, SelectionTasks } from '../background-core.mjs'
-import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext, mediaValue, recipientContextValue, translationPayload, translatedValue, translatedTextValue } from '../protocol.mjs'
+import { NativeClient, NativeBusyError, HOST, isVoiceUrl, selectedContext, mediaValue, recipientContextValue, translationPayload, translatedValue, translatedTextValue, statusValue } from '../protocol.mjs'
 import { SendGuard, installSendInterception } from '../send-guard.mjs'
 
 const token = 'a'.repeat(64), code = 'b'.repeat(64), extensionId = 'kigfaejcipjibnmnpinplphfldjahknn'
@@ -209,6 +209,68 @@ test('Chinese output or disabled translation never reaches native send', async (
   for (const result of [{ enabled: true, text: 'Hello你好', requestId: 'gv-fixture' }, { enabled: false }]) {
     const s = guardSetup(); s.bridge.translate = async () => result
     await assert.rejects(s.guard.prepare()); assert.equal(s.sent(), 0); assert.equal(s.replaced(), 0)
+  }
+})
+
+test('an explicitly disabled Chinese switch permits only exact untranslated originals', async () => {
+  const s = guardSetup()
+  s.bridge.status = async () => ({ connected: true, sendAutoTranslate: true, targetLanguage: 'en-US', blockChineseSend: false })
+  s.bridge.translate = async payload => ({ enabled: true, text: payload.text, untranslated: true, requestId: 'send-gv-plain-fixture' })
+  const preview = await s.guard.prepare(); assert.equal(preview.text, '你好'); assert.equal(preview.untranslated, true)
+  await s.guard.confirm(); assert.equal(s.sent(), 1); assert.equal(s.snapshot.text, '你好')
+  const bad = guardSetup()
+  bad.bridge.status = s.bridge.status
+  await assert.rejects(bad.guard.prepare(), /发送原文/); assert.equal(bad.sent(), 0)
+})
+
+test('live Chinese policy is checked after editor settlement, including OFF-ON-OFF revisions', async () => {
+  for (const change of ['enabled', 'off-on-off', 'target', 'disconnected']) {
+    const s = guardSetup(), status = { connected: true, targetLanguage: 'en-US', blockChineseSend: false, sendPolicyRevision: 10 }
+    let statusReads = 0, authorizations = 0, finish
+    s.bridge.status = async () => { statusReads++; return { ...status } }
+    s.bridge.translate = async payload => { s.calls.push(payload); return { enabled: true, text: payload.text, untranslated: true, requestId: 'send-gv-live-policy' } }
+    s.bridge.authorize = async payload => { authorizations++; return { authorized: true, requestId: payload.requestId, attempt: 1 } }
+    s.adapter.settle = () => new Promise(resolve => { finish = resolve })
+    await s.guard.prepare(); const pending = s.guard.confirm()
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(typeof finish, 'function')
+    if (change === 'enabled') { status.blockChineseSend = true; status.sendPolicyRevision++ }
+    else if (change === 'off-on-off') status.sendPolicyRevision += 2
+    else if (change === 'target') status.targetLanguage = 'fr-FR'
+    else status.connected = false
+    finish(); await assert.rejects(pending, /设置或连接已变化/)
+    assert.equal(s.sent(), 0); assert.equal(s.snapshot.text, '你好'); assert.equal(s.guard.state, 'uncertain')
+    assert.equal(statusReads, 2); assert.equal(authorizations, 1); assert.equal(s.calls.length, 1)
+  }
+})
+
+test('late policy-read failure, navigation or invalidation never reaches the native button', async () => {
+  for (const change of ['failure', 'navigation', 'invalidation', 'edit']) {
+    const s = guardSetup(); let reads = 0, finish, fail
+    s.bridge.status = async () => ++reads === 1 ? { connected: true, targetLanguage: 'en-US' } : new Promise((resolve, reject) => { finish = resolve; fail = reject })
+    await s.guard.prepare(); const pending = s.guard.confirm()
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(typeof finish, 'function')
+    if (change === 'failure') fail(new Error('fixture status unavailable'))
+    else {
+      if (change === 'navigation') s.snapshot.conversationId = 'different-thread'
+      else if (change === 'invalidation') s.guard.invalidate()
+      else { s.snapshot.text = 'Changed draft'; s.snapshot.revision++ }
+      finish({ connected: true, targetLanguage: 'en-US' })
+    }
+    await assert.rejects(pending); assert.equal(s.sent(), 0)
+  }
+})
+
+test('status forwarding preserves only a bounded integer policy revision', () => {
+  assert.deepEqual(statusValue({ connected: true, blockChineseSend: false, sendPolicyRevision: 12, privateToken: 'never-forward' }), { connected: true, blockChineseSend: false, sendPolicyRevision: 12 })
+  for (const value of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1, '12', null]) assert.equal(statusValue({ connected: true, sendPolicyRevision: value }).sendPolicyRevision, undefined)
+})
+
+test('enabled Chinese switch rejects Han even with a Chinese or Japanese target', async () => {
+  for (const targetLanguage of ['zh-CN', 'ja']) {
+    const s = guardSetup()
+    s.bridge.status = async () => ({ connected: true, sendAutoTranslate: true, targetLanguage, blockChineseSend: true })
+    s.bridge.translate = async () => ({ enabled: true, text: '中文𠀀', requestId: 'gv-fixture' })
+    await assert.rejects(s.guard.prepare(), /中文/); assert.equal(s.sent(), 0)
   }
 })
 test('conversation changes or draft edits during translation are blocked', async () => {

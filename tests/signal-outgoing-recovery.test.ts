@@ -16,21 +16,34 @@ async function fixture(input=request,translation=bad){
   return {...h,engine,restore:()=>engine.restoreSignalOutgoing(input.requestId,input.accountId,input.conversationId,input.messageId,input.text),close:()=>rmSync(h.directory,{recursive:true,force:true})};
 }
 
-function nativeAuthorization(f:Awaited<ReturnType<typeof fixture>>,input=request,balance=100){
+function nativeAuthorization(f:Awaited<ReturnType<typeof fixture>>,input=request,balance=100,blockChineseSend=! /^(zh|ja)(-|$)/.test(input.targetLanguage)){
   const source=readFileSync(new URL('../src/main/ipc.ts',import.meta.url),'utf8');
   const start=source.indexOf('  const signalDesktop = new SignalDesktopHost('),end=source.indexOf("  ipcMain.handle('signal-desktop:status'");assert.ok(start>0&&end>start);
   let handler:Function=()=>assert.fail('Native handler not captured'),creditReads=0,settlementReads=0,authorized=true;
   const {OutgoingCredit}=f.load('src/main/translation/outgoingCredit.ts');
   const outgoingCredit=new OutgoingCredit(()=> 'owner',async()=>{creditReads++;return{user:{id:'owner'},profile:{status:'active'},wallet:{balance,reserved_characters:0}}},async(id:string)=>{settlementReads++;return{state:'completed',response:{requestId:id,sourceCharacters:Array.from(input.text).length,translation:'Original paid result'}}});
   runInNewContext(ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{
-    SignalDesktopHost:class{constructor(_window:any,_owner:any,translate:Function){handler=translate}},mainWindow:{},onlineIdentity:{userId:'owner'},
+    SignalDesktopHost:class{constructor(_window:any,_owner:any,translate:Function){handler=translate}},mainWindow:{},onlineIdentity:{userId:'owner'},sendPolicyChanging:0,
     taskIdentity:()=>({owner:'owner',authorized:()=>authorized}),accounts:{list:async()=>[{id:input.accountId,platform:'signal',signalEngine:'desktop'}]},
-    accountRuntime:async()=>({}),translator:f.engine,outgoingCredit,
-    hasBlockedChinese:f.load('src/main/translation/outgoingPolicy.ts').hasBlockedChinese,
+    // These legacy recovery fixtures intentionally translate English into a
+    // Chinese target; the current explicit send switch must be disabled.
+    accountRuntime:async()=>({blockChineseSend}),translator:f.engine,outgoingCredit,
+    ...f.load('src/main/translation/outgoingPolicy.ts'),
     validateTranslation:f.load('src/main/translation/translationValidation.ts').validateTranslation,
   });
   return {invoke:(patch:any={})=>handler(input.accountId,{id:input.messageId,conversationId:input.conversationId.replace('signal-desktop:',''),direction:'outgoing',authorizationOnly:true,requestId:input.requestId,text:input.text,translated:bad,...patch},0),creditReads:()=>creditReads,settlementReads:()=>settlementReads,revoke:()=>{authorized=false}};
 }
+
+test('native retry cannot send an old English translation of Chinese after the user switches to original-only Chinese',async()=>{
+ const input={...request,text:'请确认明天的会议。',sourceLanguage:'zh-CN',targetLanguage:'en-US'},translated='Please confirm the meeting tomorrow.'
+ const f=await fixture(input,translated)
+ try{
+  const native=nativeAuthorization(f,input,100,false)
+  await assert.rejects(native.invoke({translated}),/发送原文/)
+  assert.equal(native.creditReads(),0);assert.equal(native.settlementReads(),0)
+  await assert.rejects(native.invoke({text:translated,translated}),/尚未核实/)
+ }finally{f.close()}
+})
 
 test('native authorization recovers a free correction while retaining original charged receipt and request identity',async()=>{
   const f=await fixture();try{

@@ -35,6 +35,16 @@ export function attachHelloDog(window: BrowserWindow): void {
   let refreshId: string | undefined;
   let restartId: string | undefined;
   let quickReplyId: string | undefined;
+  const sendPolicyPending = new Map<string, { frame: typeof window.webContents.mainFrame; timer: ReturnType<typeof setTimeout> }>();
+  ipcMain.on('hellodog:send-policy-invalidated', (event, id: unknown) => {
+    if (typeof id !== 'string') return;
+    const pending = sendPolicyPending.get(id);
+    if (!pending || event.sender !== window.webContents || event.senderFrame !== pending.frame
+      || pending.frame !== window.webContents.mainFrame || pending.frame.detached) return;
+    clearTimeout(pending.timer); sendPolicyPending.delete(id);
+    process.send?.({ channel: 'hellodog', type: 'send-policy-invalidated', id });
+  });
+  window.once('closed', () => { for (const item of sendPolicyPending.values()) clearTimeout(item.timer); sendPolicyPending.clear(); });
   ipcMain.on('hellodog:draft-inserted',(event,result:any)=>{
     if(event.sender.id!==window.webContents.id || !quickReplyId || result?.id!==quickReplyId)return;
     process.send?.({channel:'hellodog',type:'draft-inserted',id:quickReplyId,error:Boolean(result.error)});
@@ -102,6 +112,12 @@ export function attachHelloDog(window: BrowserWindow): void {
     }
     if(raw.type==='visibility') { if(raw.visible) window.showInactive(); else window.hide(); }
     if(raw.type==='refresh') window.webContents.send('hellodog:refresh');
+    if(raw.type==='send-policy-invalidate' && typeof raw.id==='string' && /^[a-f0-9-]{36}$/.test(raw.id) && !window.webContents.isDestroyed()) {
+      const old = sendPolicyPending.get(raw.id); if (old) clearTimeout(old.timer);
+      const id = raw.id;
+      sendPolicyPending.set(id, { frame: window.webContents.mainFrame, timer: setTimeout(() => sendPolicyPending.delete(id), 2500) });
+      window.webContents.send('hellodog:send-policy-invalidate', id);
+    }
     if(raw.type==='reload' && typeof raw.id==='string') {
       if(refreshId) finishRefresh(true);
       refreshId=raw.id;

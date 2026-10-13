@@ -23,3 +23,24 @@ export function hasBlockedChinese(text: string, targetLanguage: string): boolean
   // Chinese and Japanese are valid requested targets, even with this guard on.
   return !/^(zh|ja)(?:-|$)/i.test(targetLanguage) && /\p{Script=Han}/u.test(text)
 }
+
+/** The user's send switch is stricter than language validation: no Han may
+ * leave while enabled, including names, captions and Chinese/Japanese targets.
+ * Keep this self-contained because the web send guards serialize it. */
+export function blocksChineseSend(text: string, enabled = true): boolean {
+  return enabled !== false && /\p{Script=Han}/u.test(text)
+}
+
+export function chineseOriginalPassThrough(text: string, blockChineseSend: boolean): boolean {
+  return blockChineseSend === false && /\p{Script=Han}/u.test(text)
+}
+
+export function shouldTranslateOutgoing(text: string, preferences: { sendAutoTranslate: boolean; blockChineseSend: boolean }): boolean {
+  return preferences.sendAutoTranslate && !chineseOriginalPassThrough(text, preferences.blockChineseSend)
+}
+
+export function assertOutgoingSendPolicy(original: string, output: string, expectedBlock: boolean, currentBlock: boolean): void {
+  if ((expectedBlock !== false) !== (currentBlock !== false)) throw new Error('中文发送设置已变化，原稿已保留，请重新发送。')
+  if (blocksChineseSend(output, currentBlock)) throw new Error('结果仍包含中文，已阻止发送并保留草稿。')
+  if (chineseOriginalPassThrough(original, currentBlock) && output !== original) throw new Error('已关闭禁止发送中文，请重新发送原文。')
+}

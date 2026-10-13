@@ -207,13 +207,21 @@ export class TelegramAdapter {
     return work
   }
 
+  private sendPolicyRevision = 0
+  async invalidateSendPolicy(accountId?: string): Promise<void> {
+    this.sendPolicyRevision++
+    await Promise.all([...this.views.entries()].filter(([id, view]) => (!accountId || id === accountId) && !view.webContents.isDestroyed()).map(([,view]) =>
+      boundedOperation(view.webContents.executeJavaScript('window.__RT_SEND_INVALIDATE__?.()'), 1500, '聊天页面暂未响应，发送设置尚未更改，请稍后重试。')))
+  }
+
   async submitTask(task: SendTask, authorized: () => boolean): Promise<{ queued: true }> {
     const view = this.views.get(task.accountId)
-    const canSend = () => authorized() && this.activeId === task.accountId && !this.overlayOpen
+    const policyRevision = this.sendPolicyRevision
+    const canSend = () => policyRevision === this.sendPolicyRevision && authorized() && this.activeId === task.accountId && !this.overlayOpen
       && Boolean(this.mainWindow?.isFocused()) && view && !view.webContents.isDestroyed()
     if (!canSend() || !view) throw new SendNotStartedError('发送窗口已切换，原对话草稿已保留。')
     const args = JSON.stringify({ id: task.id, conversationId: task.conversationId,
-      targetKey: task.targetKey, original: task.request.text, translated: task.translated, targetLanguage: task.request.targetLanguage })
+      targetKey: task.targetKey, original: task.request.text, translated: task.translated, targetLanguage: task.request.targetLanguage, blockChinese: task.blockChinese !== false })
     let dispatched = false
     try {
       // Page guard selects only the snapshotted editor. Input is briefly locked

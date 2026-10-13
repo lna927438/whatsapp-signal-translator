@@ -42,6 +42,32 @@ test('WhatsApp burst translates concurrently, dispatches in order and preserves 
  }finally{h.dom.window.close()}
 })
 
+test('WhatsApp switch invalidation during the final native commit wait prevents Chinese dispatch',async()=>{
+ const h=setup();try{
+  const prepare=h.api.prepareQueuedSend;h.api.prepareQueuedSend=async(payload:any)=>{const task=await prepare(payload);return Object.assign(task,{blockChinese:false,translate:false})}
+  let receipt:any;const commit=h.win.__RT_SEND_COMMIT__
+  h.win.__RT_SEND_COMMIT__=async(args:any)=>{const pending=commit(args);h.win.__RT_SEND_INVALIDATE__();receipt=await pending;return receipt}
+  h.type('中文原稿');h.enter();await until(()=>h.translations.length===1);h.gates.get('send-1')!.resolve('中文原稿')
+  await until(()=>Boolean(receipt));assert.equal(receipt.dispatched,false);assert.equal(h.submits.length,0);assert.equal(h.win.document.querySelector('.message-out'),null)
+ }finally{h.dom.window.close()}
+})
+
+test('WhatsApp queue dispatches Chinese original unchanged when the main-owned task explicitly disables the block',async()=>{
+ const h=setup()
+ try{
+  const prepare=h.api.prepareQueuedSend
+  h.api.prepareQueuedSend=async(payload:any)=>{const task=await prepare(payload);task.blockChinese=false;task.translate=false;return task}
+  h.api.getRuntimeSettings=async()=>({receiveAutoTranslate:false,blockChineseSend:false,previewSend:true})
+  h.type('你好 Alice\n保留  间隔');h.enter();await until(()=>h.translations.length===1)
+  h.gates.get('send-1')!.resolve('你好 Alice\n保留  间隔');await until(()=>h.submits.length===1)
+  assert.equal(h.tasks.get('send-1').translated,'你好 Alice\n保留  间隔')
+  assert.equal(h.win.document.querySelector('[data-rt-ui="preview"]'),null)
+  const sent=h.win.document.querySelector('.message-out .selectable-text').cloneNode(true)
+  sent.querySelectorAll('[data-rt-ui]').forEach((node:any)=>node.remove())
+  assert.equal(sent.textContent,'你好 Alice\n保留  间隔')
+ }finally{h.dom.window.close()}
+})
+
 test('translation uncertainty is retryable and cannot turn an unsent draft into an uncertain platform send',async()=>{
  const h=setup();try{
   h.type('failed original');h.enter();await until(()=>h.translations.length===1)

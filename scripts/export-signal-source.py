@@ -22,7 +22,7 @@ release.mkdir(exist_ok=True)
 version=json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
 target = release / f'HelloDog-{version}-corresponding-source.zip'
 tracked = subprocess.check_output(['git','ls-files','-z'],cwd=index).decode('utf-8').split('\0')
-extra = ['app/hellodog.main.ts','app/hellodog.privacy.main.ts','images/hellodog-icon.png','ts/hellodog/hellodog.preload.ts','ts/hellodog/hellodog.privacy.preload.ts','ts/hellodog/hellodog.recovery.preload.ts','ts/hellodog/hellodog.focus.preload.ts','ts/hellodog/hellodog.quick-reply.dom.ts','ts/hellodog/hellodog.send-status.std.ts','ts/hellodog/hellodog.voice.preload.ts','ts/hellodog/hellodog.voice.dom.ts','ts/hellodog/hellodog.voice-audio.std.ts','ts/hellodog/fs-xattr.d.ts','patches/uuid@13.0.0.patch']
+extra = ['app/hellodog.main.ts','app/hellodog.privacy.main.ts','images/hellodog-icon.png','ts/hellodog/hellodog.preload.ts','ts/hellodog/hellodog.privacy.preload.ts','ts/hellodog/hellodog.recovery.preload.ts','ts/hellodog/hellodog.focus.preload.ts','ts/hellodog/hellodog.quick-reply.dom.ts','ts/hellodog/hellodog.send-status.std.ts','ts/hellodog/hellodog.send-policy.preload.ts','ts/hellodog/hellodog.voice.preload.ts','ts/hellodog/hellodog.voice.dom.ts','ts/hellodog/hellodog.voice-audio.std.ts','ts/hellodog/fs-xattr.d.ts','patches/uuid@13.0.0.patch']
 missing = [name for name in tracked if name and not (core / name).is_file()]
 if missing:
     raise SystemExit('Patched Signal tree is missing tracked sources: ' + ', '.join(missing[:20]))

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { app, WebContentsView, session, type BrowserWindow, type Rectangle, type Session, type WebContents, type WebPreferences, type IpcMainInvokeEvent, type DownloadItem } from 'electron'
 import { isOfficialGoogleAccountsHost } from './googleAccountDomains'
@@ -288,6 +288,37 @@ export class GoogleVoiceEmbeddedViews {
   }
 
   invalidateContext(): void { for (const record of this.records.values()) for (const page of record.pages) this.revoke(page) }
+
+  private contextAcknowledgements = new Map<string, { record: Record; page: Page; frame: WebContents['mainFrame']; epoch: number; finish: (error?: Error) => void }>()
+  /** Settings cannot become effective until every owned Voice document has
+   * synchronously invalidated its queued send guard in the isolated world. */
+  async invalidateContextAndWait(): Promise<void> {
+    const pending: Promise<void>[] = []
+    for (const record of this.records.values()) for (const page of record.pages) {
+      this.revoke(page)
+      const wc = page.view.webContents
+      if (wc.isDestroyed() || originOf(wc.getURL()) !== 'https://voice.google.com') continue
+      const token = randomUUID(), epoch = page.epoch, frame = wc.mainFrame
+      pending.push(new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => finish(new Error('Google Voice 尚未确认发送设置，设置未更改。请等待页面恢复后重试。')), 2000)
+        const finish = (error?: Error) => { clearTimeout(timer); this.contextAcknowledgements.delete(token); error ? reject(error) : resolve() }
+        this.contextAcknowledgements.set(token, { record, page, frame, epoch, finish })
+        try { wc.send('google-voice:context-changed', { token }) }
+        catch { finish(new Error('Google Voice 页面已关闭，发送设置尚未更改。')) }
+      }))
+    }
+    await Promise.all(pending)
+  }
+
+  acknowledgeContext(event: IpcMainInvokeEvent, token: unknown): boolean {
+    if (typeof token !== 'string' || !/^[a-f0-9-]{36}$/.test(token)) return false
+    const pending = this.contextAcknowledgements.get(token)
+    if (!pending) return false
+    const { record, page, frame, epoch } = pending, wc = page.view.webContents
+    if (!this.alive(record, page) || page.epoch !== epoch || event.sender !== wc || event.senderFrame !== frame || frame !== wc.mainFrame || frame.detached ||
+      originOf(wc.getURL()) !== 'https://voice.google.com' || originOf(frame.url) !== 'https://voice.google.com') return false
+    pending.finish(); return true
+  }
 
   /** This is only the browser boundary; Workspace additionally binds HelloDog identity. */
   trustedPage(event: IpcMainInvokeEvent): GoogleVoiceTrustedPage {
@@ -592,6 +623,7 @@ export class GoogleVoiceEmbeddedViews {
   }
 
   private revoke(page: Page): void {
+    for (const pending of this.contextAcknowledgements.values()) if (pending.page === page) pending.finish(new Error('Google Voice 页面已变化，发送设置尚未更改。'))
     clearTimeout(page.healthTimer); page.healthTimer = undefined
     page.epoch++
     if (!page.view.webContents.isDestroyed()) {

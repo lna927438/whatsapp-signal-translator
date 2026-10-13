@@ -17,6 +17,25 @@ function fixture(options:any={}){
  return {store,file,checkPreserved,cleanup,directory:h.directory}
 }
 
+test('Chinese send preference persists false and global changes update all existing windows atomically',async()=>{
+ const h=fixture()
+ try{
+  await h.store.save({...(await h.store.get()),blockChineseSend:false})
+  assert.equal((await h.store.runtime()).blockChineseSend,false)
+  await h.store.save({...(await h.store.get()),blockChineseSend:true})
+  assert.equal((await h.store.runtime()).blockChineseSend,true)
+  const local=mainHarness(),{AccountManager}=local.load('src/main/accounts/accountManager.ts'),accounts=new AccountManager()
+  try{
+   const a=await accounts.add('whatsapp','WA'),b=await accounts.add('telegram','TG'),c=await accounts.add('signal','Signal')
+   await accounts.setChineseSendPolicy(false)
+   assert.ok((await accounts.list()).every((item:any)=>item.blockChineseSend===false))
+   await accounts.update(a.id,{blockChineseSend:true})
+   const rows=await accounts.list();assert.equal(rows.find((item:any)=>item.id===a.id).blockChineseSend,true)
+   assert.equal(rows.find((item:any)=>item.id===b.id).blockChineseSend,false);assert.equal(rows.find((item:any)=>item.id===c.id).blockChineseSend,false)
+  }finally{rmSync(local.directory,{recursive:true,force:true})}
+ }finally{h.cleanup()}
+})
+
 test('startup removes all retired provider credentials and migrates private services to cloud while preserving user data',async()=>{
  for(const provider of ['openai','deepl','google']){
   const h=fixture()

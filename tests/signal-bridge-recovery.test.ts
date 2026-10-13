@@ -11,7 +11,7 @@ function setup(){
   let sequence=0,reloads=0
   const ipc=Object.assign(new EventEmitter(),{handle:(name:string,fn:Function)=>handlers.set(name,fn)})
   const process=Object.assign(new EventEmitter(),{env:{HELLODOG_EMBEDDED:'1'},pid:1,send:(message:any)=>sent.push(message)})
-  const contents=Object.assign(new EventEmitter(),{id:1,setBackgroundThrottling(){},focus(){},reload(){reloads++},send:(...args:any[])=>ui.push(args)})
+  const contents=Object.assign(new EventEmitter(),{id:1,mainFrame:{detached:false},isDestroyed:()=>false,setBackgroundThrottling(){},focus(){},reload(){reloads++},send:(...args:any[])=>ui.push(args)})
   const window=Object.assign(new EventEmitter(),{webContents:contents,showInactive(){},hide(){}})
   const exports:any={}
   const code=ts.transpileModule(readFileSync(new URL('../integrations/hellodog-source/hellodog.main.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
@@ -90,4 +90,28 @@ test('a quick reply acknowledgement is bound to the originating native renderer 
   h.ipc.emit('hellodog:draft-inserted',h.event,{id:'draft-a'})
   assert.equal(h.sent[0].type,'draft-inserted');assert.equal(h.sent[0].error,false)
   assert.equal(h.reloads(),0);assert.deepEqual([...h.handlers.keys()].sort(),['hellodog:translate','hellodog:voice'])
+})
+
+test('native policy barrier ACK is private and bound to the exact live main frame and one token',()=>{
+  const h=setup(),id='10000000-0000-4000-8000-000000000001'
+  h.process.emit('message',{channel:'hellodog',type:'send-policy-invalidate',id})
+  assert.deepEqual(h.ui,[['hellodog:send-policy-invalidate',id]])
+  for(const event of [{sender:{id:1},senderFrame:h.contents.mainFrame},{sender:h.contents,senderFrame:{detached:false}}])h.ipc.emit('hellodog:send-policy-invalidated',event,id)
+  h.ipc.emit('hellodog:send-policy-invalidated',{sender:h.contents,senderFrame:h.contents.mainFrame},'different')
+  assert.equal(h.sent.length,0)
+  h.ipc.emit('hellodog:send-policy-invalidated',{sender:h.contents,senderFrame:h.contents.mainFrame},id)
+  assert.equal(h.sent.length,1);assert.equal(h.sent[0].type,'send-policy-invalidated');assert.equal(h.sent[0].id,id);assert.equal(h.timers.size,0)
+  h.ipc.emit('hellodog:send-policy-invalidated',{sender:h.contents,senderFrame:h.contents.mainFrame},id);assert.equal(h.sent.length,1)
+})
+
+test('native policy barrier rejects replaced frames, expired tokens and closed windows',()=>{
+  for(const mode of ['navigation','timeout','closed']){
+    const h=setup(),id='10000000-0000-4000-8000-000000000001'
+    h.process.emit('message',{channel:'hellodog',type:'send-policy-invalidate',id});const frame=h.contents.mainFrame
+    if(mode==='navigation')h.contents.mainFrame={detached:false}
+    else if(mode==='timeout')for(const [timer,callback] of h.timers){h.timers.delete(timer);callback()}
+    else h.window.emit('closed')
+    h.ipc.emit('hellodog:send-policy-invalidated',{sender:h.contents,senderFrame:frame},id)
+    assert.equal(h.sent.length,0);h.window.emit('closed');assert.equal(h.timers.size,0)
+  }
 })

@@ -21,6 +21,7 @@ test('the actual patched Signal send job persists translation failure without en
     '../../messages/MessageSendState.std.ts':{isSent:(status:string)=>status==='Sent'},
     '../../hellodog/hellodog.preload.ts':{translateHelloDogMessage:async()=>{translated++;throw Error('译文语言与目标不符')}},
     '../../hellodog/hellodog.recovery.preload.ts':require('../integrations/hellodog-source/hellodog.recovery.preload.ts'),
+    '../../hellodog/hellodog.send-policy.preload.ts':{captureHelloDogSendPolicy:()=>0},
     '../../test-node/util/messageFailures.preload.ts':{markFailed:()=>{message.attributes.sendStateByConversationId.peer.status='Failed'},saveErrorsOnMessage:async(_message:any,errors:Error[])=>{saved++;message.attributes.errors=errors.map(error=>error.message)}},
     './handleMultipleSendErrors.std.ts':{handleMultipleSendErrors:async()=>{networkRetries++;throw Error('Entered day-long retry path')}},
     '../../messages/send.preload.ts':{send:async()=>{transport++}},

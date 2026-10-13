@@ -83,6 +83,16 @@ export class AccountManager {
     })
   }
 
+  /** The settings-page switch applies to existing windows too. Window toolbars
+   * can subsequently override their own value; update all records atomically. */
+  async setChineseSendPolicy(enabled: boolean): Promise<void> {
+    if (typeof enabled !== 'boolean') throw new Error('中文发送设置无效。')
+    await this.serialized(async () => {
+      const records = await this.store.read()
+      await this.store.write(records.map(record => ({ ...record, blockChineseSend: enabled })))
+    })
+  }
+
   async update(id: string, patch: Partial<AccountRecord>): Promise<AccountRecord | undefined> {
     return this.serialized(async () => {
       const accounts = await this.store.read()

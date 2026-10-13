@@ -10,7 +10,7 @@ import { updateAccountUnread, notifyAccount } from '../../desktopRuntime'
 import { signalTranslationErrorMessage } from './signalTranslationErrors'
 import { decodeSignalVoiceRequest, type DesktopVoiceRequest, type DesktopVoiceResult } from './signalDesktopVoice'
 
-export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number; authorizationOnly?: boolean; requestId?: string; translated?: string }
+export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number; authorizationOnly?: boolean; dispatchPolicyOnly?: boolean; requestId?: string; translated?: string }
 type Instance = { owner: string; accountId: string; child: ChildProcess; helper?: ChildProcess; state: 'starting' | 'ready' | 'failed' | 'stopped'; error?: string; version?: string; startedAt: number; visible?: boolean; boundsKey?: string; pending?: number; view?: string; startupTimer?: ReturnType<typeof setTimeout>; refresh?: { id:string; work:Promise<void>; finish:(error?:boolean)=>void } }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 export function signalDesktopProfile(root: string, owner: string, accountId: string): string {
@@ -26,6 +26,7 @@ export class SignalDesktopHost {
   private closing = new Map<string,Promise<void>>()
   private restartPreparations = new Map<string, { id: string; work: Promise<void>; finish: (error?: boolean) => void }>()
   private draftInsertions = new Map<string, { id: string; finish: (error?: boolean) => void }>()
+  private sendPolicyInvalidations = new Map<string, { item: Instance; finish: (error?: boolean) => void }>()
   private active = ''
   private overlay = false
   private bounds = {x:0,y:0,width:800,height:600}
@@ -107,6 +108,10 @@ export class SignalDesktopHost {
         })
       }
       if(raw.type==='refreshed'&&raw.id===item.refresh?.id)item.refresh?.finish(Boolean(raw.error))
+      if(raw.type==='send-policy-invalidated'&&typeof raw.id==='string'){
+        const pending=this.sendPolicyInvalidations.get(raw.id)
+        if(pending?.item===item)pending.finish(Boolean(raw.error))
+      }
       if(raw.type==='health'&&raw.metrics)setExternalMetrics(record.id,raw.metrics)
       if(raw.type==='restart-ready'&&raw.id===this.restartPreparations.get(record.id)?.id)this.restartPreparations.get(record.id)?.finish(Boolean(raw.error))
       if(raw.type==='draft-inserted'&&raw.id===this.draftInsertions.get(record.id)?.id)this.draftInsertions.get(record.id)?.finish(Boolean(raw.error))
@@ -126,9 +131,10 @@ export class SignalDesktopHost {
       }
       if(raw.type==='translate'&&typeof raw.id==='string'){
         const request=raw.request as DesktopTranslationRequest
+        if(request?.dispatchPolicyOnly!==undefined&&(request.dispatchPolicyOnly!==true||request.direction!=='outgoing'||Object.keys(request).some(key=>!['id','conversationId','editTimestamp','direction','text','dispatchPolicyOnly','expiresAt'].includes(key)))){reply({type:'translation',id:raw.id,error:'发送记录无效。'});return}
         if (request?.authorizationOnly !== undefined && (request.authorizationOnly !== true || request.direction !== 'outgoing' || !/^send-[\w-]{1,150}$/.test(request.requestId || '') || typeof request.translated !== 'string' || request.translated.length > 20000)) { reply({type:'translation',id:raw.id,error:'发送记录无效。'}); return }
         if(request?.editTimestamp!==undefined&&(!Number.isSafeInteger(request.editTimestamp)||request.editTimestamp<=0)){reply({type:'translation',id:raw.id,error:'翻译内容无效。'});return}
-        if(!request||typeof request.text!=='string'||request.text.length>10000||!['incoming','outgoing','display'].includes(request.direction)||! /^[\w-]{1,100}$/.test(request.id)||! /^[\w-]{1,100}$/.test(request.conversationId)||(request.expiresAt!==undefined&&(!Number.isSafeInteger(request.expiresAt)||request.expiresAt<0))){reply({type:'translation',id:raw.id,error:'翻译内容无效。'});return}
+        if(!request||typeof request.text!=='string'||request.text.length>(request.dispatchPolicyOnly?20000:10000)||!['incoming','outgoing','display'].includes(request.direction)||! /^[\w-]{1,100}$/.test(request.id)||! /^[\w-]{1,100}$/.test(request.conversationId)||(request.expiresAt!==undefined&&(!Number.isSafeInteger(request.expiresAt)||request.expiresAt<0))){reply({type:'translation',id:raw.id,error:'翻译内容无效。'});return}
         void this.translate(record.id,request,item.startedAt).then(result=>reply({type:'translation',id:raw.id,result}),error=>{
           // Only known user-facing messages cross the process boundary. Do not
           // leak raw provider responses, stack traces, tokens or message text.
@@ -138,7 +144,7 @@ export class SignalDesktopHost {
       if (raw.type === 'voice' && typeof raw.id === 'string' && /^[\w-]{1,100}$/.test(raw.id)) {
         if (!this.voice || voiceBusy) { reply({type:'voice-result',id:raw.id,error:'上一条语音正在处理，请稍后重试。'}); return }
         let request: DesktopVoiceRequest
-        try { request = decodeSignalVoiceRequest(raw.request) } catch { reply({type:'voice-result',id:raw.id,error:'语音数据无效，请重新下载后重试。'}); return }
+        try { request = decodeSignalVoiceRequest(raw.request) } catch { reply({type:'voice-result',id:raw.id,error:'语音数据暂不可用，请在原气泡重试。'}); return }
         const scope = JSON.stringify([request.conversationId, request.id]), deadline = Date.now() + 300000
         const task = { expiresAt: request.expiresAt ?? Infinity, revoked: false }
         voiceTasks.set(scope, task); voiceBusy = true
@@ -154,13 +160,27 @@ export class SignalDesktopHost {
       }
     })
     child.on('error',()=>{clearTimeout(item.startupTimer);item.state='failed';item.error='无法启动 Signal 桌面组件。';publish()})
-    child.on('exit',code=>{clearTimeout(item.startupTimer);item.refresh?.finish(true);item.helper?.stdin?.end('quit\n');item.helper=undefined;if(item.state!=='stopped'){item.state=code?'failed':'stopped';item.error=code?'Signal 已退出，聊天数据保留，可重新打开。':'';setAccountState(record.id,'closed')}publish()})
+    child.on('exit',code=>{for(const pending of this.sendPolicyInvalidations.values())if(pending.item===item)pending.finish(true);clearTimeout(item.startupTimer);item.refresh?.finish(true);item.helper?.stdin?.end('quit\n');item.helper=undefined;if(item.state!=='stopped'){item.state=code?'failed':'stopped';item.error=code?'Signal 已退出，聊天数据保留，可重新打开。':'';setAccountState(record.id,'closed')}publish()})
     publish();return this.status(record.id)
   }
   focus(accountId='') {this.active=accountId;this.updateVisibility();const item=this.instances.get(accountId);if(item?.visible)item.helper?.stdin?.write('focus\n');if(item?.child.connected)item.child.send({channel:'hellodog',type:'focus'})}
   setOverlayOpen(value:boolean){this.overlay=value;this.updateVisibility()}
   setBounds(value:any){if(!value||!['x','y','width','height'].every(key=>Number.isFinite(value[key])))return;this.bounds={x:Math.max(0,value.x),y:Math.max(0,value.y),width:Math.max(1,Math.min(16000,value.width)),height:Math.max(1,Math.min(16000,value.height))};this.updateVisibility()}
   refresh(accountId?:string){for(const item of this.instances.values())if((!accountId||item.accountId===accountId)&&item.owner===this.owner()&&item.child.connected)item.child.send({channel:'hellodog',type:'refresh'})}
+  async invalidateSendPolicy(accountId?:string):Promise<void>{
+    const work:Promise<void>[]=[]
+    for(const item of this.instances.values()){
+      if(accountId&&item.accountId!==accountId||item.owner!==this.owner()||item.state==='stopped')continue
+      work.push(new Promise<void>((resolve,reject)=>{
+        const id=randomUUID(),timer=setTimeout(()=>finish(true),2000)
+        const finish=(error=false)=>{clearTimeout(timer);this.sendPolicyInvalidations.delete(id);error?reject(new Error('Signal 尚未确认发送设置，设置未更改。请等待页面恢复后重试。')):resolve()}
+        this.sendPolicyInvalidations.set(id,{item,finish})
+        if(!item.child.connected){finish(true);return}
+        try{item.child.send({channel:'hellodog',type:'send-policy-invalidate',id},error=>{if(error)finish(true)})}catch{finish(true)}
+      }))
+    }
+    await Promise.all(work)
+  }
   async reload(record:AccountRecord):Promise<void>{
     if(record.runtimeMode==='paused')throw new Error('请先恢复此账号。')
     const item=this.instances.get(record.id)
@@ -228,6 +248,7 @@ export class SignalDesktopHost {
   }
   async resume(records:AccountRecord[]){for(const record of records){if(record.platform==='signal'&&record.signalEngine==='desktop'&&record.runtimeMode!=='paused')await this.open(record,true)}}
   async stop(accountId:string):Promise<void>{
+    for(const pending of this.sendPolicyInvalidations.values())if(pending.item.accountId===accountId)pending.finish(true)
     setExternalMetrics(accountId)
     this.draftInsertions.get(accountId)?.finish(true)
     const item=this.instances.get(accountId)

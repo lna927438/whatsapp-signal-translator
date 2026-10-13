@@ -6,6 +6,7 @@ import { basename } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { mainHarness } from './main-harness.ts'
+const { blocksChineseSend, chineseOriginalPassThrough, shouldTranslateOutgoing, assertOutgoingSendPolicy } = mainHarness().load('src/main/translation/outgoingPolicy.ts')
 
 function barrier() {
   let enter!: () => void, release!: () => void
@@ -84,21 +85,22 @@ test('Signal legacy and explicitly selected channels keep translating for an unc
   }
 })
 
-function desktopFixture(step: string) {
+function desktopFixture(step: string, options: {blockChineseSend?:boolean;targetLanguage?:string;output?:string} = {}) {
   const gate = barrier(), calls: string[] = [], requests: any[] = []
-  let owner = 'owner-a', revision = 0, translate!: (accountId: string, raw: any, startedAt: number) => Promise<any>
+  const settings={...preferences,blockChineseSend:options.blockChineseSend!==false,targetLanguage:options.targetLanguage||preferences.targetLanguage}
+  let owner = 'owner-a', revision = 0, policyChanging=0, translate!: (accountId: string, raw: any, startedAt: number) => Promise<any>
   const pause = async (name: string) => { calls.push(name); if (step === name) await gate.wait() }
   const source = readFileSync(new URL('../src/main/ipc.ts', import.meta.url), 'utf8')
   const start = source.indexOf('  const signalDesktop = new SignalDesktopHost('), end = source.indexOf("  ipcMain.handle('signal-desktop:status'", start)
   assert.ok(start >= 0 && end > start)
   // Execute the production callback, with only external I/O replaced by gates.
   runInNewContext(ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, {
-    mainWindow: {}, onlineIdentity: { userId: owner }, createHash,
+    mainWindow: {}, onlineIdentity: { userId: owner }, createHash,get sendPolicyChanging(){return policyChanging},
     SignalDesktopHost: class { constructor(_window: unknown, _owner: unknown, callback: typeof translate) { translate = callback } },
     taskIdentity: () => { const captured = owner, version = revision; return { owner, authorized: () => !!owner && captured === owner && version === revision } },
     accounts: { list: async () => { await pause('accounts'); return [{ id: 'signal-a', platform: 'signal', signalEngine: 'desktop' }] } },
-    accountRuntime: async () => { await pause('channel'); return preferences },
-    signalNeedsTranslation: () => true, alreadyInTargetLanguage: () => false, hasBlockedChinese: () => false, validateTranslation: () => {},
+    accountRuntime: async () => { await pause('channel'); return {...settings} },
+    signalNeedsTranslation: () => true, alreadyInTargetLanguage: () => false, blocksChineseSend, chineseOriginalPassThrough, shouldTranslateOutgoing, assertOutgoingSendPolicy, validateTranslation: () => {},
     outgoingCredit: { check: async (_owner: string, _request: unknown, _translate: boolean, confirmed?: boolean) => pause(confirmed ? 'final-credit' : 'credit') },
     translator: {
       trackContent: async () => pause('retention'),
@@ -106,7 +108,7 @@ function desktopFixture(step: string) {
       preserveIncomingRequest: async (request: any) => { await pause('preserve-incoming'); return request },
       prepareOutgoingRequest: async (request: any) => { await pause('prepare'); return request },
       cached: async () => { await pause('cached'); return undefined },
-      translate: async (request: any) => { requests.push(request); await pause('paid-outgoing'); return 'Please confirm the meeting tomorrow.' },
+      translate: async (request: any) => { requests.push(request); await pause('paid-outgoing'); return options.output || 'Please confirm the meeting tomorrow.' },
       translateIncoming: async (request: any) => { requests.push(request); await pause('paid-incoming'); return '请确认明天的会议。' },
       restoreSignalOutgoing: async () => { await pause('restore'); return { request: { requestId: 'send-sd-fixture', targetLanguage: 'en-US' }, text: 'Please confirm the meeting tomorrow.' } }
     }
@@ -114,8 +116,46 @@ function desktopFixture(step: string) {
   const invoke = (direction: 'incoming' | 'outgoing', extra: Record<string, unknown> = {}) => translate('signal-a', {
     id: 'native-message', conversationId: 'peer', text: direction === 'incoming' ? 'Please confirm the meeting tomorrow.' : '请确认明天的会议。', direction, ...extra
   }, 0)
-  return { gate, calls, requests, invoke, setOwner: (value: string) => { owner = value; revision++ } }
+  return { gate, calls, requests, invoke, settings,changing:(value:number)=>policyChanging=value,setOwner: (value: string) => { owner = value; revision++ } }
 }
+
+test('actual native Signal host permits exact Chinese original with switch off and performs no translation or billing',async()=>{
+ const h=desktopFixture('',{blockChineseSend:false}),text='  你好 Alice\n请保留  间隔。  '
+ const result=await h.invoke('outgoing',{text})
+ assert.equal(result.enabled,false);assert.equal(h.requests.length,0)
+ assert.equal(h.calls.includes('preserve-outgoing'),false);assert.equal(h.calls.includes('credit'),false);assert.equal(h.calls.includes('final-credit'),false)
+})
+
+test('native final dispatch policy checks actual text without translation, receipt creation or billing',async()=>{
+ for(const enabled of [false,true])for(const text of ['', 'Hello '.repeat(2500), '中文𠀀\n保持  原稿']){
+  const h=desktopFixture('',{blockChineseSend:enabled})
+  const call=h.invoke('outgoing',{dispatchPolicyOnly:true,text})
+  if(enabled&&text.includes('中文'))await assert.rejects(call,/中文/)
+  else{const result=await call;assert.equal(result.authorized,true);assert.equal(result.text,text)}
+  assert.equal(h.requests.length,0);assert.equal(h.calls.some(value=>/preserve|credit|prepare|paid|restore/.test(value)),false)
+ }
+})
+
+test('native final policy read rejects a settings write or identity change during its awaited lookup',async()=>{
+ for(const change of ['lock','owner','enable']){
+  const h=desktopFixture('channel',{blockChineseSend:false}),pending=h.invoke('outgoing',{dispatchPolicyOnly:true,text:'中文原稿'})
+  const rejected=assert.rejects(pending,change==='owner'?/登录状态/:change==='lock'?/正在保存/:/中文/)
+  await h.gate.entered;if(change==='lock')h.changing(1);else if(change==='owner')h.setOwner('other');else h.settings.blockChineseSend=true
+  h.gate.release();await rejected;assert.equal(h.requests.length,0);assert.equal(h.calls.some(value=>/credit|paid/.test(value)),false)
+ }
+ const locked=desktopFixture('');locked.changing(1)
+ await assert.rejects(locked.invoke('outgoing',{dispatchPolicyOnly:true,text:'Hello'}),/正在保存/);assert.equal(locked.calls.length,0)
+})
+
+test('native Signal on blocks Chinese even for zh/ja targets and policy changes during translation fail closed',async()=>{
+ for(const targetLanguage of ['en-US','zh-CN','ja']){
+  const h=desktopFixture('',{targetLanguage,output:'您好𠀀'})
+  await assert.rejects(h.invoke('outgoing'),/中文/)
+ }
+ const h=desktopFixture('paid-outgoing'),pending=h.invoke('outgoing'),rejected=assert.rejects(pending,/设置已变化/)
+ await h.gate.entered;h.settings.blockChineseSend=false;h.gate.release();await rejected
+ assert.equal(h.requests.length,1)
+})
 
 test('Signal Desktop rejects identity races at each asynchronous boundary before paid translation', async () => {
   const scenarios = [

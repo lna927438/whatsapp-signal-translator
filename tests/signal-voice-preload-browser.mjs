@@ -80,6 +80,9 @@ const wrappedUi = { createSignalVoiceUi(deps) { return ui.createSignalVoiceUi({ 
 } }); } };
 load(sources.preload, {
   '../util/migrations.preload.ts': { loadAttachmentData },
+  '../jobs/AttachmentDownloadManager.preload.ts': { AttachmentDownloadManager: { addJob() { throw new Error('Already-loaded fixture must not download'); } } },
+  '../types/AttachmentDownload.std.ts': { AttachmentDownloadUrgency: { IMMEDIATE: 'immediate' } },
+  '../sql/Interface.std.ts': { AttachmentDownloadSource: { STANDARD: 'standard' } },
   '../state/selectors/nav.std.ts': { getSelectedConversationId: () => 'conversation-a' },
   './hellodog.voice-audio.std.ts': audio,
   './hellodog.voice.dom.ts': wrappedUi,

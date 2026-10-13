@@ -179,3 +179,47 @@ test('incoming honors visible-history/manual settings and rejects malformed payl
   await h.run('owner','window','translate',{...incoming,manual:true},h.authorized);assert.equal(h.incomingCalls,2)
   for(const payload of [{...incoming,conversationId:'../../bad'},{...incoming,text:'a'.repeat(10001)},{...incoming,direction:'delete'}])await assert.rejects(h.run('owner','window','translate',payload,h.authorized))
 })
+
+test('disabled Chinese switch sends exact mixed text and image captions without API or balance reads',async()=>{
+ for(const media of [undefined,mediaFixture]){
+  const h=harness();h.preferences.blockChineseSend=false;h.setBalance(false)
+  const payload={...h.payload,text:'  你好 Alice\n保持  间隔。  ',...(media?{media}:{})}
+  const status:any=await h.run('owner','window','status',undefined,h.authorized);assert.equal(status.blockChineseSend,false)
+  const result:any=await h.run('owner','window','translate',payload,h.authorized)
+  assert.equal(result.text,payload.text);assert.equal(result.untranslated,true);assert.equal(h.providerCalls,0);assert.equal(h.checks.length,0)
+  h.preferences.blockChineseSend=true
+  await assert.rejects(h.run('owner','window','authorize',{...payload,translated:result.text,requestId:result.requestId},h.authorized),/设置已变化/)
+  h.preferences.blockChineseSend=false
+  assert.equal((await h.run('owner','window','authorize',{...payload,translated:result.text,requestId:result.requestId},h.authorized) as any).authorized,true)
+  await assert.rejects(h.run('owner','window','translate',payload,h.authorized),/待确认/)
+  assert.equal(h.providerCalls,0);assert.equal(h.checks.length,0)
+ }
+})
+
+test('enabled Chinese switch rejects Han even for Chinese and Japanese targets',async()=>{
+ for(const targetLanguage of ['zh-CN','ja']){
+  const h=harness();h.preferences.targetLanguage=targetLanguage;h.setResult('中文𠀀')
+  await assert.rejects(h.run('owner','window','translate',h.payload,h.authorized),/中文/)
+ }
+})
+
+test('switching off cannot reuse an old translated Chinese draft as a fresh direct send',async()=>{
+ const h=harness(),result:any=await h.run('owner','window','translate',h.payload,h.authorized)
+ h.preferences.blockChineseSend=false
+ await assert.rejects(h.run('owner','window','authorize',{...h.payload,translated:result.text,requestId:result.requestId},h.authorized),/设置已变化/)
+ const raw:any=await h.run('owner','window','translate',h.payload,h.authorized)
+ assert.equal(raw.untranslated,true);assert.equal(raw.text,h.payload.text);assert.equal(h.providerCalls,1)
+})
+
+test('live send policy revisions survive boolean round trips and reject a status read across a change',async()=>{
+ const preferences=harness().preferences
+ let revision=4, mutate=false
+ const run=createGoogleVoiceTranslator({} as any,{check:async()=>assert.fail('status must not bill')},async()=>{if(mutate)revision++;return preferences},{} as any,()=>revision)
+ let status:any=await run('owner','window','status',undefined,()=>true)
+ assert.equal(status.sendPolicyRevision,4);assert.equal(status.blockChineseSend,true)
+ preferences.blockChineseSend=false;revision++
+ status=await run('owner','window','status',undefined,()=>true);assert.equal(status.sendPolicyRevision,5);assert.equal(status.blockChineseSend,false)
+ preferences.blockChineseSend=true;revision++
+ status=await run('owner','window','status',undefined,()=>true);assert.equal(status.sendPolicyRevision,6);assert.equal(status.blockChineseSend,true)
+ mutate=true;await assert.rejects(run('owner','window','status',undefined,()=>true),/设置已变化/)
+})

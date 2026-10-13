@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import type { RuntimeSettings, TranslationRequest } from '../../types'
 import type { TranslationEngine } from '../../translation/translationEngine'
 import type { OutgoingCredit } from '../../translation/outgoingCredit'
-import { hasBlockedChinese, alreadyInTargetLanguage } from '../../translation/outgoingPolicy'
+import { blocksChineseSend, alreadyInTargetLanguage, chineseOriginalPassThrough, shouldTranslateOutgoing, assertOutgoingSendPolicy } from '../../translation/outgoingPolicy'
 import { validateTranslation } from '../../translation/translationValidation'
 import { qualityKey } from '../../../shared/translationPolicy'
 import type { GoogleVoiceDispatchLedger } from './dispatchLedger'
@@ -11,12 +11,13 @@ import { googleVoiceMessageMedia, googleVoiceMediaKey, googleVoiceRecipientConte
 import { isVerifiedGoogleVoiceIncoming } from './incomingHistory'
 
 type Translator=Pick<TranslationEngine,'history'|'existingOutgoing'|'preserveOutgoingRequest'|'prepareOutgoingRequest'|'preserveIncomingRequest'|'translate'|'cached'|'translateIncoming'>
-export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:(accountId:string)=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger) {
+export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<OutgoingCredit,'check'>,runtime:(accountId:string)=>Promise<RuntimeSettings>,dispatch:GoogleVoiceDispatchLedger,sendPolicyRevision:()=>number=()=>0) {
   return async(owner:string,accountId:string,operation:string,payload:unknown,authorized:()=>boolean):Promise<unknown>=>{
     const requireIdentity=()=>{if(!authorized())throw new Error('登录状态已变化。')}
-    requireIdentity();const preferences=await runtime(accountId);requireIdentity()
+    requireIdentity();const policyRevision=sendPolicyRevision(),preferences=await runtime(accountId);requireIdentity()
+    if(operation==='status' && policyRevision!==sendPolicyRevision())throw new Error('中文发送设置已变化，请重新核对草稿。')
     if(operation==='status')return {connected:true,translationProvider:preferences.translationProvider||'deepseek',localLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,
-      receiveAutoTranslate:preferences.receiveAutoTranslate,sendAutoTranslate:preferences.sendAutoTranslate,blockChineseSend:true,historyMode:preferences.historyMode,translationsVisible:preferences.translationsVisible!==false}
+      receiveAutoTranslate:preferences.receiveAutoTranslate,sendAutoTranslate:preferences.sendAutoTranslate,blockChineseSend:preferences.blockChineseSend!==false,sendPolicyRevision:policyRevision,historyMode:preferences.historyMode,translationsVisible:preferences.translationsVisible!==false}
     const raw=payload as {id?:unknown;conversationId?:unknown;text?:unknown;direction?:unknown;manual?:unknown;translated?:unknown;requestId?:unknown;recoveryRequestId?:unknown;outcome?:unknown;confirmed?:unknown;attempt?:unknown;media?:unknown;context?:unknown}
     if(!raw || typeof raw.conversationId!=='string' || !/^[\w-]{1,160}$/.test(raw.conversationId))throw new Error('对话无效。')
     const media=googleVoiceMessageMedia(raw.media)
@@ -30,6 +31,7 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     const recover=async(known?:{id:string;requestId:string})=>{
       if(!validSource(raw.text))throw new Error('草稿无效。')
       if(media && !raw.text.trim())return undefined
+      if(chineseOriginalPassThrough(raw.text,preferences.blockChineseSend))return undefined
       const history=await translator.history();requireIdentity()
       const attempts=await dispatch.snapshot(owner,accountId,conversationId,authorized);requireIdentity()
       return recoverGoogleVoiceDraft({owner,accountId,conversationId,text:raw.text},history,attempts,known)
@@ -50,14 +52,19 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     }
     if(!raw || typeof raw.id!=='string' || !/^[\w-]{1,120}$/.test(raw.id) || typeof raw.conversationId!=='string' || !/^[\w-]{1,160}$/.test(raw.conversationId)
       || !validSource(raw.text) || !['translate','authorize'].includes(operation))throw new Error('翻译请求无效。')
-    const fingerprint=createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,'outgoing',raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality])).digest('hex')
+    const fingerprint=createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,'outgoing',raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality,preferences.blockChineseSend!==false])).digest('hex')
     const plainRequest:TranslationRequest={text:raw.text,accountId,conversationId,messageId:raw.id,requestId:'send-gv-plain-'+fingerprint,
       sourceLanguage:preferences.localLanguage,targetLanguage:preferences.targetLanguage,quality:preferences.translationQuality,providerPreference:preferences.providerPreference}
-    const plainAllowed=!!media && !raw.text.trim() || !preferences.sendAutoTranslate || alreadyInTargetLanguage(plainRequest)
+    const plainAllowed=!!media && !raw.text.trim() || !shouldTranslateOutgoing(raw.text,preferences) || alreadyInTargetLanguage(plainRequest)
+    const checkCurrentPolicy=async(output:string)=>{
+      const current=await runtime(accountId);requireIdentity()
+      assertOutgoingSendPolicy(raw.text as string,output,preferences.blockChineseSend,current.blockChineseSend)
+    }
     if(operation==='authorize'){
       if(typeof raw.requestId!=='string' || !/^send-[\w-]{1,150}$/.test(raw.requestId) || !validTranslated(raw.translated))throw new Error('发送记录无效。')
       if(raw.requestId.startsWith('send-gv-plain-')){
-        if(!plainAllowed || raw.requestId!==plainRequest.requestId || raw.translated!==raw.text || hasBlockedChinese(raw.text,preferences.targetLanguage))throw new Error('原文或发送设置已变化，已阻止发送。')
+        if(!plainAllowed || raw.requestId!==plainRequest.requestId || raw.translated!==raw.text || blocksChineseSend(raw.text,preferences.blockChineseSend))throw new Error('原文或发送设置已变化，已阻止发送。')
+        await checkCurrentPolicy(raw.text)
         requireIdentity()
         return dispatch.reserve(owner,accountId,conversationId,raw.requestId,raw.text,raw.text,authorized,undefined,!!context,mediaKey)
       }
@@ -66,9 +73,10 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
       // dispatch hashes and the preload's final draft comparison.
       const original=await translator.existingOutgoing(raw.requestId,accountId,conversationId,raw.text.trim(),raw.translated)
       if(original.messageId!==raw.id)throw new Error('译文回执不属于本条短信。')
-      if(!preferences.sendAutoTranslate || original.targetLanguage!==preferences.targetLanguage || qualityKey(original.quality)!==qualityKey(preferences.translationQuality))throw new Error('翻译设置已变化，请重新核对译文。')
-      requireIdentity();if(hasBlockedChinese(raw.translated,original.targetLanguage))throw new Error('译文仍含中文，已阻止发送。')
+      if(!shouldTranslateOutgoing(raw.text,preferences) || original.targetLanguage!==preferences.targetLanguage || qualityKey(original.quality)!==qualityKey(preferences.translationQuality))throw new Error('翻译设置已变化，请重新核对译文。')
+      requireIdentity();if(blocksChineseSend(raw.translated,preferences.blockChineseSend))throw new Error('译文仍含中文，已阻止发送。')
       validateTranslation(original,raw.translated);await credit.check(owner,original,true,true);requireIdentity()
+      await checkCurrentPolicy(raw.translated)
       return dispatch.reserve(owner,accountId,conversationId,raw.requestId,raw.text,raw.translated,authorized,
         raw.recoveryRequestId===undefined?undefined:createHash('sha256').update(raw.text.trim()).digest('hex'),!!context,mediaKey)
     }
@@ -78,12 +86,14 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
     requireIdentity()
     let restored:TranslationRequest|undefined
     if(outgoing && raw.recoveryRequestId!==undefined){
+      if(!shouldTranslateOutgoing(raw.text,preferences))throw new GoogleVoiceDraftRecoveryError('settings')
       if(typeof raw.recoveryRequestId!=='string' || !/^send-(?:gv|retry)-[a-f0-9]{64}$/.test(raw.recoveryRequestId))throw new GoogleVoiceDraftRecoveryError('incomplete')
       restored=(await recover({id:raw.id,requestId:raw.recoveryRequestId}))!.request
-      if(!preferences.sendAutoTranslate || restored.targetLanguage!==preferences.targetLanguage || qualityKey(restored.quality)!==qualityKey(preferences.translationQuality))throw new GoogleVoiceDraftRecoveryError('settings')
+      if(!shouldTranslateOutgoing(raw.text,preferences) || restored.targetLanguage!==preferences.targetLanguage || qualityKey(restored.quality)!==qualityKey(preferences.translationQuality))throw new GoogleVoiceDraftRecoveryError('settings')
     }
     if(outgoing && plainAllowed && !restored){
-      if(hasBlockedChinese(raw.text,preferences.targetLanguage))throw new Error('请开启发送翻译，中文原文已阻止发送。')
+      if(blocksChineseSend(raw.text,preferences.blockChineseSend))throw new Error('请开启发送翻译，中文原文已阻止发送。')
+      await checkCurrentPolicy(raw.text)
       return {enabled:true,text:raw.text,requestId:plainRequest.requestId,untranslated:true,...(media?{media}:{})}
     }
     const requestId=(outgoing?'send-gv-':'gv-')+createHash('sha256').update(JSON.stringify([owner,accountId,raw.id,conversationId,raw.direction,raw.text,preferences.localLanguage,preferences.targetLanguage,preferences.translationQuality])).digest('hex')
@@ -95,8 +105,9 @@ export function createGoogleVoiceTranslator(translator:Translator,credit:Pick<Ou
       request=await translator.prepareOutgoingRequest(request);requireIdentity()
       await credit.check(owner,request,true);requireIdentity()
       const text=await translator.translate(request);requireIdentity()
-      if(hasBlockedChinese(text,request.targetLanguage))throw new Error('译文仍含中文，已阻止发送。')
+      if(blocksChineseSend(text,preferences.blockChineseSend))throw new Error('译文仍含中文，已阻止发送。')
       validateTranslation(request,text);await credit.check(owner,request,true,true);requireIdentity()
+      await checkCurrentPolicy(text)
       return {enabled:true,text,requestId:request.requestId,...(media?{media}:{})}
     }
     if(preferences.translationsVisible===false && raw.manual!==true)return {enabled:false}

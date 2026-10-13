@@ -27,6 +27,7 @@ function fixture(origin = 'https://voice.google.com', mainFrame = true, topFrame
       } }
       if (name === '../shared/googleVoiceRuntimeHealth') return { parseGoogleVoiceRuntimeHealth }
       if (name === './googleVoiceAudio') return {installGoogleVoiceAudio:(document:unknown,options:any)=>{assert.equal(document,isolatedDocument);audioInstalled=options;audioInstalls++;return()=>{audioStops++}}}
+      if (name === './googleVoiceAudioReader') return {readGoogleVoicePlayer:()=>{throw Error('reader requires an explicit voice action')}}
       if (name === '../../integrations/google-voice-extension/content-runtime.js') return { installGoogleVoiceRuntime: (options: any) => { if (failure === 'runtime') throw new Error('synthetic private error detail'); installed = options } }
       assert.equal(name, './googleVoiceUnread')
       return { installGoogleVoiceUnread: (document: unknown, report: Function) => { if (failure === 'unread') throw new Error('synthetic observer error'); assert.equal(document, isolatedDocument); unreadInstalled = { report } } }
@@ -98,4 +99,30 @@ test('runtime initialization failure reports a fixed code without the raw except
   assert.ok(f.unreadInstalled); assert.equal(f.installed, undefined)
   assert.deepEqual(f.requests, [['google-voice:runtime-health', { phase: 'error', code: 'preload-failed', messageCount: 0 }]])
   assert.deepEqual(Object.keys(f.view), ['top'])
+})
+
+test('private context acknowledgement follows synchronous runtime invalidation and never acknowledges a failed listener',()=>{
+ const token='10000000-0000-4000-8000-000000000001',f=fixture();let invalidated=false
+ const stop=f.installed.subscribe(()=>{assert.equal(f.requests.length,0);invalidated=true})
+ f.emit('google-voice:context-changed',{}, {token});assert.equal(invalidated,true)
+ assert.deepEqual(f.requests,[['google-voice:context-ack',token]]);stop()
+ const failed=fixture();failed.installed.subscribe(()=>{throw Error('guard failed to cancel')})
+ assert.throws(()=>failed.emit('google-voice:context-changed',{}, {token}),/cancel/);assert.equal(failed.requests.length,0)
+ const malformed=fixture();malformed.installed.subscribe(()=>{})
+ malformed.emit('google-voice:context-changed',{}, {token:'bad'});assert.equal(malformed.requests.length,0)
+})
+
+test('acknowledging context cancels a queued Google Voice commit after its last status request',async()=>{
+ const modulePath=new URL('../integrations/google-voice-extension/send-guard.mjs',import.meta.url).href,{SendGuard}=await import(modulePath)
+ const f=fixture();let sent=0,statusCalls=0,release!:()=>void,statusWaiting=false
+ const snapshot={conversationId:'thread-1',text:'中文原稿',revision:1,composer:{},sendButton:{}}
+ const status={connected:true,sendAutoTranslate:true,targetLanguage:'en-US',blockChineseSend:false,sendPolicyRevision:1}
+ const guard=new SendGuard({supported:true,snapshot:()=>({...snapshot}),replace:(_before:unknown,text:string)=>{snapshot.text=text;snapshot.revision++;return true},dispatch:()=>sent++},{
+  status:async()=>{if(++statusCalls===2){statusWaiting=true;await new Promise<void>(resolve=>release=resolve)}return status},
+  translate:async()=>({enabled:true,text:snapshot.text,untranslated:true,requestId:'send-gv-plain-test'}),authorize:async(payload:any)=>({authorized:true,requestId:payload.requestId,attempt:1})})
+ await guard.prepare();f.installed.subscribe(()=>guard.invalidate())
+ const work=guard.confirm();for(let n=0;n<20;n++)await Promise.resolve();assert.equal(statusWaiting,true)
+ const rejected=assert.rejects(work,/变化|预览/)
+ f.emit('google-voice:context-changed',{}, {token:'10000000-0000-4000-8000-000000000001'})
+ assert.equal(f.requests.at(-1)[0],'google-voice:context-ack');release();await rejected;assert.equal(sent,0)
 })

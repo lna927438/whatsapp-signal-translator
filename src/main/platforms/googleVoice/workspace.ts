@@ -174,6 +174,8 @@ export class GoogleVoiceWorkspace {
   hide(): void { this.revision++; this.active = ''; this.views?.hide() }
   setOverlayOpen(open: boolean): void { this.overlay = Boolean(open); this.views?.setOverlayOpen(this.overlay) }
   invalidateContext(): void { this.views?.invalidateContext() }
+  async invalidateSendContext(): Promise<void> { await this.views?.invalidateContextAndWait() }
+  acknowledgeContext(event: IpcMainInvokeEvent, token: unknown): boolean { return this.views?.acknowledgeContext(event, token) ?? false }
 
   setBounds(value: Bounds): void {
     if (!value || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key as keyof Bounds])) || value.width < 0 || value.height < 0 || value.width > 20000 || value.height > 20000) return

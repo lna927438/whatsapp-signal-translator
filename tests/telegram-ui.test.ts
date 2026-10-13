@@ -13,7 +13,7 @@ after(()=>{assert.match(relative(resolve(tmpdir()),resolve(modules.directory)),/
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 15))
 async function until(check: () => boolean) { for (let n=0;n<200;n++){ if(check())return;await tick() } assert.fail('Telegram UI did not settle') }
-type Options = { original?: string; translation?: string; receipt?: boolean; clear?: boolean; preview?: boolean; history?: string; incoming?: boolean; delayTranslation?: boolean; caption?: boolean; closeCaption?: boolean; delaySettings?: boolean; blockCommit?: boolean; oldHistory?: boolean; tailOffscreen?: boolean; initiallyHidden?: boolean }
+type Options = { original?: string; translation?: string; receipt?: boolean; clear?: boolean; preview?: boolean; history?: string; incoming?: boolean; delayTranslation?: boolean; caption?: boolean; closeCaption?: boolean; delaySettings?: boolean; blockCommit?: boolean; oldHistory?: boolean; tailOffscreen?: boolean; initiallyHidden?: boolean; rawChinese?: boolean; invalidateCommit?: boolean }
 function harness(options: Options = {}) {
   const caption = options.caption ? '<div class="Modal"><img src="blob:photo-a"><div id="editable-message-text-modal" contenteditable="true">图片说明</div><button class="caption-send"><i class="icon-new-send"></i></button></div>' : ''
   const dom=new JSDOM('<div id="LeftColumn"></div><div id="MiddleColumn"><div class="chat-info"><div class="title">Example</div></div><div class="MessageList"><div class="Message" data-message-id="10"><div class="message-content"><div class="text-content">Hello<span class="MessageMeta">12:30</span></div></div></div></div><div class="Composer"><div id="editable-message-text" contenteditable="true"></div><button class="main-button send"><i class="icon-new-send"></i></button></div></div>'+caption,{url:'https://web.telegram.org/a/#12345',runScripts:'outside-only',pretendToBeVisual:true})
@@ -37,7 +37,7 @@ function harness(options: Options = {}) {
     pendingSends:async()=>task&&!['sent','cancelled'].includes(task.state)?[structuredClone(task)]:[],
     confirmSent:async(id:string)=>{assert.equal(id,task.id);assert.equal(task.state,'uncertain');confirmedSent++;task.state='sent';return structuredClone(task)},
     confirmNotSent:async(id:string)=>{assert.equal(id,task.id);assert.equal(task.state,'uncertain');confirmedNotSent++;task.state='ready';return structuredClone(task)},
-    prepareSend:async(value:any)=>{prepares++;task={...value,id:'tg-task-'+prepares,state:'draft',request:{text:value.text,targetLanguage:'en'},translated:options.translation||'Hello'};return task},
+    prepareSend:async(value:any)=>{prepares++;task={...value,id:'tg-task-'+prepares,state:'draft',request:{text:value.text,targetLanguage:'en'},translated:options.rawChinese?value.text:options.translation||'Hello',blockChinese:!options.rawChinese,translate:!options.rawChinese};return task},
     translateSend:async()=>{translations++;await gate;task.state='ready';return task},
     editSendPreview:async(_id:string,value:string)=>{task.translated=value;return task},
     submitSend:async()=>{
@@ -45,6 +45,7 @@ function harness(options: Options = {}) {
       if(!win.__RT_SEND_SELECT__(args))throw new Error('send selection rejected')
       assert.equal(win.__RT_EDIT_ATOMIC__({expected:composer.textContent,text:task.translated,targetKey:task.targetKey,conversationId:task.conversationId}),true)
       if(options.blockCommit)button.disabled=true
+      if(options.invalidateCommit)win.__RT_SEND_INVALIDATE__()
       const result=await win.__RT_SEND_COMMIT__(args);win.__RT_SEND_RELEASE__(task.id,result.dispatched===false)
       task.result=result;task.state=result.confirmed?'sent':result.dispatched===false?'ready':'uncertain';return structuredClone(task)
     },
@@ -125,8 +126,24 @@ test('Telegram preview is editable and nothing sends until explicit confirmation
 test('Telegram blocks Chinese left in English target translation',async()=>{
   const h=harness({translation:'你好 Hello'});try{h.click();await until(()=>h.document.querySelector('.hd-tg-status')?.textContent.includes('rejected'));assert.equal(h.stats().nativeClicks,0);assert.equal(h.composer.textContent,'你好')}finally{h.close()}
 })
+
+test('Telegram disabled Chinese switch dispatches exact original inside ordinary and image-caption composers without a translation preview',async()=>{
+ for(const caption of [false,true]){
+  const h=harness({original:'你好 Alice\n保留  间隔',rawChinese:true,caption,preview:true})
+  try{
+   h.click();await until(()=>h.task()?.state==='sent')
+   assert.equal(h.task().translated,'你好 Alice\n保留  间隔');assert.equal(h.stats().nativeClicks,1)
+   assert.equal(h.document.querySelector('.hd-tg-preview'),null)
+  }finally{h.close()}
+ }
+})
 test('Telegram receipt uncertainty does not re-click send even when editor was cleared',async()=>{
   const h=harness({receipt:false});try{h.click();await until(()=>h.task()?.state==='uncertain');assert.equal(h.stats().nativeClicks,1);h.composer.textContent='你好';h.click();await until(()=>h.document.querySelector('.hd-tg-status')?.textContent.includes('不会自动重发'));assert.equal(h.stats().nativeClicks,1);assert.equal(h.stats().prepares,1)}finally{h.close()}
+})
+
+test('Telegram policy invalidation between native edit and commit keeps the Chinese original unsent',async()=>{
+ const h=harness({original:'中文原稿',rawChinese:true,invalidateCommit:true})
+ try{h.click();await until(()=>h.task()?.result?.dispatched===false);assert.equal(h.stats().nativeClicks,0);assert.equal(h.composer.textContent,'中文原稿')}finally{h.close()}
 })
 test('Telegram uncertainty blocks a translated draft left in the composer as well as its source',async()=>{
   const h=harness({receipt:false,clear:false});try{h.click();await until(()=>h.task()?.state==='uncertain');assert.equal(h.composer.textContent,'Hello');h.click();await until(()=>h.document.querySelector('.hd-tg-status')?.textContent.includes('不会自动重发'));assert.equal(h.stats().nativeClicks,1);assert.equal(h.stats().prepares,1)}finally{h.close()}
@@ -245,7 +262,7 @@ test('Telegram detached global audio is never assigned to an unrelated voice mes
     let fetched=0;h.win.fetch=async()=>{fetched++;throw new Error('must not read global audio')}
     h.win.HTMLInputElement.prototype.click=function(){this.dispatchEvent(new h.win.Event('cancel'))}
     await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click()
-    await until(()=>row.querySelector('[data-rt-ui="voice"]').textContent.includes('已取消'))
+    await until(()=>row.querySelector('[data-rt-ui="voice"]').textContent.includes('无法读取'))
     assert.equal(fetched,0)
   }finally{h.close()}
 })
@@ -290,22 +307,23 @@ test('Telegram hiding ordinary translations cannot conceal explicitly requested 
     h.win.__RT_APPLY_SETTINGS__({translationsVisible:true});assert.equal(row.querySelector('[data-voice-english]').hidden,false);assert.equal(row.querySelector('[data-voice-chinese]').hidden,false);assert.equal(api.calls.length,1);
   }finally{h.close()}
 })
-test('Telegram a downloaded audio file is translated in the original bubble with its message identity and no native action',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h),api=voiceApi(h);let pickerInside=false;
-    h.win.HTMLInputElement.prototype.click=function(){pickerInside=this.closest('[data-rt-ui="voice"]')?.closest('.Message')===row;Object.defineProperty(this,'files',{value:[new h.win.File([new Uint8Array([1,2,3])],'this-voice.ogg',{type:'audio/ogg'})]});this.dispatchEvent(new h.win.Event('change'))};
-    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
-    assert.equal(pickerInside,true);assert.equal(api.calls.length,1);assert.equal(api.calls[0].messageId,'voice:telegram:12345:0:10');assert.deepEqual(api.fetched,['blob:https://web.telegram.org/selected-file']);assert.deepEqual(api.revoked,['blob:https://web.telegram.org/selected-file']);assert.equal(h.document.querySelector('input[type="file"]'),null);assert.equal(h.stats().nativeClicks,0);assert.equal(h.stats().prepares,0);
-  }finally{h.close()}
+test('Telegram official detached media pool is acquired directly inside the original bubble with no file chooser',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h),api=voiceApi(h),audio=h.document.createElement('audio');audio.src='blob:https://web.telegram.org/detached-message';let clicks=0;
+  h.win.HTMLMediaElement.prototype.play=function(){return Promise.resolve()};h.win.HTMLMediaElement.prototype.pause=function(){};
+  row.querySelector('.toggle-play').onclick=()=>{clicks++;void audio.play()};h.win.HTMLInputElement.prototype.click=function(){assert.fail('must not open file picker')};
+  await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
+  assert.equal(clicks,1);assert.equal(api.calls.length,1);assert.equal(api.calls[0].messageId,'voice:telegram:12345:0:10');assert.deepEqual(api.fetched,['blob:https://web.telegram.org/detached-message']);assert.equal(h.document.querySelector('input[type="file"]'),null);assert.equal(h.stats().nativeClicks,0);assert.equal(h.stats().prepares,0);
+ }finally{h.close()}
 })
-test('Telegram changing conversations cancels the old file picker and its late selection cannot trigger paid work',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h),api=voiceApi(h);let input:any;h.win.HTMLInputElement.prototype.click=function(){input=this};
-    await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>Boolean(input));
-    h.win.location.hash='#98765';h.win.dispatchEvent(new h.win.HashChangeEvent('hashchange'));await tick();assert.equal(input.isConnected,false);
-    Object.defineProperty(input,'files',{value:[new h.win.File(['different'],'wrong.ogg')]});input.dispatchEvent(new h.win.Event('change'));await tick();assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(h.document.querySelector('input[type="file"]'),null);
-  }finally{h.close()}
+
+test('Telegram changing conversations cancels lazy player acquisition before any paid work',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h),api=voiceApi(h);let load:any;row.querySelector('.toggle-play').onclick=()=>load=()=>{const audio=h.document.createElement('audio');audio.src='blob:https://web.telegram.org/late';row.querySelector('.Audio').append(audio)};
+  await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>Boolean(load));h.win.location.hash='#98765';h.win.dispatchEvent(new h.win.HashChangeEvent('hashchange'));load();await tick();await tick();assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(h.document.querySelector('input[type="file"]'),null);
+ }finally{h.close()}
 })
+
 test('Telegram old voice controls remaining during a route transition cannot translate under the new conversation',async()=>{
   const h=harness();try{
     const row=audioFixture(h,'blob:https://web.telegram.org/old-row'),api=voiceApi(h);let pickers=0;h.win.HTMLInputElement.prototype.click=function(){pickers++};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));
@@ -318,12 +336,12 @@ test('Telegram late bilingual results do not attach to a recycled message row',a
     await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>calls===1);row.dataset.messageId='11';await tick();await tick();release({englishTranslation:'Old message',translation:'旧消息',targetLanguage:'zh-CN'});await tick();assert.equal(row.querySelector('[data-voice-chinese]').textContent,'');assert.equal(calls,1);assert.equal(row.querySelector('[data-rt-ui="voice"] button').disabled,false);
   }finally{h.close()}
 })
-test('Telegram disposing the page removes an open audio selector without fetching or translating',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h),api=voiceApi(h);h.win.HTMLInputElement.prototype.click=function(){};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();assert.ok(h.document.querySelector('input[type="file"]'));
-    h.win.dispatchEvent(new h.win.PageTransitionEvent('pagehide'));await tick();assert.equal(h.document.querySelector('input[type="file"]'),null);assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);
-  }finally{h.close()}
+test('Telegram disposing a page cancels pending lazy audio acquisition without fetching or translating',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();assert.equal(h.document.querySelector('input[type="file"]'),null);h.win.dispatchEvent(new h.win.PageTransitionEvent('pagehide'));await tick();assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);
+ }finally{h.close()}
 })
+
 test('Telegram a revoked lazy audio URL does not erase already completed bilingual text or ask for payment again',async()=>{
   const h=harness();try{
     const row=audioFixture(h,'blob:https://web.telegram.org/owned'),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-voice-chinese]')?.textContent==='中文：你好');
@@ -336,30 +354,28 @@ test('Telegram removing the actual voice control removes completed bilingual out
     row.querySelector('.Audio').remove();await until(()=>!row.querySelector('[data-rt-ui="voice"]'));assert.equal(api.calls.length,1);assert.equal(row.dataset.messageId,'10');
   }finally{h.close()}
 })
-test('Telegram replacing a voice control cancels its pending file selection and mounts a fresh usable entry',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h),api=voiceApi(h);let input:any;h.win.HTMLInputElement.prototype.click=function(){input=this};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>Boolean(input));
-    const previous=row.querySelector('[data-rt-ui="voice"]');row.querySelector('.Audio').outerHTML='<div class="Audio inline"><div class="content"><div class="waveform"></div><p class="voice-duration">0:20</p></div></div>';
-    await until(()=>!previous.isConnected&&Boolean(row.querySelector('[data-rt-ui="voice"]')));assert.equal(input.isConnected,false);assert.equal(row.querySelector('[data-rt-ui="voice"] button').disabled,false);assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);
-    Object.defineProperty(input,'files',{value:[new h.win.File(['old'],'previous.ogg')]});input.dispatchEvent(new h.win.Event('change'));await tick();assert.equal(api.calls.length,0);
-  }finally{h.close()}
+test('Telegram replacing a voice control cancels its lazy load and mounts a fresh usable entry',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h),api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();const previous=row.querySelector('[data-rt-ui="voice"]');
+  row.querySelector('.Audio').outerHTML='<div class="Audio inline"><div class="content"><div class="waveform"></div><p class="voice-duration">0:20</p></div></div>';await until(()=>!previous.isConnected&&Boolean(row.querySelector('[data-rt-ui="voice"]')));assert.equal(row.querySelector('[data-rt-ui="voice"] button').disabled,false);assert.equal(api.calls.length,0);assert.equal(api.fetched.length,0);assert.equal(h.document.querySelector('input[type="file"]'),null);
+ }finally{h.close()}
 })
-test('Telegram does not fetch an old currentSrc after the audio declares a different loading source',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h,'blob:https://web.telegram.org/new-loading'),api=voiceApi(h);Object.defineProperty(row.querySelector('audio'),'currentSrc',{value:'blob:https://web.telegram.org/previous'});let pickers=0;
-    h.win.HTMLInputElement.prototype.click=function(){pickers++;this.dispatchEvent(new h.win.Event('cancel'))};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('已取消'));assert.equal(pickers,1);assert.equal(api.fetched.length,0);assert.equal(api.calls.length,0);
-  }finally{h.close()}
+
+test('Telegram does not fetch old currentSrc while a different source loads and never offers a file selector',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h,'blob:https://web.telegram.org/new-loading'),api=voiceApi(h);Object.defineProperty(row.querySelector('audio'),'currentSrc',{value:'blob:https://web.telegram.org/previous'});row.querySelector('.toggle-play').remove();await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('无法读取'));assert.equal(api.fetched.length,0);assert.equal(api.calls.length,0);assert.equal(h.document.querySelector('input[type="file"]'),null);
+ }finally{h.close()}
 })
+
 test('Telegram quoted audio never acquires the containing message identity',async()=>{
   const h=harness();try{
     const row=h.document.querySelector('.Message');row.querySelector('.message-content').insertAdjacentHTML('beforeend','<div class="embedded-message"><div class="Audio inline"><div class="waveform"></div><audio src="blob:https://web.telegram.org/quoted"></audio></div></div>');const api=voiceApi(h);await until(()=>Boolean(row.querySelector('[data-rt-ui="translation"]')));await tick();assert.equal(row.querySelector('[data-rt-ui="voice"]'),null);assert.equal(api.calls.length,0);
   }finally{h.close()}
 })
-test('Telegram voice failures keep downloaded-file recovery in the same bubble',async()=>{
-  const h=harness();try{
-    const row=audioFixture(h,'blob:https://web.telegram.org/unreadable'),api=voiceApi(h);h.win.fetch=async()=>{throw new Error('语音尚未下载完成')};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();
-    await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('语音尚未下载完成'));const buttons=row.querySelectorAll('[data-rt-ui="voice"] button');assert.equal(buttons[0].disabled,false);assert.equal(buttons[1].hidden,false);assert.equal(buttons[1].textContent,'选择已下载的语音');assert.equal(api.calls.length,0);assert.equal(h.stats().nativeClicks,0);
-  }finally{h.close()}
+test('Telegram voice failures retain one inline retry action without any file chooser',async()=>{
+ const h=harness();try{
+  const row=audioFixture(h,'blob:https://web.telegram.org/unreadable'),api=voiceApi(h);h.win.fetch=async()=>{throw new Error('语音读取失败')};await until(()=>Boolean(row.querySelector('[data-rt-ui="voice"]')));row.querySelector('[data-rt-ui="voice"] button').click();await until(()=>row.querySelector('[data-rt-ui="voice"]')?.textContent.includes('语音读取失败'));const buttons=row.querySelectorAll('[data-rt-ui="voice"] button');assert.equal(buttons.length,1);assert.equal(buttons[0].disabled,false);assert.equal(buttons[0].textContent,'重试转为中文');assert.equal(api.calls.length,0);assert.equal(h.stats().nativeClicks,0);
+ }finally{h.close()}
 })
 
 test('Telegram bootstrap blocks text and caption send until the translator is installed',()=>{

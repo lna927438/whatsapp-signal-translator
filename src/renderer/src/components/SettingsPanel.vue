@@ -193,6 +193,7 @@ async function save(close = true) {
     if (close) emit('close')
   } catch (error: any) {
     settings.value.translationProvider = savedSnapshot.value?.translationProvider || 'deepseek'
+    settings.value.blockChineseSend = savedSnapshot.value?.blockChineseSend !== false
     apiState.value = 'error'
     apiMessage.value = error.message || String(error)
   } finally {
@@ -264,7 +265,7 @@ async function undo() {
       <div v-show="tab === 'translation'" class="toggles">
         <label><input v-model="settings.receiveAutoTranslate" type="checkbox" />{{ t(' 自动翻译收到的消息') }}</label>
         <label><input v-model="settings.sendAutoTranslate" type="checkbox" />{{ t(' 发送前自动翻译') }}</label>
-        <label class="important-toggle"><input type="checkbox" checked disabled />{{ t(' 禁止发送中文 ') }}<small>{{ t('强制保护：外语消息仍含中文时禁止发送。翻译失败、登录未恢复或没有可用字符时保留草稿。') }}</small></label>
+        <label class="important-toggle"><input v-model="settings.blockChineseSend" type="checkbox" />{{ t(' 禁止发送中文 ') }}<small>{{ t('开启：发送内容含中文时拦截，翻译失败保留原稿。关闭：含中文的内容直接发送原文，不自动翻译、不收翻译费。') }}</small></label>
       </div>
 
       <section v-show="tab === 'translation'" class="settings-group"><h3>{{ t('历史与发送体验') }}</h3>
@@ -286,4 +287,6 @@ async function undo() {
 
 <style scoped>
 .settings-panel > header{padding:18px 24px}.settings-panel > footer{padding:14px 24px}
+.settings-panel .important-toggle{background:#24372f;border:1px solid #557d68;color:#e8f4eb}
+.settings-panel .important-toggle small{color:#cbdccf;opacity:1;font-size:12px;line-height:1.5}
 </style>

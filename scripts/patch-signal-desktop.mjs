@@ -5,7 +5,7 @@ const root=resolve(import.meta.dirname,'..'), checkoutArg=process.argv.find(valu
 async function replace(file,oldValue,newValue){const path=resolve(upstream,file);let value=(await readFile(path,'utf8')).replace(/\r\n/g,'\n');if(value.includes(newValue))return;if(!value.includes(oldValue))throw new Error('Upstream anchor changed: '+file);await writeFile(path,value.replace(oldValue,newValue));}
 for(const [from,to] of [['hellodog.main.ts','app/hellodog.main.ts'],['hellodog.preload.ts','ts/hellodog/hellodog.preload.ts'],['hellodog.recovery.preload.ts','ts/hellodog/hellodog.recovery.preload.ts'],['hellodog.focus.preload.ts','ts/hellodog/hellodog.focus.preload.ts'],['fs-xattr.d.ts','ts/hellodog/fs-xattr.d.ts']]){const path=resolve(upstream,to);await mkdir(dirname(path),{recursive:true});await copyFile(resolve(root,'integrations/hellodog-source',from),path);}
 await copyFile(resolve(root,'resources/brand/hellodog-icon.png'),resolve(upstream,'images/hellodog-icon.png'));
-for(const name of ['hellodog.voice.preload.ts','hellodog.voice.dom.ts']) await copyFile(resolve(root,'integrations/hellodog-source',name),resolve(upstream,'ts/hellodog',name));
+for(const name of ['hellodog.voice.preload.ts','hellodog.voice.dom.ts','hellodog.send-policy.preload.ts']) await copyFile(resolve(root,'integrations/hellodog-source',name),resolve(upstream,'ts/hellodog',name));
 await copyFile(resolve(root,'src/shared/voiceAudio.ts'),resolve(upstream,'ts/hellodog/hellodog.voice-audio.std.ts'));
 // Voice attachments are decrypted locally, then decoded from an in-memory Blob.
 // Keep Signal's other page restrictions intact and permit only that local read.
@@ -53,6 +53,20 @@ await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '    await transla
       error => markMessageFailed({ message, errors: [error], targetTimestamp }),
       () => Boolean(message.get('isErased') || message.get('deletedForEveryone'))
     )) return;`);
+// Invalidate old raw-Chinese permission while attachment upload/native queues
+// are waiting, then authorize only the frozen body at each transport boundary.
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', "import { prepareHelloDogSend } from '../../hellodog/hellodog.recovery.preload.ts';", "import { prepareHelloDogSend } from '../../hellodog/hellodog.recovery.preload.ts';\nimport { captureHelloDogSendPolicy, createHelloDogDispatchGuard } from '../../hellodog/hellodog.send-policy.preload.ts';");
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '    if (!await prepareHelloDogSend(', '    const helloDogSendPolicy = captureHelloDogSendPolicy();\n    if (!await prepareHelloDogSend(');
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '    )) return;\n    const {\n      attachments,', '    )) return;\n    const helloDogDispatch = createHelloDogDispatchGuard(message, conversation, editedMessageTimestamp, helloDogSendPolicy);\n    const {\n      attachments,');
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '      messageSendPromise = sendSyncMessageOnly(message, {', '      const assertHelloDogSyncDispatch = await helloDogDispatch();\n      assertHelloDogSyncDispatch();\n      messageSendPromise = sendSyncMessageOnly(message, {');
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '            return sendToGroup({', '            const assertHelloDogGroupDispatch = await helloDogDispatch();\n            assertHelloDogGroupDispatch();\n            return sendToGroup({');
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '            return messaging.sendMessageToServiceId({', '            const assertHelloDogDirectDispatch = await helloDogDispatch();\n            assertHelloDogDirectDispatch();\n            return messaging.sendMessageToServiceId({');
+await replace('ts/jobs/helpers/sendNormalMessage.preload.ts', '    const errors = [thrownError, ...messageSendErrors];', `    const helloDogPreparationError = [originalError, thrownError, ...messageSendErrors].find(error => error instanceof Error && error.name === 'HelloDogSendPreparationError');
+    if (helloDogPreparationError instanceof Error) {
+      await markMessageFailed({ message, errors: [helloDogPreparationError], targetTimestamp });
+      return;
+    }
+    const errors = [thrownError, ...messageSendErrors];`);
 await replace('ts/state/ducks/composer.preload.ts', 'const debouncedSaveDraft = debounce(saveDraft, 100);', `const debouncedSaveDraft = debounce(saveDraft, 100);
 export async function flushHelloDogDrafts(): Promise<void> {
   debouncedSaveDraft.flush();

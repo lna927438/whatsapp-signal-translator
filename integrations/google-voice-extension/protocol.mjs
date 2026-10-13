@@ -57,6 +57,7 @@ export function statusValue(value) {
   const result = { connected: value.connected }
   for (const key of ['localLanguage', 'targetLanguage', 'historyMode']) if (typeof value[key] === 'string' && value[key].length <= 64) result[key] = value[key]
   for (const key of ['receiveAutoTranslate', 'sendAutoTranslate', 'blockChineseSend', 'translationsVisible']) if (typeof value[key] === 'boolean') result[key] = value[key]
+  if (Number.isSafeInteger(value.sendPolicyRevision) && value.sendPolicyRevision >= 0) result.sendPolicyRevision = value.sendPolicyRevision
   return result
 }
 export function translatedValue(value) {

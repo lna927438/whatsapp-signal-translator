@@ -60,6 +60,7 @@ function statusValue(value) {
   const result = { connected: value.connected }
   for (const key of ['localLanguage', 'targetLanguage', 'historyMode']) if (typeof value[key] === 'string' && value[key].length <= 64) result[key] = value[key]
   for (const key of ['receiveAutoTranslate', 'sendAutoTranslate', 'blockChineseSend', 'translationsVisible']) if (typeof value[key] === 'boolean') result[key] = value[key]
+  if (Number.isSafeInteger(value.sendPolicyRevision) && value.sendPolicyRevision >= 0) result.sendPolicyRevision = value.sendPolicyRevision
   return result
 }
 function translatedValue(value) {
@@ -121,7 +122,8 @@ class NativeClient {
 }
 
 
-const hasForbiddenHan = (text, language) => !/^(zh|ja)(?:-|$)/i.test(language) && /\p{Script=Han}/u.test(text)
+const hasForbiddenHan = (text, blockChinese = true) => blockChinese !== false && /\p{Script=Han}/u.test(text)
+const policyRevision = status => Number.isSafeInteger(status?.sendPolicyRevision) && status.sendPolicyRevision >= 0 ? status.sendPolicyRevision : 0
 const sameTarget = (a, b) => a && b && a.conversationId === b.conversationId && JSON.stringify(a.context) === JSON.stringify(b.context) && a.composer === b.composer && a.sendButton === b.sendButton
 const sameMedia = (a, b) => JSON.stringify(a?.media) === JSON.stringify(b?.media) && a?.mediaRevision === b?.mediaRevision
 const sameDraft = (a, b) => sameTarget(a, b) && sameMedia(a, b) && a.text === b.text && a.revision === b.revision
@@ -197,9 +199,10 @@ class SendGuard {
       const translated = translatedValue(await this.bridge.translate(payload))
       this.assertPreviewCurrent(revision)
       if (JSON.stringify(translated.media) !== JSON.stringify(original.media)) throw new Error('图片草稿回执不一致，已阻止发送。')
-      if (hasForbiddenHan(translated.text, status.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
+      if (hasForbiddenHan(translated.text, status.blockChineseSend)) throw new Error('译文仍含中文，已阻止发送。')
+      if (status.blockChineseSend === false && /\p{Script=Han}/u.test(original.text) && (translated.text !== original.text || !translated.untranslated)) throw new Error('已关闭禁止发送中文，请重新发送原文。')
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
-      job.translated = translated; job.targetLanguage = status.targetLanguage
+      job.translated = translated; job.targetLanguage = status.targetLanguage; job.blockChinese = status.blockChineseSend !== false; job.sendPolicyRevision = policyRevision(status)
       this.state = 'preview'
       return { text: translated.text, requestId: translated.requestId, untranslated: translated.untranslated === true, ...mediaFields(original) }
     } catch (error) { if (revision === this.previewRevision && this.state !== 'uncertain') this.state = 'failed'; throw error }
@@ -221,12 +224,19 @@ class SendGuard {
       this.state = 'uncertain'; job.pendingRequestId = job.translated.requestId; job.pendingAttempt = result.attempt
       this.assertPreviewCurrent(revision)
       if (!sameDraft(original, this.adapter.snapshot())) throw new Error('对话或草稿已变化，已阻止发送。')
-      if (hasForbiddenHan(job.translated.text, job.targetLanguage)) throw new Error('译文仍含中文，已阻止发送。')
+      if (hasForbiddenHan(job.translated.text, job.blockChinese)) throw new Error('译文仍含中文，已阻止发送。')
       if (!this.adapter.replace(original, job.translated.text)) throw new Error('译文未写入，已阻止发送。')
       if (this.adapter.settle) await this.adapter.settle()
       this.assertPreviewCurrent(revision)
+      // Editor settlement is asynchronous. Read live policy again after it,
+      // including a monotonic host revision to catch OFF -> ON -> OFF changes.
+      // Status is read-only: never reserve a second dispatch or retranslate.
+      const status = await this.bridge.status()
+      this.assertPreviewCurrent(revision)
+      if (!status.connected || status.targetLanguage !== job.targetLanguage || (status.blockChineseSend !== false) !== job.blockChinese || policyRevision(status) !== job.sendPolicyRevision) throw new Error('中文发送设置或连接已变化，已阻止发送，请重新核对草稿。')
+      if (hasForbiddenHan(job.translated.text, status.blockChineseSend) || status.blockChineseSend === false && /\p{Script=Han}/u.test(original.text) && (job.translated.text !== original.text || !job.translated.untranslated)) throw new Error('中文发送设置核对失败，已阻止发送并保留草稿。')
       const current = this.adapter.snapshot()
-      if (!sameTarget(original, current) || !sameMedia(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.targetLanguage)) throw new Error('输入框、图片或目标核对失败，已阻止发送。')
+      if (!sameTarget(original, current) || !sameMedia(original, current) || current.text !== job.translated.text || hasForbiddenHan(current.text, job.blockChinese)) throw new Error('输入框、图片或目标核对失败，已阻止发送。')
       // No await between final target/text checks and the only permitted click.
       // Mark uncertain BEFORE dispatch: a thrown/unknown click must never replay.
       this.state = 'uncertain'

@@ -68,6 +68,7 @@ function statusValue(value: unknown): Record<string, unknown> {
   const result: Record<string, unknown> = { connected: value.connected }
   for (const key of ['localLanguage', 'targetLanguage', 'historyMode']) if (typeof value[key] === 'string' && value[key].length <= 64) result[key] = value[key]
   for (const key of ['receiveAutoTranslate', 'sendAutoTranslate', 'blockChineseSend', 'translationsVisible']) if (typeof value[key] === 'boolean') result[key] = value[key]
+  if (Number.isSafeInteger(value.sendPolicyRevision) && (value.sendPolicyRevision as number) >= 0) result.sendPolicyRevision = value.sendPolicyRevision
   return result
 }
 function translatedValue(value: unknown, media?: GoogleVoiceMessageMedia): Record<string, unknown> {

@@ -41,13 +41,14 @@ test('Telegram bridge requires the owning registered Web A main frame and cannot
   } finally { rmSync(h.directory, { recursive: true, force: true }) }
 })
 
-function integration() {
+function integration(blockChineseSend = true) {
   const handlers = new Map<string, Function>(), windowEvents = new EventEmitter(), power = new EventEmitter()
   const h = mainHarness({ ipcMain: { on() {}, handle: (name: string, fn: Function) => handlers.set(name, fn) }, powerMonitor: power, dialog: { showMessageBox: async () => ({ response: 1 }) } })
   const { SendTasks, SendNotStartedError, SendPendingError } = h.load('src/main/translation/sendTasks.ts')
   const { JsonStore } = h.load('src/main/storage/jsonStore.ts'), { TranslationEngine } = h.load('src/main/translation/translationEngine.ts')
   const { createSecureIpc } = h.load('src/main/secureIpc.ts')
   let owner = 'owner', revision = 0, uncertain = false, sends = 0, tgRefreshes = 0, waRefreshes = 0
+  const preferences={sendAutoTranslate:true,localLanguage:'zh-CN',targetLanguage:'en-US',blockChineseSend}
   const calls: any[] = [], records = [{ id: 'tg-a', platform: 'telegram' }, { id: 'tg-b', platform: 'telegram' }, { id: 'wa', platform: 'whatsapp' }]
   const { whatsapp: waBase, telegram: tgBase } = adapters()
   const whatsapp = { ...waBase, resumeTranslations() {}, refreshTranslations() { waRefreshes++ }, reconcileTask: async () => null }
@@ -75,14 +76,28 @@ function integration() {
     ipcMain, mainWindow: window, webAdapter: (platform: string) => platform === 'telegram' ? telegram : platform === 'whatsapp' ? whatsapp : undefined,
     sendTasks: tasks, translator, drafts, SendNotStartedError, createHash, taskIdentity: identity, accounts: { list: async () => records }, signal,
     outgoingCredit: { check: async () => {} }, accountStatus: { assertAvailable() {} },
-    accountRuntime: async () => ({ sendAutoTranslate: true, localLanguage: 'zh-CN', targetLanguage: 'en-US' })
+    ...h.load('src/main/translation/outgoingPolicy.ts'),
+    accountRuntime: async () => ({...preferences})
   })
   const invoke = (name: string, args: unknown[], e = event()) => Promise.resolve().then(() => handlers.get(name)!(e, ...args))
   const input = (intentId: string, text = '请帮我确认明天上午的安排。') => ({ platform: 'telegram', accountId: 'tg-a', conversationId: 'telegram:101:0', targetKey: 'peer:telegram:101:0', intentId, text })
-  return { ...h, invoke, input, tasks, translator, calls, drafts, sends: () => sends, refreshes: () => ({ telegram: tgRefreshes, whatsapp: waRefreshes }), uncertain: () => { uncertain = true },
+  return { ...h, invoke, input, tasks, translator, calls, drafts, preferences, sends: () => sends, refreshes: () => ({ telegram: tgRefreshes, whatsapp: waRefreshes }), uncertain: () => { uncertain = true },
     changeOwner: (next: string) => { owner = next; revision++; translator.setOnlineSession(next, 'synthetic-token') },
     close: async () => { windowEvents.emit('closed'); await translator.flush(); await tasks.flush(); await drafts.flush(); rmSync(h.directory, { recursive: true, force: true }) } }
 }
+
+test('actual Telegram main send path uses original Chinese without translation and rechecks a changed switch before dispatch',async()=>{
+ const h=integration(false)
+ try{
+  const text='  你好，Alice\n保留  间隔。  ',task=await h.invoke('send:prepare',[h.input('intent-raw-chinese-switch',text)])
+  assert.equal(task.request.text,text);assert.equal(task.translate,false)
+  await h.invoke('send:translate',[task.id]);assert.equal(h.calls.length,0)
+  h.preferences.blockChineseSend=true
+  await assert.rejects(h.invoke('send:submit',[task.id]),/设置已变化/);assert.equal(h.sends(),0)
+  h.preferences.blockChineseSend=false
+  const sent=await h.invoke('send:submit',[task.id]);assert.equal(sent.translated,text);assert.equal(h.sends(),1);assert.equal(h.calls.length,0)
+ }finally{await h.close()}
+})
 
 test('actual Telegram draft and send handlers bind each task to its account and never fall through to Signal', async () => {
   const h = integration()

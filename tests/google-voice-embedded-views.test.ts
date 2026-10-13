@@ -769,6 +769,35 @@ test('specialized preload is inherited by official internal pages and their gues
   assert.equal(pages[1].webContents, h.views[1].webContents)
 })
 
+test('settings barrier accepts only each owned main-frame acknowledgement and waits for all Voice pages',async()=>{
+ const h=fixture();h.manager.create('owner',A);h.manager.create('owner',B)
+ let completed=false;const pending=h.manager.invalidateContextAndWait().then(()=>completed=true)
+ const [a,b]=h.views.map(view=>view.webContents),tokenA=a.sent.at(-1)[1].token,tokenB=b.sent.at(-1)[1].token
+ assert.notEqual(tokenA,tokenB);assert.equal(completed,false)
+ assert.equal(h.manager.acknowledgeContext({sender:b,senderFrame:b.mainFrame},tokenA),false)
+ assert.equal(h.manager.acknowledgeContext({sender:a,senderFrame:{url:a.url,detached:false}},tokenA),false)
+ assert.equal(h.manager.acknowledgeContext({sender:a,senderFrame:a.mainFrame},{token:tokenA}),false)
+ assert.equal(h.manager.acknowledgeContext({sender:a,senderFrame:a.mainFrame},tokenA),true)
+ await Promise.resolve();assert.equal(completed,false);assert.equal(h.manager.acknowledgeContext({sender:a,senderFrame:a.mainFrame},tokenA),false)
+ assert.equal(h.manager.acknowledgeContext({sender:b,senderFrame:b.mainFrame},tokenB),true);await pending;assert.equal(completed,true);h.manager.destroy()
+})
+
+test('missing Voice acknowledgement times out without allowing a later stale token to succeed',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const h=fixture();h.manager.create('owner',A)
+ const wc=h.views[0].webContents,work=h.manager.invalidateContextAndWait(),token=wc.sent.at(-1)[1].token
+ const rejected=assert.rejects(work,/尚未确认/);t.mock.timers.tick(2001);await rejected
+ assert.equal(h.manager.acknowledgeContext({sender:wc,senderFrame:wc.mainFrame},token),false);h.manager.destroy()
+})
+
+test('navigation or closure during a Voice acknowledgement rejects the save barrier immediately',async()=>{
+ for(const close of [false,true]){
+  const h=fixture();h.manager.create('owner',A);const wc=h.views[0].webContents,work=h.manager.invalidateContextAndWait(),token=wc.sent.at(-1)[1].token
+  const rejected=assert.rejects(work,/页面已变化/)
+  if(close)h.manager.close('owner',A);else wc.emit('did-start-navigation',{},wc.url,true,true)
+  await rejected;assert.equal(h.manager.acknowledgeContext({sender:wc,senderFrame:wc.mainFrame},token),false);h.manager.destroy()
+ }
+})
+
 test('notification consent is explicit, independent of microphone consent, and resets with the live view', () => {
   const h = fixture(); h.manager.create('owner', A); const wc = h.views[0].webContents
   const request = () => { let result: any; wc.session.request(wc, 'notifications', (accepted: boolean) => { result = accepted }, { isMainFrame: true, requestingUrl: wc.url }); return result }

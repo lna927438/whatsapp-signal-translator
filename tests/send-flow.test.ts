@@ -55,7 +55,7 @@ test('Signal retains a late RPC response for background reconciliation without r
 test('different messages with identical translations cannot borrow each other\'s WhatsApp receipt', async () => {
   let data:any = {tasks:[]}
   const tasks = new SendTasks({read:async()=>structuredClone(data),write:async(next:any)=>{data=structuredClone(next)}})
-  const prepare = (text:string) => tasks.prepare('owner',{platform:'whatsapp',accountId:'a',conversationId:'wa:alex',targetKey:'peer:alex@c.us',translate:true,blockChinese:false,request:{text,targetLanguage:'en-US'}})
+  const prepare = (text:string) => tasks.prepare('owner',{platform:'whatsapp',accountId:'a',conversationId:'wa:alex',targetKey:'peer:alex@c.us',translate:true,blockChinese:true,request:{text,targetLanguage:'en-US'}})
   const first = await prepare('早上好')
   await tasks.translate('owner',first.id,async()=> 'Good morning',()=>true)
   await tasks.submit('owner',first.id,async()=>{throw new SendPendingError({baseline:['old'],targetKey:'peer:alex@c.us'})},()=>true)

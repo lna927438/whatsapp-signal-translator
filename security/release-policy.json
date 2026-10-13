@@ -1,7 +1,7 @@
 {
-  "allowProduction": true,
-  "reason": "On 2026-10-12 the owner explicitly authorized completing comprehensive all-app voice tests and performance improvements, then publishing this release and cleaning obsolete artifacts afterward. This supersedes the earlier beta-only instruction. Release requires a clean final source, verified installer and corresponding source, signed update metadata, health checks and preserved rollback. Current real-account acceptance for the repaired WhatsApp, Telegram and Google Voice paths is unavailable and must remain disclosed.",
-  "ownerAuthorizedProduction": true,
+  "allowProduction": false,
+  "reason": "2026-10-13 follow-up: implement direct in-bubble bilingual voice translation and the Chinese-send switch in a local candidate. The previous authorization covered 0.5.22 only. The reported WhatsApp screenshots are from another computer and current real-account acceptance is unavailable. Do not publish this new candidate without the owner's next release approval.",
+  "ownerAuthorizedProduction": false,
   "requireCleanSource": true,
   "requireSignedInstaller": false,
   "requireSignedManifest": true

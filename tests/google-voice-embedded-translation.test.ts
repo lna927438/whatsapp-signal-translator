@@ -294,3 +294,13 @@ test('oversized, unknown and malformed operations never reach storage or engine'
   assert.equal((await h.request('outgoing-id', { conversationId, text: 'nul\0text' })).code, 'invalid')
   assert.equal(h.calls.length, 0); assert.equal(Object.keys(h.data().records).length, 0)
 })
+
+test('embedded status forwards only bounded send-policy revisions without leaking private fields', async () => {
+  const h = fixture()
+  h.setHandler(async () => ({ connected: true, blockChineseSend: false, sendPolicyRevision: 42, privateToken: 'must-not-leak' }))
+  assert.deepEqual(normalized(await h.request('status')), { ok: true, result: { connected: true, blockChineseSend: false, sendPolicyRevision: 42, newMessageTracking: true } })
+  for (const sendPolicyRevision of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '42', null]) {
+    h.setHandler(async () => ({ connected: true, sendPolicyRevision }))
+    assert.equal((await h.request('status')).result.sendPolicyRevision, undefined)
+  }
+})

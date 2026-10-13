@@ -55,10 +55,11 @@ test('native Signal rejects late results after switching conversation, deletion,
     }finally{f.close()}
   }
 })
-test('native Signal un-downloaded voice does not read audio; downloading then retrying works',async()=>{
-  const f=fixture();const item={id:'message-a',conversationId:'conversation-a',attachmentId:'a'.repeat(64),ready:false}
-  try{f.items([item]);f.button().click();await flush();assert.equal(f.calls(),0);assert.match(f.dom.window.document.body.textContent!,/先下载/)
-    f.items([{...item,ready:true}]);f.button().click();await flush();assert.equal(f.calls(),1)
+test('native Signal unloaded voice starts one explicit load action and completes without a second click',async()=>{
+  let finish!:(value:typeof answer)=>void
+  const f=fixture(()=>new Promise(resolve=>{finish=resolve}));const item={id:'message-a',conversationId:'conversation-a',attachmentId:'a'.repeat(64),ready:false}
+  try{f.items([item]);assert.equal(f.calls(),0);f.button().click();await flush();assert.equal(f.calls(),1);assert.match(f.dom.window.document.body.textContent!,/正在读取/);assert.doesNotMatch(f.dom.window.document.body.textContent!,/先下载/)
+    f.items([{...item,ready:true}]);assert.equal(f.button().disabled,true);finish(answer);await flush();assert.equal(f.calls(),1);assert.match(f.dom.window.document.body.textContent!,/你好吗/)
   }finally{f.close()}
 })
 test('native Signal renders translator output as text and rejects a non-Chinese target contract',async()=>{

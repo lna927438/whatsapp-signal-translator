@@ -3,7 +3,7 @@ import { whatsappPresenceScript } from './presence'
 import { whatsappVoiceScript } from './voiceMessages'
 import { readWhatsAppComposerText } from './composerText'
 import { equivalentDisplayText, wrongTargetScript } from '../../../../shared/translationResult'
-import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
+import { blocksChineseSend } from '../../../translation/outgoingPolicy'
 const whatsappTextScript = String.raw`
 (() => {
   if (window.__RT_TRANSLATOR_INSTALLED__) return;
@@ -30,6 +30,7 @@ const whatsappTextScript = String.raw`
   const pendingSent = [];
   let sending = false;
   let activeSend;
+  let sendPolicyRevision = 0;
   const queuedSends = new Map();
   let commitTail = Promise.resolve();
   let queuePreparing = false;
@@ -106,7 +107,7 @@ const whatsappTextScript = String.raw`
   const normalizeMessage = (text) => String(text || '').replace(/\u00a0/g, ' ').replace(/[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
   const equivalentDisplayText = ${equivalentDisplayText.toString()};
   const wrongTargetScript = ${wrongTargetScript.toString()};
-  const hasBlockedChinese = ${hasBlockedChinese.toString()};
+  const blocksChineseSend = ${blocksChineseSend.toString()};
   const composerText = ${readWhatsAppComposerText.toString()};
   // Dispatch must compare hard line breaks and spaces, not just visible words.
   const exactComposerText = text => String(text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
@@ -629,14 +630,15 @@ const whatsappTextScript = String.raw`
     return { text: composerText(snapshot.composer) };
   };
 
+  window.__RT_SEND_INVALIDATE__ = () => { sendPolicyRevision++; if(activeSend) activeSend.policyInvalid = true; };
   window.__RT_SEND_COMMIT__ = async (task) => {
     const snapshot = activeSend;
     await sleep(0); // Let native input/React update the send button before clicking.
     const button = findSendButton();
-    if (hasBlockedChinese(composerText(snapshot?.composer), task.targetLanguage || 'en')) {
+    if (blocksChineseSend(composerText(snapshot?.composer), task.blockChinese !== false)) {
       return { dispatched: false, message: '输入框仍含中文，已阻止发送并保留草稿。' };
     }
-    if (!snapshot || snapshot.id !== task.id || !matchesSnapshot(snapshot)
+    if (!snapshot || snapshot.policyInvalid || snapshot !== activeSend || snapshot.id !== task.id || !matchesSnapshot(snapshot)
       || composerText(snapshot.composer) !== exactComposerText(task.translated)
       || !button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
       return { dispatched: false, message: '对话、草稿或发送按钮已变化，已阻止发送。' };
@@ -928,10 +930,35 @@ const whatsappTextScript = String.raw`
 
   const stopInput = (event) => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); };
   const auxiliaryEditor = target => (target instanceof Element ? target : target?.parentElement)?.closest('[role="dialog"], [data-testid*="media-preview"]');
+  const auxiliarySending = new WeakSet();
+  const auxiliarySendButton = button => /send|发送|save|保存|confirm|确认/i.test([button.getAttribute('aria-label'),button.getAttribute('data-testid'),button.getAttribute('data-icon')].join(' '))
+    || button.querySelector('[data-icon*="send"],[data-testid*="send"],[data-icon="checkmark"]');
   const guardAuxiliary = (event, scope) => {
-    const text = [...scope.querySelectorAll('[contenteditable="true"], [contenteditable="plaintext-only"], textarea')]
-      .map(editor => editor.value || composerText(editor)).join(' ');
-    if (/\p{Script=Han}/u.test(text)) { stopInput(event); reportStatus('error', '此编辑窗口中的中文尚未翻译，已阻止发送。请先在聊天输入框翻译后再使用。'); }
+    const editors = [...scope.querySelectorAll('[contenteditable="true"], [contenteditable="plaintext-only"], textarea')];
+    const read = () => editors.map(editor => editor.value || composerText(editor)).join(' '), original = read();
+    if (!/\p{Script=Han}/u.test(original)) return;
+    stopInput(event);
+    if (!['click','keydown'].includes(event.type) || auxiliarySending.has(scope)) return;
+    const clicked = event.type === 'click' ? (event.target instanceof Element ? event.target : event.target?.parentElement)?.closest('button,[role="button"]') : null;
+    const buttons = [...scope.querySelectorAll('button,[role="button"]')].filter(auxiliarySendButton);
+    const button = clicked && buttons.includes(clicked) ? clicked : buttons.length === 1 ? buttons[0] : null;
+    if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return;
+    const key = targetKey(), conversation = conversationInfo().id, revision = navigationRevision, policyRevision = sendPolicyRevision;
+    let changed = false;
+    const observer = new MutationObserver(() => { changed = true; });
+    observer.observe(scope,{childList:true,characterData:true,attributes:true,subtree:true});
+    auxiliarySending.add(scope);
+    void (async () => {
+      const preferences = await bounded(window.realtimeTranslator?.getRuntimeSettings(conversation),8000,'中文发送设置读取失败，原稿已保留。');
+      if (preferences?.blockChineseSend !== false) throw new Error('此编辑窗口中的中文尚未翻译，已阻止发送。请先在聊天输入框翻译后再使用。');
+      if (changed || observer.takeRecords().length || !scope.isConnected || !button.isConnected || auxiliaryEditor(button) !== scope
+        || editors.some(editor => !editor.isConnected || composingEditors.has(editor)) || read() !== original
+        || key !== targetKey() || conversation !== conversationInfo().id || revision !== navigationRevision || policyRevision !== sendPolicyRevision
+        || button.disabled || button.getAttribute('aria-disabled') === 'true') throw new Error('会话、附件或草稿已变化，未发送。');
+      // This one exact official action is replayed only after the current main
+      // preference permits raw Chinese. No translation or file content is sent.
+      nativeClick = button; try { button.click(); } finally { nativeClick = null; }
+    })().catch(error => reportStatus('error',String(error?.message || error))).finally(() => { observer.disconnect();auxiliarySending.delete(scope); });
   };
   document.addEventListener('compositionstart', event => {
     const composer = getComposer(event.target);
@@ -1008,8 +1035,7 @@ const whatsappTextScript = String.raw`
     if (editorLocked) { stopInput(event); return; }
     const auxiliary = auxiliaryEditor(event.target), button = (event.target instanceof Element ? event.target : event.target?.parentElement)?.closest('button,[role="button"]');
     if (auxiliary && button && !auxiliary.closest('[data-rt-ui]')) {
-      if (/send|发送|save|保存|confirm|确认/i.test([button.getAttribute('aria-label'),button.getAttribute('data-testid'),button.getAttribute('data-icon')].join(' '))
-        || button.querySelector('[data-icon*="send"],[data-testid*="send"],[data-icon="checkmark"]')) guardAuxiliary(event, auxiliary);
+      if (auxiliarySendButton(button)) guardAuxiliary(event, auxiliary);
       return;
     }
     if (!isSendTarget(event.target)) return;

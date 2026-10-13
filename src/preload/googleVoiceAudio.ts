@@ -1,10 +1,12 @@
 import {voiceAudioWav} from '../shared/voiceAudio'
+import {acquireVoicePlayer} from '../shared/voicePlayer'
 
 export interface GoogleVoiceAudioResult {text:string;translation:string;englishTranslation:string;audioId:string;targetLanguage:'zh-CN'}
 export interface GoogleVoiceAudioContext {conversationId:string;messageId:string}
 interface Options {
  translateAudio:(bytes:Uint8Array,context:GoogleVoiceAudioContext)=>Promise<GoogleVoiceAudioResult>
  decode?:(url:string)=>Promise<Uint8Array>
+ acquireAudio?:(player:HTMLElement,control:HTMLElement|undefined,identity:string,current:()=>boolean)=>Promise<Uint8Array>
 }
 const customPlayers='gv-audio-player,gv-voicemail-player,[gv-test-id="audio-player"],[gv-test-id="voicemail-player"],.gv-audio-player,.voicemail-player,.audio-player'
 const messageRows='[data-message-id],[data-voicemail-id],gv-voicemail-message,gv-voicemail-detail,gv-voicemail-details,gv-voicemail-thread,gv-message-item,gv-message'
@@ -12,7 +14,7 @@ const liveControls='gv-active-call,gv-call-controls,gv-call-dialer,[gv-test-id="
 const ownUi='[data-hellodog-voice-audio]'
 const identities=['data-message-id','data-voicemail-id','data-id','id']
 type Candidate={player:HTMLElement;native:boolean;row:HTMLElement;identity:string;audio?:HTMLAudioElement;source:string;mediaUnloaded:boolean}
-type Entry=Candidate&{page:string;host:HTMLElement;revision:number;busy:boolean;completed:boolean;restoreWrap?:()=>void}
+type Entry=Candidate&{page:string;host:HTMLElement;revision:number;busy:boolean;acquiring:boolean;completed:boolean;restoreWrap?:()=>void}
 // Context/provider changes reinstall this module on the same document. Keep
 // fallback row identities stable there, without sharing them across documents.
 const documentRowKeys=new WeakMap<Document,WeakMap<Element,string>>()
@@ -21,14 +23,13 @@ const documentRowKeys=new WeakMap<Document,WeakMap<Element,string>>()
 // across same-document reinstalls; a second scan must not adopt stale media.
 const documentAudioOwners=new WeakMap<Document,WeakMap<HTMLAudioElement,Map<string,string>>>()
 
-/** Custom controls still get an entry when Google uses shared media. Direct
- * decoding requires one audio descendant owned by that player; otherwise the
- * explicit local file chooser stays in this bubble. Never infer global audio
- * ownership from a play click or record a live call. */
+/** Direct message-player acquisition never opens a file chooser or reads an
+ * arbitrary global player. The optional main-world reader is required for
+ * official detached players when this adapter runs in the isolated preload. */
 export function installGoogleVoiceAudio(document:Document,options:Options):()=>void {
  const view=document.defaultView!
  if(!view||view!==view.top||view.location.origin!=='https://voice.google.com')return()=>{}
- const entries=new Map<HTMLElement,Entry>(),rowKeys=documentRowKeys.get(document)||new WeakMap<Element,string>(),decode=options.decode||voiceAudioWav
+ const entries=new Map<HTMLElement,Entry>(),rowKeys=documentRowKeys.get(document)||new WeakMap<Element,string>(),decode=options.decode||((url:string)=>voiceAudioWav(url,'https://voice.google.com'))
  documentRowKeys.set(document,rowKeys)
  const audioOwners=documentAudioOwners.get(document)||new WeakMap<HTMLAudioElement,Map<string,string>>()
  documentAudioOwners.set(document,audioOwners)
@@ -46,7 +47,7 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
   // It is then a stale playback reference, not an owned source to read again.
   return !declared||selected&&declared!==selected?'':declared
  }
- const allowed=(url:string)=>{try{const value=new URL(url);return value.protocol==='blob:'&&value.origin==='https://voice.google.com'}catch{return false}}
+ const allowed=(url:string)=>{try{const value=new URL(url);return /^(?:blob:|https:)$/.test(value.protocol)&&value.origin==='https://voice.google.com'}catch{return false}}
  const excluded=(element:Element)=>Boolean(element.closest(ownUi+','+liveControls))||/\/settings(?:\/|$)/.test(view.location.pathname)
  const playControl=(element:Element)=>{
   const label=(element.getAttribute('aria-label')||element.getAttribute('title')||'').trim()
@@ -99,7 +100,7 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
  }
  const sameIdentity=(entry:Entry,next?:Candidate)=>Boolean(next&&next.row===entry.row&&next.identity===entry.identity)
  const completedUnload=(entry:Entry,next?:Candidate)=>Boolean(entry.completed&&!entry.busy&&sameIdentity(entry,next)&&next?.mediaUnloaded)
- const same=(entry:Entry,next?:Candidate)=>sameIdentity(entry,next)&&Boolean(next&&(next.audio===entry.audio&&next.source===entry.source||completedUnload(entry,next)))
+ const same=(entry:Entry,next?:Candidate)=>sameIdentity(entry,next)&&Boolean(next&&(next.audio===entry.audio&&next.source===entry.source||completedUnload(entry,next)||entry.acquiring&&!entry.source))
  const current=(entry:Entry,revision:number)=>!disposed&&entry.revision===revision&&entries.get(entry.player)===entry&&entry.host.isConnected&&entry.page===view.location.href&&same(entry,candidate(entry.player,entry.native))
  const clear=(entry:Entry)=>{entry.revision++;entry.host.remove();entry.restoreWrap?.();entries.delete(entry.player)}
  const fingerprint=async(value:string)=>[...new Uint8Array(await view.crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,'0')).join('')
@@ -115,14 +116,12 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
   const box=document.createElement('div');box.className='box'
   const actions=document.createElement('div');actions.className='actions'
   const button=document.createElement('button');button.type='button';button.textContent='转为中文'
-  const fileButton=document.createElement('button');fileButton.type='button';fileButton.textContent='选择语音文件';fileButton.setAttribute('aria-label','选择这条语音对应的本地文件')
-  const fileInput=document.createElement('input');fileInput.type='file';fileInput.accept='audio/*,.ogg,.opus,.mp3,.m4a,.wav,.webm,.aac,.flac';fileInput.setAttribute('aria-label','选择这条语音对应的本地文件')
   const status=document.createElement('p');status.setAttribute('role','status')
   const english=document.createElement('p');english.setAttribute('aria-label','英文译文');english.lang='en'
   const chinese=document.createElement('p');chinese.setAttribute('aria-label','中文译文');chinese.lang='zh-CN'
   const details=document.createElement('details'),summary=document.createElement('summary'),original=document.createElement('p');summary.textContent='查看识别原文';details.append(summary,original);details.hidden=true
-  const note=document.createElement('small');note.textContent=allowed(item.source)?'点击后显示中英文字，保留原语音，不自动播放。':'请先用官方功能保存这条语音，再在这里选择对应文件，显示中英文字。'
-  actions.append(button,fileButton);box.append(actions,fileInput,status,english,chinese,details,note);shadow.append(style,box)
+  const note=document.createElement('small');note.textContent='点击后直接读取这条语音，在原气泡下方显示中英文字。'
+  actions.append(button);box.append(actions,status,english,chinese,details,note);shadow.append(style,box)
   // Prefer the original message container so horizontal controls stay intact.
   // A standalone custom component is itself the bubble: give only our new
   // full-width item a second flex line and restore that one property on removal.
@@ -136,43 +135,28 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
    }
    item.row.append(host)
   }
-  const entry:Entry={...item,page:view.location.href,host,revision:0,busy:false,completed:false,restoreWrap};entries.set(item.player,entry)
-  let selectionRevision:number|undefined
-  const setBusy=(busy:boolean)=>{entry.busy=busy;button.disabled=busy||entry.completed;fileButton.disabled=busy}
-  async function translate(url:string,revision:number){
-   entry.completed=false;setBusy(true);status.textContent='正在生成中英文字…';english.textContent='';chinese.textContent='';original.textContent='';details.hidden=true
+  const entry:Entry={...item,page:view.location.href,host,revision:0,busy:false,acquiring:false,completed:false,restoreWrap};entries.set(item.player,entry)
+  const setBusy=(busy:boolean)=>{entry.busy=busy;button.disabled=busy||entry.completed}
+  async function translate(revision:number){
+   entry.completed=false;entry.acquiring=true;setBusy(true);status.textContent='正在加载这条语音…';english.textContent='';chinese.textContent='';original.textContent='';details.hidden=true
    try{
-    const bytes=await bounded(decode(url),30000);if(!current(entry,revision))return
+    const valid=()=>current(entry,revision),control=controls(entry.player),identity=entry.page+'\0'+entry.identity
+    const read=async()=>{const lease=await acquireVoicePlayer(entry.player,control.length===1?control[0]:undefined,identity,valid,{allowedOrigin:'https://voice.google.com'});try{const value=await decode(lease.url);if(!lease.current())throw Error('voice-changed');return value}finally{lease.release()}}
+    const bytes=await bounded(options.acquireAudio?options.acquireAudio(entry.player,control.length===1?control[0]:undefined,identity,valid):read(),45000);if(!current(entry,revision))return
+    const next=candidate(entry.player,entry.native);if(!next||!sameIdentity(entry,next))return
+    entry.audio=next.audio;entry.source=next.source;entry.mediaUnloaded=next.mediaUnloaded;entry.acquiring=false;status.textContent='正在生成中英文字…'
     const [routeId,messageId]=await Promise.all([fingerprint(entry.page),fingerprint(entry.page+'\0'+entry.identity)]);if(!current(entry,revision))return
     // The main process owns the five-minute processing deadline. This longer
     // transport backstop also releases the UI if the IPC response is lost.
     const result=await bounded(options.translateAudio(bytes,{conversationId:'google-voice-audio:'+routeId,messageId:'voice:google-voice:'+messageId}),330000);if(!current(entry,revision))return
     if(!result||result.targetLanguage!=='zh-CN'||typeof result.text!=='string'||!result.text.trim()||Array.from(result.text).length>12000||typeof result.translation!=='string'||!result.translation.trim()||result.translation.length>40000||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim()||result.englishTranslation.length>40000||!/^[a-f0-9]{64}$/.test(result.audioId))throw Error('invalid-result')
     english.textContent=result.englishTranslation;chinese.textContent=result.translation;original.textContent=result.text;details.hidden=result.text===result.translation||result.text===result.englishTranslation;status.textContent='已转为中文';button.textContent='已显示中英文字';entry.completed=true
-   }catch{if(current(entry,revision))status.textContent='这次未能生成中英文字，可重试或选择这条语音的本地文件。'}
-   finally{if(current(entry,revision))setBusy(false)}
-  }
-  function selectFile(event:Event){
-   if(!event.isTrusted||entry.busy||!current(entry,entry.revision))return
-   // A completed player may have released its old audio node. An explicitly
-   // selected replacement file starts from the current, still-owned media.
-   const next=candidate(entry.player,entry.native)
-   if(completedUnload(entry,next)&&next){entry.audio=next.audio;entry.source=next.source;entry.mediaUnloaded=next.mediaUnloaded}
-   selectionRevision=++entry.revision;fileInput.value='';fileInput.click()
+   }catch{if(current(entry,revision)){status.textContent='这次未能读取或翻译语音，请稍后在原气泡重试。';button.textContent='重试转为中文'}}
+   finally{if(current(entry,revision)){entry.acquiring=false;setBusy(false)}}
   }
   button.addEventListener('click',event=>{
    if(!event.isTrusted||entry.busy||entry.completed||!current(entry,entry.revision))return
-   if(!allowed(entry.source)){selectFile(event);return}
-   selectionRevision=undefined;void translate(entry.source,++entry.revision)
-  })
-  fileButton.addEventListener('click',selectFile)
-  fileInput.addEventListener('change',async event=>{
-   const revision=selectionRevision;selectionRevision=undefined
-   if(!event.isTrusted||revision===undefined||!current(entry,revision)||entry.busy)return
-   const file=fileInput.files?.[0];fileInput.value='';if(!file)return
-   if(file.size<=0||file.size>20*1024*1024){status.textContent='请选择 20 MB 以内、5 分钟以内的语音文件。';return}
-   const url=view.URL.createObjectURL(file)
-   try{await translate(url,revision)}finally{view.URL.revokeObjectURL(url)}
+   void translate(++entry.revision)
   })
  }
  function scan(){
@@ -209,7 +193,7 @@ export function installGoogleVoiceAudio(document:Document,options:Options):()=>v
     const audioRemoved=record.type==='childList'&&[...record.removedNodes].some(node=>node===entry.audio||Boolean(entry.audio&&node.contains(entry.audio)))
     // Keep finished text when the official visible player frees its hidden
     // media. Identity changes and pending work are always invalidated.
-    if(identityChanged||rowRemoved||(sourceChanged||audioRemoved)&&!completedUnload(entry,candidate(entry.player,entry.native)))clear(entry)
+    if(identityChanged||rowRemoved||(sourceChanged||audioRemoved)&&!(entry.acquiring&&!entry.source)&&!completedUnload(entry,candidate(entry.player,entry.native)))clear(entry)
    }
   }
   if(changed)schedule()

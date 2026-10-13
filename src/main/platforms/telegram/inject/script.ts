@@ -1,7 +1,8 @@
 import { telegramConversation, telegramMessageId } from '../../../../shared/telegramIdentity'
 import { readWhatsAppComposerText } from '../../whatsapp/inject/composerText'
-import { hasBlockedChinese } from '../../../translation/outgoingPolicy'
+import { blocksChineseSend } from '../../../translation/outgoingPolicy'
 import { voiceAudioWav } from '../../../../shared/voiceAudio'
+import { acquireVoicePlayer } from '../../../../shared/voicePlayer'
 
 /** Keep official rendering and transport. Our UI is an isolated addition to existing bubbles. */
 export const telegramInjectionScript = String.raw`
@@ -10,13 +11,14 @@ export const telegramInjectionScript = String.raw`
  window.__HD_TELEGRAM_INSTALLED__ = true;
  const parseConversation = ${telegramConversation.toString()}, messageId = ${telegramMessageId.toString()};
  const readWhatsAppComposerText = ${readWhatsAppComposerText.toString()};
- const blockedChinese = ${hasBlockedChinese.toString()}, decodeVoice = ${voiceAudioWav.toString()};
+ const blockedChinese = ${blocksChineseSend.toString()}, decodeVoice = ${voiceAudioWav.toString()};
  const api = window.realtimeTranslator;
+ const acquireVoice = ${acquireVoicePlayer.toString()};
  let disposed=false, timer, timerDue=0, epoch=0, lastRoute='', lastUnread=-1, lastConnection='', settings={}, settingsAt=0, settingsPromise;
  let sending=false, active, nativeClick, locked=false, preview, previewResolve, status, composing=new WeakSet();
  let incomingCount=0, incomingPausedUntil=0, incomingFailures=0;
  let pendingPanel,pendingRead,pendingAt=0,pendingRevision=0,resolving;
- const rowRecords=new WeakMap(), audioOwners=new WeakMap(), listOwners=new WeakMap(), historyBaselines=new WeakMap(), mounted=new Set(), approvedHistory=new Set(), voicePickers=new Set();
+ const rowRecords=new WeakMap(), audioOwners=new WeakMap(), listOwners=new WeakMap(), historyBaselines=new WeakMap(), mounted=new Set(), approvedHistory=new Set();
  const MAX_AUTO_CONCURRENCY=2, MAX_ROWS=120;
  const visible=node=>{if(!node?.isConnected||node.closest('[hidden],[aria-hidden="true"],.Transition_slide-inactive')||getComputedStyle(node).display==='none')return false;const slide=node.closest('.messages-layout > .Transition > .Transition_slide');return !slide||slide.matches('.Transition_slide-active,.Transition_slide-to')};
  const onScreen=node=>{const rect=node.getBoundingClientRect();return rect.width===0&&rect.height===0||rect.bottom>=0&&rect.top<=innerHeight&&rect.right>=0&&rect.left<=innerWidth};
@@ -165,7 +167,7 @@ export const telegramInjectionScript = String.raw`
    if(!sameSnapshot(snapshot)||text(snapshot.composer)!==snapshot.original)throw new Error('会话或草稿已变化，译文已保存，未发送。');
    if(!task.translated?.trim())throw new Error('没有取得完整译文，原稿已保留。');
    const prefs=await runtime();
-   if(prefs.previewSend!==false){const edited=await askPreview(task);if(edited===null)return;task=await api.editSendPreview(task.id,edited)}
+   if(prefs.previewSend!==false&&task.translate!==false){const edited=await askPreview(task);if(edited===null)return;task=await api.editSendPreview(task.id,edited)}
    if(!sameSnapshot(snapshot)||text(snapshot.composer)!==snapshot.original)throw new Error('会话或草稿已变化，译文已保存，未发送。');
    active.translated=task.translated;
    const result=await timeout(api.submitSend(task.id),30000,'正在核对发送结果，请勿重复发送。');
@@ -176,7 +178,7 @@ export const telegramInjectionScript = String.raw`
  window.__RT_SEND_SELECT__=task=>{
   if(!active||active.dispatched||active.id!==task.id||!sameSnapshot(active)||composing.has(active.composer)||text(active.composer)!==active.original||task.original!==active.original||task.targetKey!==active.targetKey||task.conversationId!==active.conversationId)return false;
   if(!task.translated?.trim()||!sendButton(active.composer))return false;
-  if(blockedChinese(task.translated,task.targetLanguage||'en'))return false;
+  if(blockedChinese(task.translated,task.blockChinese!==false))return false;
   locked=true;active.translated=task.translated;return {text:text(active.composer)};
  };
  window.__RT_EDIT_ATOMIC__=value=>{
@@ -193,11 +195,12 @@ export const telegramInjectionScript = String.raw`
   if(found.length!==1)return null;
   return {dispatched:true,confirmed:true,messageId:current().id+':'+rowId(found[0])};
  };
+ window.__RT_SEND_INVALIDATE__=()=>{if(active)active.policyInvalid=true};
  window.__RT_SEND_COMMIT__=async task=>{
   const snapshot=active;
   const refuse=message=>({dispatched:false,confirmed:false,message});
-  if(!snapshot||snapshot.id!==task.id||snapshot.dispatched||!sameSnapshot(snapshot)||snapshot.translated!==task.translated||text(snapshot.composer)!==task.translated||composing.has(snapshot.composer))return refuse('发送前内容已变化，已阻止发送。');
-  if(blockedChinese(task.translated,task.targetLanguage||'en'))return refuse('译文仍含中文，已阻止发送。');
+  if(!snapshot||snapshot.policyInvalid||snapshot.id!==task.id||snapshot.dispatched||!sameSnapshot(snapshot)||snapshot.translated!==task.translated||text(snapshot.composer)!==task.translated||composing.has(snapshot.composer))return refuse('发送前内容已变化，已阻止发送。');
+  if(blockedChinese(task.translated,task.blockChinese!==false))return refuse('译文仍含中文，已阻止发送。');
   const button=sendButton(snapshot.composer);if(!button)return refuse('发送按钮不可用，译文已保留。');
   // Translation/preview may take time. Freeze receipt evidence at the actual
   // native click, not when the user originally requested translation.
@@ -274,11 +277,6 @@ export const telegramInjectionScript = String.raw`
   if(previous&&previous.url===url&&previous.identity!==identity)return '';
   audioOwners.set(audio,{url,identity});return url;
  }
- function chooseAudio(record){return new Promise(resolve=>{
-  const input=document.createElement('input');input.type='file';input.accept='audio/*,.ogg,.opus,.mp3,.m4a,.wav,.webm';input.dataset.rtUi='voice-file';input.hidden=true;record.voiceBox.append(input);
-  let settled=false;const cancel=()=>finish(null),finish=file=>{if(settled)return;settled=true;clearTimeout(wait);input.remove();voicePickers.delete(cancel);if(record.cancelVoicePicker===cancel)record.cancelVoicePicker=null;resolve(file)},wait=setTimeout(cancel,120000);
-  voicePickers.add(cancel);record.cancelVoicePicker=cancel;input.onchange=()=>finish(input.files?.[0]||null);input.oncancel=cancel;try{input.click()}catch{cancel()}
- })}
  function applyVoiceAppearance(record){
   if(!record.voiceBox)return;
   // A manual voice request explicitly asks to show its result. The ordinary
@@ -289,38 +287,40 @@ export const telegramInjectionScript = String.raw`
   if(record.voiceComplete)record.voiceStatus.textContent='已完成';
  }
  function clearVoice(record){
-  record.cancelVoicePicker?.();record.voiceRun=(record.voiceRun||0)+1;record.voiceBox?.remove();record.voiceBox=null;record.voiceBusy=false;record.voiceComplete=false;record.voiceSource='';record.voiceElement=null;
+  record.voiceRun=(record.voiceRun||0)+1;record.voiceBox?.remove();record.voiceBox=null;record.voiceBusy=false;record.voiceComplete=false;record.voiceSource='';record.voiceElement=null;
  }
- async function translateVoice(record,selectFile=false){
-  const conversation=current(),id=rowId(record.row),version=epoch,linkedUrl=audioUrl(record.row);if(!conversation||!id||record.voiceBusy||record.voiceComplete)return;
+ async function translateVoice(record){
+  const conversation=current(),id=rowId(record.row),version=epoch;if(!conversation||!id||record.voiceBusy||record.voiceComplete)return;
   const list=messageList(),media=voiceMedia(record.row);if(!media||!list?.contains(record.row)||record.identity!==conversation.id+':'+id)return;
   const run=record.voiceRun=(record.voiceRun||0)+1;
-  const valid=()=>!disposed&&record.voiceRun===run&&epoch===version&&messageList()===list&&list.contains(record.row)&&record.identity===conversation.id+':'+id&&rowRecords.get(record.row)===record&&record.row.isConnected&&record.voiceBox?.isConnected&&rowId(record.row)===id&&current()?.id===conversation.id&&voiceMedia(record.row)===media&&(!linkedUrl||audioUrl(record.row)===linkedUrl);
-  record.voiceBusy=true;record.voiceButton.disabled=true;record.fileButton.disabled=true;let ownedUrl='';
+  let lease;
+  const valid=()=>!disposed&&record.voiceRun===run&&epoch===version&&messageList()===list&&list.contains(record.row)&&record.identity===conversation.id+':'+id&&rowRecords.get(record.row)===record&&record.row.isConnected&&record.voiceBox?.isConnected&&rowId(record.row)===id&&current()?.id===conversation.id&&voiceMedia(record.row)===media;
+  record.voiceBusy=true;record.voiceButton.disabled=true;
   try{
    if(typeof api?.translateVoiceMessage!=='function')throw new Error('语音翻译组件尚未就绪，请刷新当前窗口后重试。');
-   let url=selectFile?'':linkedUrl;
-   if(!url){record.voiceStatus.textContent='请选择从这条语音下载的音频文件，中英文会显示在当前气泡内。';record.fileButton.hidden=false;const file=await chooseAudio(record);if(!file||!valid()){if(valid())record.voiceStatus.textContent='已取消，原语音保留。';return}if(!file.size||file.size>20*1024*1024)throw new Error('请选择非空且 20 MB 以内的语音文件。');ownedUrl=URL.createObjectURL(file);url=ownedUrl}
-   record.voiceStatus.textContent='正在识别并生成中英双语…';const bytes=await decodeVoice(url);if(!valid())return;
-   const result=await timeout(api.translateVoiceMessage({bytes,conversationId:conversation.id,messageId:'voice:'+conversation.id+':'+id}),120000,'语音翻译超时，请重试');
-   if(!valid())return;
+   record.voiceStatus.textContent='正在加载这条语音…';
+   const controls=Array.from(media.querySelectorAll('button.toggle-play,[role="button"].toggle-play')).filter(visible);
+   lease=await acquireVoice(media,controls.length===1?controls[0]:undefined,record.identity,valid,{allowedOrigin:'https://web.telegram.org'});
+   record.voiceStatus.textContent='正在识别并生成中英双语…';const bytes=await decodeVoice(lease.url,'https://web.telegram.org');if(!valid())return;if(!lease.current())throw new Error('这条语音已变化，请在原气泡重试。');
+   const result=await timeout(api.translateVoiceMessage({bytes,conversationId:conversation.id,messageId:'voice:'+conversation.id+':'+id}),330000,'语音翻译超时，请重试');
+   if(!valid())return;if(!lease.current())throw new Error('这条语音已变化，请在原气泡重试。');
    if(result?.targetLanguage!=='zh-CN'||typeof result.translation!=='string'||!result.translation.trim()||typeof result.englishTranslation!=='string'||!result.englishTranslation.trim())throw new Error('尚未取得完整中英双语，请重试');
-   record.english.textContent='English: '+result.englishTranslation;record.chinese.textContent='中文：'+result.translation;record.voiceComplete=true;record.voiceSource=linkedUrl;record.voiceButton.hidden=record.fileButton.hidden=true;applyVoiceAppearance(record);
-  }catch(error){if(valid()){record.voiceStatus.textContent=error?.message||'语音翻译失败，请重试';record.voiceButton.textContent='重试转为中文';record.fileButton.hidden=false}}
-  finally{if(ownedUrl)URL.revokeObjectURL(ownedUrl);if(record.voiceRun===run){record.voiceBusy=false;record.voiceButton.disabled=record.fileButton.disabled=Boolean(record.voiceComplete);if(!valid()&&record.voiceBox?.isConnected)record.voiceStatus.textContent='语音或会话已变化，请在原消息上重试。'}}
+   record.english.textContent='English: '+result.englishTranslation;record.chinese.textContent='中文：'+result.translation;record.voiceComplete=true;record.voiceSource=lease.url;record.voiceButton.hidden=true;applyVoiceAppearance(record);
+  }catch(error){if(valid()){record.voiceStatus.textContent=error?.message||'语音翻译失败，请在原气泡重试';record.voiceButton.textContent='重试转为中文'}}
+  finally{lease?.release();if(record.voiceRun===run){record.voiceBusy=false;record.voiceButton.disabled=Boolean(record.voiceComplete);if(!valid()&&record.voiceBox?.isConnected)record.voiceStatus.textContent='语音或会话已变化，请在原消息上重试。'}}
  }
  function mountRow(row,withText=true){
   const conversation=current(),id=rowId(row),host=bubble(row);if(!conversation||!id||!host)return;
   const original=messageText(row),identity=conversation.id+':'+id;let record=rowRecords.get(row);
-  if(record&&(record.identity!==identity||record.original!==original||record.box&&!record.box.isConnected||record.voiceBox&&!record.voiceBox.isConnected)){record.cancelVoicePicker?.();record.box?.remove();record.voiceBox?.remove();mounted.delete(record);record=null}
+  if(record&&(record.identity!==identity||record.original!==original||record.box&&!record.box.isConnected||record.voiceBox&&!record.voiceBox.isConnected)){record.voiceRun=(record.voiceRun||0)+1;record.box?.remove();record.voiceBox?.remove();mounted.delete(record);record=null}
   if(!record){record={row,identity,original,busy:false,complete:false,failed:false};rowRecords.set(row,record);mounted.add(record)}
   const media=voiceMedia(row);if(record.voiceBox&&record.voiceElement!==media)clearVoice(record);
-  if(record.voiceComplete&&record.voiceSource&&audioUrl(row)&&record.voiceSource!==audioUrl(row)){record.voiceComplete=false;record.english.textContent='';record.chinese.textContent='';record.voiceButton.hidden=false;record.voiceButton.disabled=record.fileButton.disabled=false;record.voiceStatus.textContent='语音已变化，请重新转为中文。'}
+  if(record.voiceComplete&&record.voiceSource&&audioUrl(row)&&record.voiceSource!==audioUrl(row)){record.voiceComplete=false;record.english.textContent='';record.chinese.textContent='';record.voiceButton.hidden=false;record.voiceButton.disabled=false;record.voiceStatus.textContent='语音已变化，请重新转为中文。'}
   if(withText&&original&&!record.box){
    const box=document.createElement('div');box.dataset.rtUi='translation';box.className='hd-tg-translation';const output=document.createElement('div');output.dataset.translationText='true';const item=button('翻译此消息',()=>void translateRow(record,true));box.append(item,output);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{box,output,button:item});
   }
   if(!record.voiceBox&&media){
-   const box=document.createElement('div');box.dataset.rtUi='voice';box.className='hd-tg-voice';const voiceStatus=document.createElement('div'),english=document.createElement('div'),chinese=document.createElement('div');voiceStatus.setAttribute('role','status');english.lang='en';chinese.lang='zh-CN';english.dataset.voiceEnglish='true';chinese.dataset.voiceChinese='true';const item=button('转为中文',()=>void translateVoice(record)),fileButton=button('选择已下载的语音',()=>void translateVoice(record,true));fileButton.hidden=true;box.append(item,fileButton,voiceStatus,english,chinese);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{voiceBox:box,voiceElement:media,voiceButton:item,fileButton,voiceStatus,english,chinese});
+   const box=document.createElement('div');box.dataset.rtUi='voice';box.className='hd-tg-voice';const voiceStatus=document.createElement('div'),english=document.createElement('div'),chinese=document.createElement('div');voiceStatus.setAttribute('role','status');english.lang='en';chinese.lang='zh-CN';english.dataset.voiceEnglish='true';chinese.dataset.voiceChinese='true';const item=button('转为中文',()=>void translateVoice(record));box.append(item,voiceStatus,english,chinese);box.addEventListener('click',e=>e.stopPropagation());host.append(box);Object.assign(record,{voiceBox:box,voiceElement:media,voiceButton:item,voiceStatus,english,chinese});
   }
   applyVoiceAppearance(record);
   if(record.box){record.box.hidden=settings.translationsVisible===false;record.box.style.color=settings.translationColor||'';if(Number.isFinite(settings.fontSize))record.box.style.fontSize=Math.max(10,Math.min(30,settings.fontSize))+'px'}
@@ -329,12 +329,12 @@ export const telegramInjectionScript = String.raw`
  }
  function refreshContext(){
   const route=routeKey();if(route===lastRoute)return;
-  lastRoute=route;epoch++;for(const cancel of voicePickers)cancel();settingsAt=0;settingsPromise=null;settings={};closePreview(null);clearPending();pendingAt=0;locked=false;active=null;approvedHistory.clear();
+  lastRoute=route;epoch++;settingsAt=0;settingsPromise=null;settings={};closePreview(null);clearPending();pendingAt=0;locked=false;active=null;approvedHistory.clear();
   const conversation=current();if(conversation)api.reportConversation?.({id:conversation.id,name:document.querySelector('#MiddleColumn .chat-info .title')?.textContent?.trim()||'Telegram'});
  }
  async function scan(){
   clearTimeout(timer);timer=null;if(disposed)return;refreshContext();
-  for(const record of mounted)if(!record.row.isConnected){record.cancelVoicePicker?.();mounted.delete(record)}
+  for(const record of mounted)if(!record.row.isConnected){record.voiceRun=(record.voiceRun||0)+1;mounted.delete(record)}
   const connection=navigator.onLine===false?'offline':document.querySelector('#auth-qr-form,#auth-phone-number-form,.Auth')?'login-required':document.querySelector('#LeftColumn')?'page-ready':'loading';if(connection!==lastConnection){lastConnection=connection;api.reportConnection?.(connection)}
   const titleCount=document.title.match(/^\((\d+)\)/),unread=titleCount?Number(titleCount[1]):0;if(unread!==lastUnread){lastUnread=unread;api.reportUnread?.(unread)}
   const version=epoch,listBeforeSettings=messageList();if(document.hidden||!current()||!listBeforeSettings)return;
@@ -379,7 +379,7 @@ export const telegramInjectionScript = String.raw`
  window.__RT_SAVE_WORKSPACE__=async()=>{const composer=editor(),conversation=current();if(composer&&conversation&&!composer.id.endsWith('-modal'))await api.saveDraft({conversationId:conversation.id,targetKey:targetKey()},text(composer));return {busy:sending||locked,editing:composing.has(composer),media:Boolean(document.querySelector('#editable-message-text-modal')),capturing:Boolean(document.querySelector('.main-button.recording'))}};
  window.__RT_INSERT_DRAFT__=value=>{const composer=editor();if(!composer||text(composer)||sending||locked||!messageList()||!current()?.writable)return false;return window.__RT_EDIT_ATOMIC__({text:value,expected:'',targetKey:targetKey(),conversationId:current()?.id})};
  const heartbeat=setInterval(()=>{if(!document.hidden)schedule()},15000);
- window.addEventListener('pagehide',event=>{if(event.persisted)return;disposed=true;for(const cancel of voicePickers)cancel();observer.disconnect();clearTimeout(timer);clearInterval(heartbeat);closePreview(null);mounted.clear()});
+ window.addEventListener('pagehide',event=>{if(event.persisted)return;disposed=true;observer.disconnect();clearTimeout(timer);clearInterval(heartbeat);closePreview(null);mounted.clear()});
  void scan();
 })();
 `

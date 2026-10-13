@@ -43,7 +43,7 @@ class SourceExport(unittest.TestCase):
             native = core / SEND_STATUS
             native.parent.mkdir(parents=True)
             shutil.copyfile(actual, native)
-            voices = ['hellodog.voice.preload.ts', 'hellodog.voice.dom.ts', 'hellodog.voice-audio.std.ts']
+            voices = ['hellodog.voice.preload.ts', 'hellodog.voice.dom.ts', 'hellodog.voice-audio.std.ts', 'hellodog.send-policy.preload.ts']
             for name in voices:
                 (native.parent / name).write_text('synthetic patched ' + name, encoding='utf8')
             shutil.copyfile(REPO / 'scripts/patch-signal-send-status.mjs', root / 'scripts/patch-signal-send-status.mjs')

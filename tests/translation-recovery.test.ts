@@ -33,7 +33,9 @@ test('outgoing retry keeps the send task and switches only a failed uncharged tr
   let e=h.create();const {SendTasks}=h.load('src/main/translation/sendTasks.ts'),{JsonStore}=h.load('src/main/storage/jsonStore.ts')
   const store=new JsonStore('outgoing-tasks-v1.json',{tasks:[]},true)
   let tasks=new SendTasks(store)
-  const task=await tasks.prepare('owner',{platform:'whatsapp',accountId:'wa',conversationId:'wa:alex',targetKey:'peer:peer@c.us',translate:true,blockChinese:true,request:{...request,messageId:undefined}})
+  // This fixture translates English into Chinese. Chinese dispatch must be
+  // explicitly allowed; an enabled block now rejects Han for every target.
+  const task=await tasks.prepare('owner',{platform:'whatsapp',accountId:'wa',conversationId:'wa:alex',targetKey:'peer:peer@c.us',translate:true,blockChinese:false,request:{...request,messageId:undefined}})
   e.createProvider=()=>({translate:async()=>{throw new h.TranslationOutcomeError('服务暂时不可用，未扣费。',true)}})
   const run=()=>tasks.translate('owner',task.id,async(r:any)=>{const next=await e.prepareOutgoingRequest(r);await tasks.useTranslationRequest('owner',task.id,next);return e.translate(next)},()=>true)
   await assert.rejects(run());assert.equal((await tasks.get('owner',task.id)).state,'draft')

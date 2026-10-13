@@ -4,10 +4,10 @@ import { t, uiLanguage, languageName, uiError } from '../lib/uiLocale'
 import ConfirmColor from './ConfirmColor.vue'
 import { accountNames, accountTemplate } from '../../../shared/accountConfig'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-const props = defineProps<{ platform: 'whatsapp' | 'signal' | 'telegram'; account?: any; languages: any[]; owner: string }>()
+const props = defineProps<{ platform: 'whatsapp' | 'signal' | 'telegram'; account?: any; languages: any[]; owner: string; defaultBlockChineseSend?: boolean }>()
 const emit = defineEmits<{ close: []; saved: [account: any] }>()
 const name = props.platform === 'whatsapp' ? 'WhatsApp' : props.platform === 'telegram' ? 'Telegram' : 'Signal'
-const initial = props.account || {}
+const initial = { blockChineseSend: props.defaultBlockChineseSend ?? true, ...props.account }
 const count = ref(1), templateName = ref(''), templateId = ref('')
 const templateKey = 'hellodog:templates:' + props.owner
 const templates = ref<Array<{name: string; options: any}>>([])
@@ -26,7 +26,7 @@ const draft = reactive({ group: initial.group || '', pinned: initial.pinned || f
 const busy = ref(false), testing = ref(false), message = ref(''), proxyResult = ref(''), paste = ref('')
 const form = ref<HTMLFormElement | null>(null)
 const previousFocus = document.activeElement as HTMLElement | null
-const toggles = computed(() => ([{ key: 'receiveAutoTranslate', label: t('接收翻译'), hint: t('收到的消息显示译文') }, { key: 'sendAutoTranslate', label: t('发送翻译'), hint: t('发送前转成对方的语言') }, { key: 'blockChineseSend', label: t('拦截中文原文'), hint: t('避免翻译失败时误发原文') }, { key: 'groupTranslate', label: t('群组翻译'), hint: t('也翻译群聊中的消息') }] as const))
+const toggles = computed(() => ([{ key: 'receiveAutoTranslate', label: t('接收翻译'), hint: t('收到的消息显示译文') }, { key: 'sendAutoTranslate', label: t('发送翻译'), hint: t('发送前转成对方的语言') }, { key: 'blockChineseSend', label: t('禁止发送中文'), hint: t('关闭后含中文的内容直接发送原文，不自动翻译') }, { key: 'groupTranslate', label: t('群组翻译'), hint: t('也翻译群聊中的消息') }] as const))
 watch(() => JSON.stringify(draft.proxy), () => { proxyResult.value = '' })
 watch(() => draft.proxy.protocol, protocol => {
   if (protocol === 'socks5') Object.assign(draft.proxy, { username: '', password: '', clearPassword: true })

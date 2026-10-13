@@ -83,12 +83,12 @@ test('final dispatch refreshes the wallet even if a preparatory snapshot is stil
  await quota.check('owner',request,true);balance=0;
  await assert.rejects(quota.check('owner',request,true,true),/字符已用完/);assert.equal(calls,2);
 })
-test('strict Chinese protection survives old disabled preferences and covers rare Han code points', async () => {
+test('enabled Chinese protection covers rare Han code points and every no-translation path', async () => {
   assert.equal(hasBlockedChinese('Hello 𠀀','en-US'),true)
   for(const translate of [true,false]) {
     let data:any={tasks:[]},sent=0
     const tasks=new SendTasks({read:async()=>structuredClone(data),write:async(value:any)=>{data=value}})
-    const task=await tasks.prepare('owner',{platform:'whatsapp',accountId:'a',conversationId:'c',translate,blockChinese:false,request})
+    const task=await tasks.prepare('owner',{platform:'whatsapp',accountId:'a',conversationId:'c',translate,blockChinese:true,request})
     await tasks.translate('owner',task.id,async()=> '你好',()=>true)
     await assert.rejects(tasks.submit('owner',task.id,async()=>{sent++},()=>true),/仍包含中文/)
     assert.equal(sent,0);assert.equal((await tasks.get('owner',task.id)).state,'ready')
@@ -138,4 +138,20 @@ test('Chinese media captions and edits cannot send through an auxiliary dialog o
   button.click();dialog.querySelector('[contenteditable]').dispatchEvent(new win.KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}));
   await new Promise(resolve=>setImmediate(resolve));assert.equal(sent,0);assert.equal(prepared,0);assert.equal(win.document.querySelector('footer [contenteditable]').textContent,'next draft');
   dialog.querySelector('[contenteditable]').textContent='';button.click();assert.equal(sent,1);dom.window.close();
+})
+
+test('WhatsApp caption switch off permits only the unchanged official action, with no translation and no duplicate click',async()=>{
+ for(const change of [false,true]){
+  const dom=new JSDOM('<div id="main"><header><span title="Alex">Alex</span></header><footer><div contenteditable="true" role="textbox">next draft</div></footer></div><div role="dialog"><div contenteditable="true" role="textbox">原始中文说明</div><button aria-label="Send"><span data-icon="send"></span></button></div>',{url:'https://web.whatsapp.com',runScripts:'outside-only'})
+  const win:any=dom.window;let sent=0,allow!:()=>void;win.setInterval=()=>0
+  const wait=new Promise<void>(resolve=>{allow=resolve})
+  win.realtimeTranslator={prepareSend:async()=>assert.fail('raw auxiliary caption must not translate'),getRuntimeSettings:async()=>{await wait;return{receiveAutoTranslate:false,blockChineseSend:false}},reportConversation(){},reportStatus(){}}
+  win.eval(whatsappInjectionScript)
+  const scope=win.document.querySelector('[role="dialog"]'),button=scope.querySelector('button'),editor=scope.querySelector('[contenteditable]')
+  button.addEventListener('click',()=>sent++);button.click();button.click();assert.equal(sent,0)
+  if(change)editor.textContent='后来修改的内容'
+  allow();await new Promise(resolve=>setTimeout(resolve,20))
+  assert.equal(sent,change?0:1);assert.equal(win.document.querySelector('footer [contenteditable]').textContent,'next draft')
+  dom.window.close()
+ }
 })
