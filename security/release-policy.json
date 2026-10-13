@@ -1,7 +1,7 @@
 {
-  "allowProduction": false,
-  "reason": "2026-10-13 follow-up: implement direct in-bubble bilingual voice translation and the Chinese-send switch in a local candidate. The previous authorization covered 0.5.22 only. The reported WhatsApp screenshots are from another computer and current real-account acceptance is unavailable. Do not publish this new candidate without the owner's next release approval.",
-  "ownerAuthorizedProduction": false,
+  "allowProduction": true,
+  "reason": "2026-10-13 owner explicitly requested full publication and scoped cleanup after preparation of 0.5.23-beta.1. Authorizes stable 0.5.23 installer, signed update manifest and matching website instructions. Preserve the API, billing configuration, account data and 0.5.22 rollback. Final-source regressions and extracted-package verification are required; real-account acceptance remains unavailable for the reported remote WhatsApp case and newly repaired paths. This approval does not cover future releases.",
+  "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,
   "requireSignedManifest": true
