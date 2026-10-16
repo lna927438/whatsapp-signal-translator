@@ -57,7 +57,17 @@ await run(process.execPath, ['scripts/verify-signal-security.mjs', '--source-onl
 await run(process.execPath, ['scripts/patch-signal-desktop.mjs'])
 await run('pnpm', ['generate'], { cwd: checkout })
 const upstream = JSON.parse(await readFile(join(checkout, 'package.json'), 'utf8'))
-const signalConfig = { ...upstream.build, productName: 'Signal', directories: { ...upstream.build.directories, output: 'release/hellodog-macos-arm64' }, npmRebuild: false, publish: null, afterSign: null, artifactBuildCompleted: null, afterAllArtifactBuild: null, mac: { ...upstream.build.mac, icon: join(root, 'resources/brand/hellodog-icon.png'), target: [{ target: 'dir', arch: ['arm64'] }], identity: '-', sign: null, signInstaller: null, notarize: false, publish: null } }
+// Ad-hoc acceptance bundles have no shared Apple Team ID. Preserve Signal's
+// existing entitlements and allow its signed native libraries in this preview.
+const signalEntitlements = {}
+for (const name of ['entitlements', 'entitlementsInherit']) {
+  if (typeof upstream.build.mac[name] !== 'string') throw new Error('Pinned Signal entitlements changed; re-review required.')
+  const target = join(cache, `signal-${name}.plist`)
+  await copyFile(join(checkout, upstream.build.mac[name]), target)
+  await run('/usr/libexec/PlistBuddy', ['-c', 'Add :com.apple.security.cs.disable-library-validation bool true', target])
+  signalEntitlements[name] = target
+}
+const signalConfig = { ...upstream.build, productName: 'Signal', directories: { ...upstream.build.directories, output: 'release/hellodog-macos-arm64' }, npmRebuild: false, publish: null, afterSign: null, artifactBuildCompleted: null, afterAllArtifactBuild: null, mac: { ...upstream.build.mac, ...signalEntitlements, icon: join(root, 'resources/brand/hellodog-icon.png'), target: [{ target: 'dir', arch: ['arm64'] }], identity: '-', sign: null, signInstaller: null, notarize: false, publish: null } }
 const configPath = join(cache, 'signal-builder.json')
 await writeFile(configPath, JSON.stringify(signalConfig, null, 2))
 await run('pnpm', ['exec', 'electron-builder', '--config', configPath, '--mac', '--arm64', '--dir', '--publish', 'never'], { cwd: checkout, env: { ...process.env, SIGNAL_ENV: 'production', CSC_IDENTITY_AUTO_DISCOVERY: 'false', SKIP_SIGNING_SCRIPT: '1' } })

@@ -7,7 +7,7 @@ import { applyDesktopOptions, attachDesktopRuntime, shouldStartMinimized, restar
 import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import { writeFile } from 'fs/promises'
+import { writeFile, rename } from 'fs/promises'
 import { legacyUserDataPath } from './storage/userDataPath'
 import { registerIpc } from './ipc'
 import { TranslationEngine } from './translation/translationEngine'
@@ -111,7 +111,8 @@ function createWindow(): void {
     markReady()
     if (process.platform === 'darwin' && isolatedTest && testProfile === 'mac-ci-smoke') {
       // Explicit isolated CI profile only; no paths, credentials or account data.
-      void writeFile(join(app.getPath('userData'),'mac-ci-smoke-ready.json'), JSON.stringify({ready:true,version:app.getVersion(),platform:process.platform,arch:process.arch}), {mode:0o600}).catch(()=>undefined)
+      const marker=join(app.getPath('userData'),'mac-ci-smoke-ready.json')
+      void writeFile(marker+'.tmp', JSON.stringify({ready:true,version:app.getVersion(),platform:process.platform,arch:process.arch}), {mode:0o600}).then(()=>rename(marker+'.tmp',marker)).catch(()=>undefined)
     }
     if (!app.isPackaged && process.env.HELLODOG_TEST_HIDDEN === '1') return
     mainWindow?.show(); if (shouldStartMinimized()) mainWindow?.minimize()

@@ -16,7 +16,7 @@ const finished = new Promise(resolve => { child.once('error', error => { spawnEr
 let ready, report
 try {
   while (Date.now() - started < 45000 && !exited) {
-    ready = await readFile(marker, 'utf8').then(JSON.parse, () => undefined)
+    ready = await readFile(marker, 'utf8').then(value => { try { return JSON.parse(value) } catch { return undefined } }, () => undefined)
     if (ready) break
     await new Promise(resolve => setTimeout(resolve, 250))
   }
@@ -29,11 +29,13 @@ try {
   assert.equal(exited, false, 'Packaged application exited immediately after showing its login window.')
   assert.doesNotMatch(errorText, /uncaught exception|cannot find module|dlopen.*failed|code signature.*invalid/i)
   report = { passed: true, version: ready.version, platform: 'darwin', arch: 'arm64', isolatedProfile: true, loginWindowReady: true, elapsedMs: Date.now() - started, authenticatedAccountTested: false, realChatTested: false }
+} catch (error) {
+  await writeFile(join(output, 'MAC-SMOKE-FAILURE.json'), JSON.stringify({ passed: false, stage: 'HelloDog', error: error.message, exitCode, exitSignal, stderr: errorText }, null, 2) + '\n')
+  throw error
 } finally {
   if (!exited) child.kill('SIGTERM')
   await Promise.race([finished, new Promise(resolve => setTimeout(resolve, 10000))])
   if (!exited) { child.kill('SIGKILL'); await finished }
-  if (!ready) await writeFile(join(output, 'MAC-SMOKE-FAILURE.json'), JSON.stringify({ passed: false, exitCode, exitSignal, stderr: errorText }, null, 2) + '\n')
 }
 const signalProfile = join(homedir(), 'Library/Application Support/HelloDog-MacCI-Signal')
 assert.equal(await access(signalProfile).then(() => true, () => false), false, 'Signal smoke profile must be fresh; existing data is preserved.')
@@ -57,6 +59,9 @@ try {
   assert.equal(coreExited, true, 'Mac Signal did not gracefully close through its private bridge.')
   assert.equal(coreCode, 0, 'Mac Signal shutdown was unsuccessful.')
   Object.assign(report, { signalPrivateBridgeReady: true, signalVersion: coreReady.version, signalGracefulQuit: true, signalElapsedMs: Date.now() - signalStarted })
+} catch (error) {
+  await writeFile(join(output, 'MAC-SMOKE-FAILURE.json'), JSON.stringify({ passed: false, stage: 'Signal', error: error.message, exitCode: coreCode, stderr: coreStderr }, null, 2) + '\n')
+  throw error
 } finally {
   if (!coreExited) { core.kill('SIGTERM'); await Promise.race([coreFinished, new Promise(resolve => setTimeout(resolve, 5000))]) }
   if (!coreExited) { core.kill('SIGKILL'); await coreFinished }
