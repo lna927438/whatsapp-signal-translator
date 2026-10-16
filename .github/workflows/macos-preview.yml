@@ -1,0 +1,57 @@
+name: macOS Apple Silicon acceptance build
+on:
+  push:
+    branches: [dev/macos-arm64-20261017]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-arm64-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      CI: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.17.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.5.2'
+      - name: Validate Apple Silicon builder
+        run: node -e "if(process.platform!=='darwin'||process.arch!=='arm64')process.exit(1)"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir tests install --frozen-lockfile
+      - name: Validate public login configuration before native builds
+        working-directory: tests
+        run: node --import tsx -e "import('../scripts/public-auth-config.ts').then(module => (module.validatePublicAuthConfig || module.default.validatePublicAuthConfig)(process.env))"
+      - name: Run platform, signing-boundary and voice regressions
+        working-directory: tests
+        run: node --import tsx --test --test-concurrency=1 macos-runtime.test.ts voice-recognition.test.ts signal-macos-host.test.ts signal-bridge-recovery.test.ts
+      - run: node scripts/security-scan.mjs
+      - name: Build pinned macOS resources
+        run: node scripts/prepare-macos-resources.mjs
+      - name: Package and verify local acceptance application
+        run: node scripts/package-macos.mjs
+      - name: Launch isolated packaged application
+        run: node scripts/smoke-macos-package.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HelloDog-macOS-Apple-Silicon-acceptance
+          path: |
+            release/macos-arm64/*.dmg
+            release/macos-arm64/*.zip
+            release/macos-arm64/MAC-BUILD.json
+            release/macos-arm64/SHA256SUMS.txt
+            release/macos-arm64/MAC-SMOKE.json
+            release/macos-arm64/WHISPER-SMOKE.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

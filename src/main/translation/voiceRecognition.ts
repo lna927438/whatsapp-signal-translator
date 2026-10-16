@@ -5,8 +5,8 @@ import { mkdir, mkdtemp, readFile, writeFile, rm, readdir } from 'fs/promises'
 import { join, resolve, relative } from 'path'
 import { validateVoiceWav } from '../../shared/voiceAudio'
 import expectedManifest from '../../../resources/voice/manifest.json'
+import { validateNativeVoiceManifest, type VoiceManifest } from './nativeVoiceManifest'
 
-interface VoiceManifest { files: Record<string, string>; model: string; executable: string }
 export interface RecognizedVoice { text: string; language?: string }
 export function recognizedVoice(value: unknown): RecognizedVoice {
   const language = (value as { result?: { language?: unknown } })?.result?.language
@@ -28,7 +28,8 @@ export class VoiceRecognition {
   private disposed = false
   private active?: { cancelled: boolean; interrupt?: () => void; finished: Promise<void>; finish: () => void }
   private verified?: Promise<VoiceManifest>
-  constructor(private resources: string, private temporaryRoot: string) {}
+  constructor(private resources: string, private temporaryRoot: string,
+    private target = { platform: process.platform as string, arch: process.arch as string }) {}
   get busy(): boolean { return this.running }
   /** Final window/app shutdown must stop the native child immediately and wait
    * for its close plus temporary-file cleanup, not a later polling interval. */
@@ -44,8 +45,7 @@ export class VoiceRecognition {
     return this.verified ||= (async () => {
       // This manifest is embedded in the packaged application bundle, not read
       // beside the native executable where both files could be replaced.
-      const manifest: VoiceManifest = expectedManifest
-      if (manifest.executable !== 'whisper-cli.exe' || manifest.model !== 'ggml-base.bin' || !manifest.files?.[manifest.executable] || !manifest.files?.[manifest.model]) throw new Error('语音组件清单无效，请重新安装最新版。')
+      const manifest = validateNativeVoiceManifest(expectedManifest, this.target.platform, this.target.arch)
       if((await readdir(this.resources)).some(name=>!/^[a-zA-Z0-9._-]+$/.test(name)||!Object.hasOwn(manifest.files,name)))throw new Error('语音组件目录包含未通过验证的文件，请重新安装最新版。')
       for (const [name, expected] of Object.entries(manifest.files)) {
         if (!/^[a-zA-Z0-9._-]+$/.test(name) || !/^[a-f0-9]{64}$/.test(expected)) throw new Error('语音组件清单无效。')

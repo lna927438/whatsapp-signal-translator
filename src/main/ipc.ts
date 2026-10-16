@@ -538,6 +538,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     const defaults = await settings.get()
     args = {...args, options:{...args.options,blockChineseSend:args.options?.blockChineseSend ?? defaults.blockChineseSend ?? true,translationProvider:args.options?.translationProvider || defaults.translationProvider || 'deepseek'}}
+    if (process.platform === 'darwin' && args.platform === 'signal' && args.options.signalEngine === undefined && !args.signalAccount) args.options.signalEngine = 'desktop'
     await requireSelectableChannel(args.options.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
     return accounts.add(args.platform, args.label, args.signalAccount, args.options)
@@ -549,6 +550,7 @@ export function registerIpc(mainWindow: BrowserWindow, whatsapp: WhatsAppAdapter
     if (args.platform === 'signal' && args.options?.proxy?.enabled) throw new Error('Signal 独立代理暂不支持。')
     const defaults = await settings.get()
     args = {...args, options:{...args.options,blockChineseSend:args.options?.blockChineseSend ?? defaults.blockChineseSend ?? true,translationProvider:args.options?.translationProvider || defaults.translationProvider || 'deepseek'}}
+    if (process.platform === 'darwin' && args.platform === 'signal' && args.options.signalEngine === undefined && !args.options.signalAccount) args.options.signalEngine = 'desktop'
     await requireSelectableChannel(args.options.translationProvider)
     if(!identity.authorized())throw new Error('登录状态已变化。')
     return accounts.addBatch(args.platform, args.label, args.count, args.options || {})

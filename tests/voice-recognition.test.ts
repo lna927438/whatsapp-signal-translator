@@ -15,8 +15,9 @@ function wav(seconds=.15,amplitude=.2){
  return bytes
 }
 function safeRemove(directory:string){assert.match(relative(resolve(process.env.TEMP||''),resolve(directory)),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(directory,{recursive:true,force:true})}
-function fixture(resourceName='bin'){
- const manifest={executable:'whisper-cli.exe',model:'ggml-base.bin',files:{'whisper-cli.exe':createHash('sha256').update('test-executable').digest('hex'),'ggml-base.bin':createHash('sha256').update('test-model').digest('hex')}},calls:any[]=[],children:any[]=[]
+function fixture(resourceName='bin',platform='win32'){
+ const executable=platform==='darwin'?'whisper-cli':'whisper-cli.exe'
+ const manifest={executable,model:'ggml-base.bin',...(platform==='darwin'?{platform,arch:'arm64'}:{}),files:{[executable]:createHash('sha256').update('test-executable').digest('hex'),'ggml-base.bin':createHash('sha256').update('test-model').digest('hex')}},calls:any[]=[],children:any[]=[]
  let mode='success',holdRead=false,readingResult=false,finishRead:()=>void=()=>{},holdWrite=false,writing=false,finishWrite:()=>void=()=>{},holdCleanup=false,cleaning=false,finishCleanup:()=>void=()=>{}
  const h=mainHarness(undefined,undefined,{'../../../resources/voice/manifest.json':{default:manifest},'fs/promises':{...fsPromises,readFile:async(...args:any[])=>{
   const result=await (fsPromises.readFile as any)(...args)
@@ -35,7 +36,7 @@ function fixture(resourceName='bin'){
  }}}),resources=join(h.directory,resourceName),temporary=join(h.directory,'temporary')
  mkdirSync(resources);writeFileSync(join(resources,manifest.executable),'test-executable');writeFileSync(join(resources,manifest.model),'test-model')
  const {VoiceRecognition,voiceTranscript,recognizedVoice}=h.load('src/main/translation/voiceRecognition.ts'),{validateVoiceWav}=h.load('src/shared/voiceAudio.ts')
- return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary),voiceTranscript,recognizedVoice,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
+ return{...h,resources,temporary,voice:new VoiceRecognition(resources,temporary,{platform,arch:platform==='darwin'?'arm64':'x64'}),voiceTranscript,recognizedVoice,validateVoiceWav,calls,children,setMode:(value:string)=>{mode=value},holdRead:()=>holdRead=true,get readingResult(){return readingResult},finishRead:()=>finishRead(),holdWrite:()=>holdWrite=true,get writing(){return writing},finishWrite:()=>finishWrite(),holdCleanup:()=>holdCleanup=true,get cleaning(){return cleaning},finishCleanup:()=>finishCleanup(),close:()=>safeRemove(h.directory)}
 }
 async function until(predicate:()=>boolean){for(let i=0;i<100&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(predicate(),'fixture operation started')}
 
@@ -44,6 +45,15 @@ test('local recognizer exposes detected language without breaking the transcript
   assert.deepEqual({...await h.voice.recognizeWithLanguage(wav(),()=>true)},{text:'Hello from a local fixture.',language:'en'})
   assert.equal(await h.voice.recognize(wav(),()=>true),'Hello from a local fixture.')
   assert.deepEqual({...h.recognizedVoice({result:{language:'file:///invalid'},transcription:[{text:'Hello'}]})},{text:'Hello'})
+ }finally{h.close()}
+})
+
+test('Mac arm64 voice executes its verified native binary and cleans up the same bounded audio job',async()=>{
+ const h=fixture('语音组件 with spaces','darwin');try{
+  assert.equal(await h.voice.recognize(wav(),()=>true),'Hello from a local fixture.')
+  assert.equal(h.calls[0].command,join(h.resources,'whisper-cli'))
+  assert.equal(h.calls[0].options.shell,false)
+  assert.deepEqual(readdirSync(h.temporary),[])
  }finally{h.close()}
 })
 

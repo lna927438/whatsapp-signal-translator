@@ -6,13 +6,13 @@ import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 const require = createRequire(import.meta.url)
 
-function harness(secure = true) {
+function harness(secure = true, platform=process.platform) {
   let saved: any[] = []
   const encrypted: string[] = []
   const exports: any = {}
   const code = ts.transpileModule(readFileSync(new URL('../src/main/accounts/accountManager.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   runInNewContext(code, {
-    exports, Buffer, process,
+    exports, Buffer, process:{...process,platform},
     require(name: string) {
       if (name === '../../shared/accountConfig') return require('../src/shared/accountConfig.ts')
       if (name === '../../shared/accountOrder') return require('../src/shared/accountOrder.ts')
@@ -31,6 +31,15 @@ function harness(secure = true) {
   })
   return { manager: new exports.AccountManager(), saved: () => saved, encrypted }
 }
+
+test('unset persisted Mac Signal windows route to desktop without mutating linked CLI records or Windows choices',async()=>{
+ const mac=harness(true,'darwin'),windows=harness(true,'win32')
+ const unlinked=await mac.manager.add('signal','New'),linked=await mac.manager.add('signal','Existing','+12025550123'),explicit=await mac.manager.add('signal','CLI',undefined,{signalEngine:'cli'})
+ assert.equal(unlinked.signalEngine,'desktop');assert.equal(linked.signalEngine,undefined);assert.equal(explicit.signalEngine,'cli')
+ assert.equal((await mac.manager.list()).find((row:any)=>row.id===unlinked.id).signalEngine,'desktop')
+ assert.equal(mac.saved().find((row:any)=>row.id===unlinked.id).signalEngine,undefined,'read-time selection preserves original record')
+ assert.equal((await windows.manager.add('signal','Windows')).signalEngine,undefined)
+})
 
 test('proxy passwords are encrypted, omitted from all account responses, retained on blank edits and explicitly removable', async () => {
   const h = harness()

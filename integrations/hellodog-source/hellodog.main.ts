@@ -5,19 +5,39 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 export const helloDogEmbedded = process.env.HELLODOG_EMBEDDED === '1' && typeof process.send === 'function';
+const helloDogCompanion = helloDogEmbedded && process.platform === 'darwin';
+let companionQuitAuthorized = false;
+let companionReady = false;
+if (helloDogCompanion) app.prependListener('before-quit', event => {
+  // An early native startup failure may exit its own process. It must not quit
+  // the user's whole HelloDog workspace before a Signal window exists.
+  if (companionQuitAuthorized || !companionReady) return;
+  event.preventDefault();
+  // The owner runs its existing pending-task/draft guard before terminating us.
+  process.send?.({channel:'hellodog',type:'request-quit'});
+});
 process.env.HELLODOG_BRIDGE_ACTIVE = helloDogEmbedded ? '1' : '0';
 let notificationSender: number | undefined;
 export function forwardHelloDogNotification(senderId: number, options?: { silent?: boolean }): void {
   if (helloDogEmbedded && senderId === notificationSender) process.send?.({channel:'hellodog',type:'notification',silent:options?.silent === true});
 }
 if (helloDogEmbedded) app.on('browser-window-created', (_event, nativeWindow) => {
-  nativeWindow.setSkipTaskbar(true);
-  nativeWindow.setIcon(join(app.getAppPath(), 'images/hellodog-icon.png'));
+  if (!helloDogCompanion) {
+    nativeWindow.setSkipTaskbar(true);
+    nativeWindow.setIcon(join(app.getAppPath(), 'images/hellodog-icon.png'));
+  }
 });
 export function attachHelloDog(window: BrowserWindow): void {
   if (!helloDogEmbedded) return;
   const senderId = window.webContents.id;
   notificationSender = senderId;
+  let hostVisible = false;
+  if (helloDogCompanion) {
+    window.setTitle('HelloDog · Signal');
+    window.on('hide', () => {
+      if (hostVisible && !companionQuitAuthorized) { hostVisible = false; process.send?.({channel:'hellodog',type:'window-hidden'}); }
+    });
+  }
   window.once('closed', () => { if (notificationSender === senderId) notificationSender = undefined; });
   // Windows' external child-window embedding must not suspend Blink timers or
   // React updates while the host is showing the native window.
@@ -51,7 +71,7 @@ export function attachHelloDog(window: BrowserWindow): void {
     quickReplyId=undefined;
   });
   window.webContents.on('before-input-event',(event,input)=>{
-    if(input.type==='keyDown' && (input.key==='F5'||input.control&&input.key.toLowerCase()==='r')) {
+    if(input.type==='keyDown' && (input.key==='F5'||(input.control||helloDogCompanion&&input.meta)&&input.key.toLowerCase()==='r')) {
       event.preventDefault();process.send?.({channel:'hellodog',type:'request-refresh'});
     }
   });
@@ -106,11 +126,14 @@ export function attachHelloDog(window: BrowserWindow): void {
   process.on('message', (raw: any) => {
     if(raw?.channel!=='hellodog') return;
     if(raw.type==='translation'||raw.type==='voice-result') { const item=pending.get(raw.id); if(item && (raw.type==='voice-result')===voicePending.has(raw.id)) { clearTimeout(item.timer); pending.delete(raw.id); voicePending.delete(raw.id); if(raw.error) item.reject(new Error(raw.error)); else item.resolve(raw.result); } }
-    if(raw.type==='focus') window.webContents.focus();
+    if(raw.type==='focus') {
+      if (helloDogCompanion && hostVisible) { if(window.isMinimized())window.restore();window.show();window.focus(); }
+      if (!helloDogCompanion || hostVisible) window.webContents.focus();
+    }
     if(raw.type==='insert-draft' && typeof raw.id==='string' && typeof raw.text==='string' && raw.text.length<=2000) {
       quickReplyId=raw.id;window.webContents.send('hellodog:insert-draft',{id:raw.id,text:raw.text});
     }
-    if(raw.type==='visibility') { if(raw.visible) window.showInactive(); else window.hide(); }
+    if(raw.type==='visibility' && typeof raw.visible==='boolean') { hostVisible=raw.visible; if(raw.visible) window.showInactive(); else window.hide(); }
     if(raw.type==='refresh') window.webContents.send('hellodog:refresh');
     if(raw.type==='send-policy-invalidate' && typeof raw.id==='string' && /^[a-f0-9-]{36}$/.test(raw.id) && !window.webContents.isDestroyed()) {
       const old = sendPolicyPending.get(raw.id); if (old) clearTimeout(old.timer);
@@ -123,7 +146,7 @@ export function attachHelloDog(window: BrowserWindow): void {
       refreshId=raw.id;
       window.webContents.send('hellodog:reload',raw.id);
     }
-    if(raw.type==='quit') app.quit();
+    if(raw.type==='quit') { companionQuitAuthorized=true;app.quit(); }
     if(raw.type==='prepare-restart' && typeof raw.id==='string') {
       restartId=raw.id;window.webContents.send('hellodog:prepare-restart',raw.id);
     }
@@ -131,6 +154,6 @@ export function attachHelloDog(window: BrowserWindow): void {
       void (async()=>{const text=await window.webContents.executeJavaScript('document.body.innerText');const png=await window.webContents.capturePage();process.send?.({channel:'hellodog',type:'inspection',text,png:png.toPNG().toString('base64'),bounds:window.getBounds(),profile:app.getPath('userData')});})();
     }
   });
-  process.once('disconnect', () => { for(const item of pending.values()) {clearTimeout(item.timer);item.reject(new Error('HelloDog closed'));} app.quit(); });
-  window.once('ready-to-show', () => process.send?.({channel:'hellodog',type:'ready',version:app.getVersion(),handle:window.getNativeWindowHandle().readBigUInt64LE().toString(),pid:process.pid}));
+  process.once('disconnect', () => { for(const item of pending.values()) {clearTimeout(item.timer);item.reject(new Error('HelloDog closed'));} companionQuitAuthorized=true;app.quit(); });
+  window.once('ready-to-show', () => { companionReady=true;process.send?.({channel:'hellodog',type:'ready',version:app.getVersion(),...(helloDogCompanion?{}:{handle:window.getNativeWindowHandle().readBigUInt64LE().toString()}),pid:process.pid}); });
 }

@@ -10,10 +10,10 @@ import { clampViewBounds, type ViewBounds } from '../whatsapp/viewBounds'
 import { markSwitch, setAccountState } from '../../runtimeHealth'
 import { boundedOperation } from '../../boundedOperation'
 import { telegramContextMenu } from './contextMenu'
+import { desktopBrowserIdentity } from '../../network/browserIdentity'
 
 function chromeUserAgent(): string {
-  const chromeVersion = process.versions.chrome || '140.0.0.0'
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+  return desktopBrowserIdentity().userAgent
 }
 
 
@@ -411,7 +411,7 @@ export class TelegramAdapter {
         const major = (process.versions.chrome || '140').split('.')[0]
         requestHeaders['sec-ch-ua'] = `"Google Chrome";v="${major}", "Chromium";v="${major}", "Not_A Brand";v="99"`
         requestHeaders['sec-ch-ua-mobile'] = '?0'
-        requestHeaders['sec-ch-ua-platform'] = '"Windows"'
+        requestHeaders['sec-ch-ua-platform'] = desktopBrowserIdentity().clientHintPlatform
         callback({ requestHeaders })
       }
     )

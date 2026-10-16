@@ -9,9 +9,10 @@ import { setAccountState, setExternalMetrics } from '../../runtimeHealth'
 import { updateAccountUnread, notifyAccount } from '../../desktopRuntime'
 import { signalTranslationErrorMessage } from './signalTranslationErrors'
 import { decodeSignalVoiceRequest, type DesktopVoiceRequest, type DesktopVoiceResult } from './signalDesktopVoice'
+import { signalDesktopLayout, signalCompanionVisible } from './signalDesktopPlatform'
 
 export type DesktopTranslationRequest = { id: string; editTimestamp?: number; conversationId: string; text: string; direction: 'incoming' | 'outgoing' | 'display'; group?: boolean; sentAt?: number; manual?: boolean; expiresAt?: number; authorizationOnly?: boolean; dispatchPolicyOnly?: boolean; requestId?: string; translated?: string }
-type Instance = { owner: string; accountId: string; child: ChildProcess; helper?: ChildProcess; state: 'starting' | 'ready' | 'failed' | 'stopped'; error?: string; version?: string; startedAt: number; visible?: boolean; boundsKey?: string; pending?: number; view?: string; startupTimer?: ReturnType<typeof setTimeout>; refresh?: { id:string; work:Promise<void>; finish:(error?:boolean)=>void } }
+type Instance = { owner: string; accountId: string; child: ChildProcess; helper?: ChildProcess; state: 'starting' | 'ready' | 'failed' | 'stopped'; error?: string; version?: string; startedAt: number; visible?: boolean; companionDismissed?: boolean; boundsKey?: string; pending?: number; view?: string; startupTimer?: ReturnType<typeof setTimeout>; refresh?: { id:string; work:Promise<void>; finish:(error?:boolean)=>void } }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 export function signalDesktopProfile(root: string, owner: string, accountId: string): string {
   if (!owner || !accountId) throw new Error('Signal 账号不可用。')
@@ -38,6 +39,10 @@ export class SignalDesktopHost {
     window.on('show',()=>this.updateVisibility())
     window.on('resize',()=>this.updateVisibility())
     window.on('move',()=>this.updateVisibility())
+    if (process.platform === 'darwin') {
+      window.on('minimize',()=>this.updateVisibility())
+      window.on('restore',()=>this.updateVisibility())
+    }
     const activateHost = (event: Electron.IpcMainEvent) => {
       if(event.sender!==window.webContents)return
       const item=this.instances.get(this.active)
@@ -54,15 +59,13 @@ export class SignalDesktopHost {
   }
   private paths() {
     const root = app.isPackaged ? join(process.resourcesPath,'signal-desktop') : join(app.getAppPath(),'integrations/signal-desktop')
-    const packaged = join(root,'Signal.exe')
     const index = join(root,'node_modules/electron/index.js')
     const electronRoot = existsSync(index) ? dirname(realpathSync(index)) : join(root,'node_modules/electron')
-    return { executable: existsSync(packaged) ? packaged : join(electronRoot,'dist/electron.exe'), args: existsSync(packaged) ? [] : [root],
-      helper: app.isPackaged ? join(process.resourcesPath,'native/SignalWindowHost.exe') : join(app.getAppPath(),'resources/native/SignalWindowHost.exe'), root }
+    return signalDesktopLayout(process.platform, root, electronRoot, app.isPackaged ? join(process.resourcesPath,'native') : join(app.getAppPath(),'resources/native'), existsSync)
   }
   status(accountId:string) {
     const paths=this.paths(), item=this.instances.get(accountId)
-    return { available:existsSync(paths.executable)&&existsSync(paths.helper)&&(paths.args.length===0||existsSync(join(paths.root,'bundles/main.js'))), state:item?.state||'stopped',error:item?.error||'',version:item?.version||'8.27.0',view:item?.view||'',pending:item?.pending||0 }
+    return { available:paths.supported&&existsSync(paths.executable)&&(!paths.helper||existsSync(paths.helper))&&(paths.args.length===0||existsSync(join(paths.root,'bundles/main.js'))), presentation:paths.presentation, visible:item?.visible===true, state:item?.state||'stopped',error:item?.error||'',version:item?.version||'8.27.0',view:item?.view||'',pending:item?.pending||0 }
   }
   async open(record: AccountRecord, background=false) {
     const pending=this.opening.get(record.id)
@@ -116,10 +119,17 @@ export class SignalDesktopHost {
       if(raw.type==='restart-ready'&&raw.id===this.restartPreparations.get(record.id)?.id)this.restartPreparations.get(record.id)?.finish(Boolean(raw.error))
       if(raw.type==='draft-inserted'&&raw.id===this.draftInsertions.get(record.id)?.id)this.draftInsertions.get(record.id)?.finish(Boolean(raw.error))
       if(raw.type==='request-refresh')void this.reload(record).catch(()=>this.window.webContents.send('translator:error','刷新未完成，草稿已保留。'))
+      if(paths.presentation==='companion'&&raw.type==='window-hidden') { item.companionDismissed=true;item.visible=false;publish() }
+      if(paths.presentation==='companion'&&raw.type==='request-quit') app.quit()
+      if(paths.presentation==='companion'&&raw.type==='request-focus') { if(this.window.isMinimized())this.window.restore();this.window.show();this.window.focus();this.window.webContents.send('ui:account-action',{action:'focus',accountId:record.id}) }
       if(raw.type==='activate'&&this.active===record.id&&!this.overlay&&item.visible) item.helper?.stdin?.write('focus\n')
       if(raw.type==='connection'&&['receiving','connecting','disconnected'].includes(raw.state)) setAccountState(record.id,raw.state)
       if(raw.type==='health'&&['Blank','Installer','Inbox','Standalone'].includes(raw.view)) {item.view=raw.view;item.pending=Number.isInteger(raw.pending)?Math.min(100000,Math.max(0,raw.pending)):0;publish()}
-      if(raw.type==='ready'&&/^\d{1,20}$/.test(String(raw.handle))&&raw.pid===child.pid&&!item.helper){
+      if(raw.type==='ready'&&raw.pid===child.pid&&item.state==='starting'&&paths.presentation==='companion'){
+        item.version=String(raw.version);clearTimeout(item.startupTimer);item.state='ready';this.updateVisibility();publish()
+        if(item.visible&&child.connected)child.send({channel:'hellodog',type:'focus'})
+      }
+      if(raw.type==='ready'&&/^\d{1,20}$/.test(String(raw.handle))&&raw.pid===child.pid&&!item.helper&&paths.helper){
         item.version=String(raw.version)
         const parent=this.window.getNativeWindowHandle().readBigUInt64LE().toString()
         const helper=spawn(paths.helper,[parent,raw.handle,String(process.pid),String(child.pid)],{windowsHide:true,stdio:['pipe','pipe','pipe']})
@@ -163,7 +173,7 @@ export class SignalDesktopHost {
     child.on('exit',code=>{for(const pending of this.sendPolicyInvalidations.values())if(pending.item===item)pending.finish(true);clearTimeout(item.startupTimer);item.refresh?.finish(true);item.helper?.stdin?.end('quit\n');item.helper=undefined;if(item.state!=='stopped'){item.state=code?'failed':'stopped';item.error=code?'Signal 已退出，聊天数据保留，可重新打开。':'';setAccountState(record.id,'closed')}publish()})
     publish();return this.status(record.id)
   }
-  focus(accountId='') {this.active=accountId;this.updateVisibility();const item=this.instances.get(accountId);if(item?.visible)item.helper?.stdin?.write('focus\n');if(item?.child.connected)item.child.send({channel:'hellodog',type:'focus'})}
+  focus(accountId='') {this.active=accountId;const item=this.instances.get(accountId);if(item)item.companionDismissed=false;this.updateVisibility();if(item?.visible)item.helper?.stdin?.write('focus\n');if(item?.child.connected&&(process.platform!=='darwin'||item.visible))item.child.send({channel:'hellodog',type:'focus'})}
   setOverlayOpen(value:boolean){this.overlay=value;this.updateVisibility()}
   setBounds(value:any){if(!value||!['x','y','width','height'].every(key=>Number.isFinite(value[key])))return;this.bounds={x:Math.max(0,value.x),y:Math.max(0,value.y),width:Math.max(1,Math.min(16000,value.width)),height:Math.max(1,Math.min(16000,value.height))};this.updateVisibility()}
   refresh(accountId?:string){for(const item of this.instances.values())if((!accountId||item.accountId===accountId)&&item.owner===this.owner()&&item.child.connected)item.child.send({channel:'hellodog',type:'refresh'})}
@@ -199,6 +209,13 @@ export class SignalDesktopHost {
   }
   private updateVisibility(){
     if(this.window.isDestroyed())return
+    if(process.platform==='darwin'){
+      for(const [id,item] of this.instances){
+        const visible=signalCompanionVisible({selected:id===this.active,overlay:this.overlay,hostVisible:this.window.isVisible(),hostMinimized:this.window.isMinimized(),dismissed:item.companionDismissed===true,ready:item.state==='ready',authorized:item.owner===this.owner()})
+        if(item.visible!==visible){item.visible=visible;if(item.child.connected)item.child.send({channel:'hellodog',type:'visibility',visible});this.window.webContents.send('signal-desktop:status',{accountId:id,...this.status(id)})}
+      }
+      return
+    }
     const factor=screen.getDisplayMatching(this.window.getBounds()).scaleFactor*this.window.webContents.getZoomFactor()
     const values=[this.bounds.x,this.bounds.y,this.bounds.width,this.bounds.height].map(value=>Math.round(value*factor))
     for(const [id,item] of this.instances){

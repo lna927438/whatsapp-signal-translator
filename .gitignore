@@ -28,3 +28,4 @@ resources/signal/jre/
 /integrations/tools/
 /resources/native/*.exe
 /resources/voice/bin/
+/resources/voice/bin-macos-arm64/

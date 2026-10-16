@@ -6,6 +6,7 @@ const info = ref<any>(null), notice = ref<any>(null), action = ref(''), error = 
 let disposed = false, poll: ReturnType<typeof setInterval> | undefined, polling = false
 const busy = computed(() => !!action.value || info.value?.busy === true)
 const available = computed(() => notice.value?.verified === true && notice.value.status === 'available')
+const manualUpdates = computed(() => info.value?.automaticUpdates === false || notice.value?.status === 'manual')
 const currentVersion = computed(() => info.value?.currentVersion || notice.value?.currentVersion || t('读取中…'))
 const matchedManifest = computed(() => available.value && info.value?.newer === true && info.value.manifest?.channel === 'stable' && info.value.manifest.version === notice.value.latestVersion)
 const installerReady = computed(() => matchedManifest.value && ['verified','opened'].includes(info.value?.phase))
@@ -33,7 +34,7 @@ async function readSnapshot(force = false) {
   syncPolling()
   const failed = results.find(result => result.status === 'rejected')
   if (failed?.status === 'rejected') throw failed.reason
-  if (notice.value?.verified !== true || notice.value?.status === 'unknown') throw new Error(t('暂时无法确认最新版本，请重新检查。'))
+  if (!manualUpdates.value && (notice.value?.verified !== true || notice.value?.status === 'unknown')) throw new Error(t('暂时无法确认最新版本，请重新检查。'))
 }
 async function run(name: string, work: () => Promise<void>) {
   if (busy.value) return
@@ -80,13 +81,15 @@ onUnmounted(() => { disposed = true; stopPolling() })
   <section class="settings-updates" :aria-label="t('版本与更新')" :aria-busy="busy">
     <div class="version-summary">
       <div><small>HelloDog</small><h3>{{ t('当前版本 ') }}{{ currentVersion }}</h3></div>
-      <button class="secondary" type="button" :disabled="busy" @click="check">{{ action === 'check' ? t('检查中…') : t('检查更新') }}</button>
+      <button v-if="!manualUpdates" class="secondary" type="button" :disabled="busy" @click="check">{{ action === 'check' ? t('检查中…') : t('检查更新') }}</button>
     </div>
-    <p v-if="available" class="version-status">{{ t('发现新版本 {0}', notice.latestVersion) }}</p>
+    <p v-if="manualUpdates" class="version-status">{{ t('Mac 版本 · 手动更新') }}</p>
+    <p v-else-if="available" class="version-status">{{ t('发现新版本 {0}', notice.latestVersion) }}</p>
     <p v-else-if="notice?.verified && notice.status === 'current'" class="version-status">{{ t('已是当前最新版本') }}</p>
     <p v-else-if="notice?.verified && notice.status === 'ahead'" class="version-status">{{ t('本机版本较新') }}</p>
     <p v-else class="version-status">{{ t('版本检查尚未完成') }}</p>
-    <p>{{ t('自动检查官网稳定版；发现新版本会提醒，可稍后更新。') }}</p>
+    <p v-if="manualUpdates">{{ t('此 Mac 版本请使用专用 Mac 安装包更新。') }}</p>
+    <p v-else>{{ t('自动检查官网稳定版；发现新版本会提醒，可稍后更新。') }}</p>
     <section v-if="available" class="version-release">
       <p v-if="notice.notes" class="release-notes">{{ notice.notes }}</p>
       <div class="version-actions">

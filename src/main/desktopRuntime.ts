@@ -58,6 +58,7 @@ export function applyDesktopOptions(value: Partial<AppSettings>) {
     tray = new Tray(icon); tray.setToolTip('HelloDog')
     tray.setContextMenu(Menu.buildFromTemplate([{ label: t('打开 HelloDog'), click: () => { window?.show(); window?.focus() } }, { label: t('退出 HelloDog'), click: () => { app.quit() } }]))
     tray.on('double-click', () => { window?.show(); window?.focus() })
+    if (process.platform === 'darwin') tray.on('click', () => { window?.show(); window?.focus() })
   } else if (!value.closeToTray && tray) { tray.destroy(); tray = undefined }
   if (tray) tray.setContextMenu(Menu.buildFromTemplate([{ label: t('打开 HelloDog'), click: () => { window?.show(); window?.focus() } }, { label: t('退出 HelloDog'), click: () => { app.quit() } }]))
   preferences = { ...value }

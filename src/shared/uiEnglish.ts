@@ -925,5 +925,8 @@ export const uiEnglish: Readonly<Record<string, string>> = {
   "已取消本次语音处理。": "Audio processing cancelled.",
   "语音翻译失败，请重试。": "Voice translation failed. Try again.",
   "识别在本机完成，文字翻译成功后按字符计费；不会发送聊天消息。": "Speech recognition runs on this computer. Successful text translation uses characters; no chat message is sent.",
-  "仅处理已保存的语音，不提供通话实时翻译。": "Processes saved audio only. Live calls are not translated."
+  "仅处理已保存的语音，不提供通话实时翻译。": "Processes saved audio only. Live calls are not translated.",
+  "Mac 版本 · 手动更新": "Mac version · Manual updates",
+  "此 Mac 版本请使用专用 Mac 安装包更新。": "Update this Mac version using a dedicated Mac installer.",
+  "语音组件与当前系统不匹配，请安装适合此电脑的 HelloDog 版本。": "The voice component does not match this system. Install the HelloDog version for this computer."
 }

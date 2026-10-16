@@ -136,6 +136,9 @@ export class AccountManager {
 
   private publicRecord(record: AccountRecord & { proxySecret?: string }): AccountRecord {
     const { proxySecret, note, caption, ...result } = record as typeof record & {note?:unknown;caption?:unknown}
+    // Fresh Mac windows use the bundled desktop core. Preserve an explicitly
+    // selected engine or an already linked legacy CLI account and its history.
+    if (process.platform === 'darwin' && result.platform === 'signal' && result.signalEngine === undefined && !result.signalAccount) result.signalEngine = 'desktop'
     return { ...result, proxy: result.proxy ? { ...result.proxy, hasPassword: Boolean(proxySecret) } : undefined }
   }
 

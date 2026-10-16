@@ -16,6 +16,11 @@ if (!(await readFile(resolve(upstream,'app/main.main.ts'),'utf8')).includes("imp
 await replace('app/main.main.ts','!app.getLoginItemSettings().wasOpenedAsHidden && !startInTray;', '!helloDogEmbedded && !app.getLoginItemSettings().wasOpenedAsHidden && !startInTray;');
 if (!(await readFile(resolve(upstream,'app/main.main.ts'),'utf8')).includes('attachHelloDog(mainWindow);')) await replace('app/main.main.ts','mainWindow = new BrowserWindow(windowOptions);','if (helloDogEmbedded) Object.assign(windowOptions, {frame:false,minWidth:1,minHeight:1,autoHideMenuBar:true});\n  mainWindow = new BrowserWindow(windowOptions);\n  attachHelloDog(mainWindow);');
 await replace('app/main.main.ts','{frame:false,minWidth:1,minHeight:1,autoHideMenuBar:true}','{frame:false,thickFrame:false,minWidth:1,minHeight:1,autoHideMenuBar:true}');
+await replace('app/main.main.ts',"if (helloDogEmbedded) Object.assign(windowOptions, {frame:false,thickFrame:false,minWidth:1,minHeight:1,autoHideMenuBar:true});", "if (helloDogEmbedded && process.platform === 'win32') Object.assign(windowOptions, {frame:false,thickFrame:false,minWidth:1,minHeight:1,autoHideMenuBar:true});");
+// Cmd+Q is coordinated by the owner; do not mark Signal as shutting down when
+// the HelloDog guard keeps it running. Dock activation must select this account.
+await replace('app/main.main.ts', "app.on('before-quit', e => {", "app.on('before-quit', e => {\n  if (helloDogEmbedded && process.platform === 'darwin' && e.defaultPrevented) return;");
+await replace('app/main.main.ts', "  // On OS X it's common to re-create a window in the app when the", "  if (helloDogEmbedded && process.platform === 'darwin') { process.send?.({channel:'hellodog',type:'request-focus'}); return; }\n  // On OS X it's common to re-create a window in the app when the");
 await replace('app/main.main.ts','async function readyForUpdates() {','async function readyForUpdates() {\n  if (helloDogEmbedded) return;');
 await replace('app/main.main.ts','async function forceUpdate() {','async function forceUpdate() {\n  if (helloDogEmbedded) return;');
 await replace('app/main.main.ts',"if (!app.isDefaultProtocolClient('sgnl')) {", "if (!helloDogEmbedded && !app.isDefaultProtocolClient('sgnl')) {");

@@ -34,7 +34,7 @@ with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive
             archive.write(source,'hellodog/integrations/signal-desktop/'+name)
             count += 1
     paths = []
-    for directory in ['src','scripts','security','.github/workflows','resources/security','resources/brand','tests','integrations/hellodog-source','integrations/notices',
+    for directory in ['src','scripts','security','.github/workflows','resources/security','resources/brand','resources/macos','tests','integrations/hellodog-source','integrations/notices',
                       'integrations/google-voice-extension','server/worker/src','website/src','website/public','supabase/migrations']:
         paths.extend((root / directory).rglob('*'))
     paths.extend((root / 'resources/native').glob('*.cs'))

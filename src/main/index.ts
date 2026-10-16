@@ -7,6 +7,7 @@ import { applyDesktopOptions, attachDesktopRuntime, shouldStartMinimized, restar
 import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { writeFile } from 'fs/promises'
 import { legacyUserDataPath } from './storage/userDataPath'
 import { registerIpc } from './ipc'
 import { TranslationEngine } from './translation/translationEngine'
@@ -36,6 +37,7 @@ const signal = new SignalAdapter(translator)
 
 function installApplicationMenu(): void {
   const menu = Menu.buildFromTemplate([
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
     {
       label: t('文件'),
       submenu: [
@@ -105,7 +107,15 @@ function createWindow(): void {
   mainWindow.webContents.setZoomFactor(Math.min(1, geometry.width / 960, geometry.height / 620))
   if (geometry.maximized) mainWindow.maximize()
   if (isolatedTest) mainWindow.on('page-title-updated', event => { event.preventDefault(); mainWindow?.setTitle('HelloDog ' + app.getVersion() + t(' · 独立测试窗口')) })
-  mainWindow.on('ready-to-show', () => { markReady(); if (!app.isPackaged && process.env.HELLODOG_TEST_HIDDEN === '1') return; mainWindow?.show(); if (shouldStartMinimized()) mainWindow?.minimize() })
+  mainWindow.on('ready-to-show', () => {
+    markReady()
+    if (process.platform === 'darwin' && isolatedTest && testProfile === 'mac-ci-smoke') {
+      // Explicit isolated CI profile only; no paths, credentials or account data.
+      void writeFile(join(app.getPath('userData'),'mac-ci-smoke-ready.json'), JSON.stringify({ready:true,version:app.getVersion(),platform:process.platform,arch:process.arch}), {mode:0o600}).catch(()=>undefined)
+    }
+    if (!app.isPackaged && process.env.HELLODOG_TEST_HIDDEN === '1') return
+    mainWindow?.show(); if (shouldStartMinimized()) mainWindow?.minimize()
+  })
   installWebSecurity(mainWindow.webContents, 'app')
   whatsapp.attachMainWindow(mainWindow)
   telegram.attachMainWindow(mainWindow)
@@ -128,7 +138,10 @@ app.whenReady().then(async () => {
   installApplicationMenu()
   createWindow()
   onUiLanguageChanged(() => { installApplicationMenu(); mainWindow?.setTitle(t('HelloDog · 跨语言聊天工作台')) })
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+  app.on('activate', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+    else { if(mainWindow.isMinimized())mainWindow.restore();mainWindow.show();mainWindow.focus() }
+  })
 })
 
 app.on('window-all-closed', () => { signal.stop(); if (process.platform !== 'darwin') app.quit() })

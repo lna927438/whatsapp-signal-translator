@@ -6,20 +6,52 @@ import {EventEmitter} from 'node:events'
 import ts from 'typescript'
 import {join} from 'node:path'
 
-function setup(){
+function setup(platform='win32'){
   const handlers=new Map<string,Function>(),timers=new Map<number,Function>(),sent:any[]=[],ui:any[]=[]
-  let sequence=0,reloads=0
+  let sequence=0,reloads=0,focused=0,shown=0,quit=0
   const ipc=Object.assign(new EventEmitter(),{handle:(name:string,fn:Function)=>handlers.set(name,fn)})
-  const process=Object.assign(new EventEmitter(),{env:{HELLODOG_EMBEDDED:'1'},pid:1,send:(message:any)=>sent.push(message)})
+  const process=Object.assign(new EventEmitter(),{env:{HELLODOG_EMBEDDED:'1'},platform,pid:1,send:(message:any)=>sent.push(message)})
   const contents=Object.assign(new EventEmitter(),{id:1,mainFrame:{detached:false},isDestroyed:()=>false,setBackgroundThrottling(){},focus(){},reload(){reloads++},send:(...args:any[])=>ui.push(args)})
-  const window=Object.assign(new EventEmitter(),{webContents:contents,showInactive(){},hide(){}})
+  const window=Object.assign(new EventEmitter(),{webContents:contents,showInactive(){shown++},show(){shown++},focus(){focused++},setTitle(){},isMinimized:()=>false,hide(){window.emit('hide')}})
   const exports:any={}
   const code=ts.transpileModule(readFileSync(new URL('../integrations/hellodog-source/hellodog.main.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
-  const app=Object.assign(new EventEmitter(),{quit(){},getAppPath:()=>'/core'});
+  const app=Object.assign(new EventEmitter(),{quit(){quit++},getVersion:()=> '8.27.0',getAppPath:()=>'/core'});
   runInNewContext(code,{exports,process,Error,setTimeout:(fn:Function)=>{timers.set(++sequence,fn);return sequence},clearTimeout:(id:number)=>timers.delete(id),require:(name:string)=>name==='electron'?{app,ipcMain:ipc}:name==='node:path'?{join}:{randomUUID:()=>String(++sequence)}})
   exports.attachHelloDog(window)
-  return{ipc,process,contents,handlers,timers,sent,ui,app,exports,window,reloads:()=>reloads,event:{sender:{id:1}}}
+  return{ipc,process,contents,handlers,timers,sent,ui,app,exports,window,reloads:()=>reloads,focused:()=>focused,shown:()=>shown,quit:()=>quit,event:{sender:{id:1}}}
 }
+
+test('Mac companion readiness never reads a Windows handle and focus cannot reveal a host-hidden account',()=>{
+  const h=setup('darwin');h.window.emit('ready-to-show')
+  assert.equal(h.sent[0].type,'ready');assert.equal(h.sent[0].pid,1);assert.equal('handle' in h.sent[0],false)
+  h.process.emit('message',{channel:'hellodog',type:'focus'});assert.equal(h.shown(),0)
+  h.process.emit('message',{channel:'hellodog',type:'visibility',visible:true})
+  h.process.emit('message',{channel:'hellodog',type:'focus'});assert.equal(h.focused(),1)
+  h.process.emit('message',{channel:'hellodog',type:'visibility',visible:false})
+  assert.equal(h.sent.some(item=>item.type==='window-hidden'),false,'owner hide is not a user dismissal')
+  h.process.emit('message',{channel:'hellodog',type:'visibility',visible:true});h.window.hide()
+  assert.equal(h.sent.at(-1).type,'window-hidden')
+})
+
+test('Mac Cmd+Q delegates to the owner pending-task guard and only owner quit or disconnect permits exit',()=>{
+  for(const cause of ['quit','disconnect']){
+    const h=setup('darwin');let prevented=0
+    h.app.emit('before-quit',{preventDefault(){prevented++}});assert.equal(prevented,0);assert.equal(h.sent.length,0)
+    h.window.emit('ready-to-show')
+    h.app.emit('before-quit',{preventDefault(){prevented++}})
+    assert.equal(prevented,1);assert.equal(h.sent.at(-1).type,'request-quit');assert.equal(h.quit(),0)
+    if(cause==='quit')h.process.emit('message',{channel:'hellodog',type:'quit'});else h.process.emit('disconnect')
+    assert.equal(h.quit(),1)
+    h.app.emit('before-quit',{preventDefault(){prevented++}});assert.equal(prevented,1)
+  }
+})
+
+test('Mac Command+R follows preserving refresh and a companion keeps its normal native window',()=>{
+  const h=setup('darwin');let prevented=0
+  h.contents.emit('before-input-event',{preventDefault(){prevented++}},{type:'keyDown',key:'r',meta:true})
+  assert.equal(prevented,1);assert.equal(h.sent[0].type,'request-refresh')
+  h.app.emit('browser-window-created',{}, {setSkipTaskbar(){throw Error('no hidden dock window')},setIcon(){throw Error('not supported on macOS')}})
+})
 test('a bridge timeout settles the promise; a late translation cannot dispatch or resolve another message',async()=>{
   const h=setup(),pending=h.handlers.get('hellodog:translate')!(h.event,{id:'message-a'})
   const rejected=assert.rejects(pending,/超时/)

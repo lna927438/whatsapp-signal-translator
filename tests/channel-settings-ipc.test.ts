@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs'
 import {runInNewContext} from 'node:vm'
 import ts from 'typescript'
 const source=readFileSync(new URL('../src/main/ipc.ts',import.meta.url),'utf8')
-function fixture(expireAt=''){
+function fixture(expireAt='',platform='win32'){
  let authorized=true,selected='openai',available=true,blockChineseSend=true,chineseSaveFailure=false,voiceBarrier:()=>Promise<void>=async()=>{},signalBarrier:()=>Promise<void>=async()=>{};const handlers=new Map<string,Function>(),calls:any[]=[],validated:string[]=[],account:any={id:'signal-a',platform:'signal',signalEngine:'desktop',blockChineseSend:true}
  const settings={get:async()=>({provider:'openai',translationProvider:selected,blockChineseSend}),save:async(value:any)=>{calls.push(['settings',value]);selected=value.translationProvider;blockChineseSend=value.blockChineseSend!==false}}
  const sections=[
@@ -16,7 +16,7 @@ function fixture(expireAt=''){
   source.slice(source.indexOf("  ipcMain.handle('settings:save',"),source.indexOf("  ipcMain.handle('translator:get-runtime-settings'"))
  ]
  runInNewContext(ts.transpileModule(sections.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{
-  ipcMain:{handle:(name:string,fn:Function)=>handlers.set(name,fn)},settings,sendPolicyRevision:0,sendPolicyChanging:0,
+  ipcMain:{handle:(name:string,fn:Function)=>handlers.set(name,fn)},process:{platform},settings,sendPolicyRevision:0,sendPolicyChanging:0,
   readTranslationChannels:async(_base:unknown,force:boolean)=>{calls.push(['channels',force]);return {checked:true}},
   requireMain:(event:any)=>{if(event.sender!==1)throw Error('main only')},requireAuth:async()=>true,taskIdentity:()=>({authorized:()=>authorized}),
   requireSelectableChannel:async(value:string)=>{validated.push(value);if(expireAt==='channel')authorized=false;if(!available)throw Error('通道尚未启用');return value},
@@ -67,6 +67,17 @@ test('each new WhatsApp, Signal, Telegram and Voice window captures the selected
  assert.equal((await h.invoke('google-voice:add',{label:'New Voice'})).translationProvider,'openai')
  h.select('deepseek');assert.equal((await h.invoke('accounts:add-batch',{platform:'whatsapp',count:2})).translationProvider,'deepseek')
  assert.equal(h.calls.filter(call=>call[0]==='settings').length,0)
+})
+
+test('new Mac Signal windows use the bundled desktop core without replacing explicit or linked legacy choices',async()=>{
+ const mac=fixture('','darwin'),windows=fixture()
+ for(const name of ['accounts:add','accounts:add-batch']){
+  assert.equal((await mac.invoke(name,{platform:'signal',count:2})).signalEngine,'desktop')
+  assert.equal((await windows.invoke(name,{platform:'signal',count:2})).signalEngine,undefined)
+  assert.equal((await mac.invoke(name,{platform:'signal',count:2,options:{signalEngine:'cli'}})).signalEngine,'cli')
+  assert.equal((await mac.invoke(name,{platform:'whatsapp',count:2})).signalEngine,undefined)
+ }
+ assert.equal((await mac.invoke('accounts:add',{platform:'signal',signalAccount:'+12025550123'})).signalEngine,undefined)
 })
 
 test('new windows inherit Chinese policy and unrelated preference saves preserve it',async()=>{

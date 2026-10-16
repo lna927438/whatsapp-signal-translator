@@ -10,7 +10,7 @@ import type { SignedUpdate } from '../shared/updateSignature'
 export interface UpdateManifest { version: string; versionKey: string; sha256: string; size: number; channel: 'stable' | 'beta'; notes: string; schemaVersion?:1; issuedAt?:string; expiresAt?:string; sourceCommit?:string; signature?:SignedUpdate['signature'] }
 export interface UpdateNotice {
   currentVersion: string; latestVersion?: string; notes?: string; checkedAt?: number
-  status: 'available' | 'current' | 'ahead' | 'unknown'; verified: boolean; available: boolean; show: boolean; website: string
+  status: 'available' | 'current' | 'ahead' | 'unknown' | 'manual'; verified: boolean; available: boolean; show: boolean; website: string
 }
 /** Unknown versions are never treated as an upgrade. Stable sorts after its prereleases. */
 export function compareVersions(left: string, right: string): number | undefined {
@@ -82,6 +82,10 @@ export async function downloadVerified(url: string, destination: string, manifes
   return destination
 }
 export class UpdateManager {
+  constructor(private readonly platform: string = process.platform) {}
+  private requireAutomaticUpdates() {
+    if (this.platform !== 'win32') throw new Error('此 Mac 版本请使用专用 Mac 安装包更新。')
+  }
   private state = new JsonStore<{ manifest?: UpdateManifest; highestTrustedVersion?:string; phase?: string; previousVersion?: string; recoveryDirectory?: string }>('update-state.json', {}, true)
   private notices = new JsonStore<{ checkedAt?:number; failedAt?:number; latest?:UpdateManifest; snoozedVersion?:string; snoozedUntil?:number }>('update-notice.json', {})
   private noticeWork?: Promise<unknown>
@@ -91,6 +95,9 @@ export class UpdateManager {
   private error = ''
   private root() { return join(app.getPath('userData'), 'verified-updates') }
   async notice(force=false):Promise<UpdateNotice> {
+    // The production feed currently contains Windows installers only. Never
+    // present that feed as a verified Mac release, including cached records.
+    if (this.platform !== 'win32') return { currentVersion: app.getVersion(), status: 'manual', verified: false, available: false, show: false, website: 'https://hellodog.net' }
     const saved=await this.notices.read(),now=Date.now()
     const verifyCached=async(value:UpdateManifest|undefined)=>{try{return value?validateManifest(await trustedUpdate(value),'stable'):undefined}catch{return undefined}}
     const fresh=(checkedAt:number|undefined)=>Number.isSafeInteger(checkedAt)&&checkedAt!>0&&checkedAt!<=Date.now()&&Date.now()-checkedAt!<10*60000
@@ -118,6 +125,7 @@ export class UpdateManager {
       available,show:available && (current.snoozedVersion!==latest?.version || (current.snoozedUntil||0)<=Date.now()),website:'https://hellodog.net/download'}
   }
   async snooze(version:string) {
+    this.requireAutomaticUpdates()
     if(this.noticeWork)await this.noticeWork
     const current=await this.notices.read()
     if(version!==current.latest?.version)throw new Error('版本信息已变化，请重新检查。')
@@ -125,6 +133,7 @@ export class UpdateManager {
     return this.notice()
   }
   async info() {
+    if (this.platform !== 'win32') return { currentVersion: app.getVersion(), platform: this.platform, automaticUpdates: false, newer: false, phase: 'manual', busy: false, received: 0, error: '' }
     const saved = await this.state.read()
     if (!this.busy && saved.manifest) {
       const path = join(this.root(), saved.manifest.sha256 + '.exe')
@@ -133,6 +142,7 @@ export class UpdateManager {
     return { currentVersion: app.getVersion(), ...saved, newer:!!saved.manifest && compareVersions(saved.manifest.version,app.getVersion())===1, phase: saved.phase === 'opened' && saved.manifest?.version === app.getVersion() ? 'installed' : saved.phase, busy: this.busy, received: this.received, error: this.error }
   }
   async check(channel: 'stable' | 'beta') {
+    this.requireAutomaticUpdates()
     const path = channel === 'beta' ? 'metadata/beta/version.json' : 'metadata/version.json'
     const response = await fetch('https://download.hellodog.net/' + path, { redirect:'error', cache: 'no-store', signal: AbortSignal.timeout(12000) })
     if (response.status === 404 && channel === 'beta') throw new Error('暂无已发布的测试版。本地测试包不会自动上线。')
@@ -148,6 +158,7 @@ export class UpdateManager {
     return manifest
   }
   async download() {
+    this.requireAutomaticUpdates()
     if (this.busy) return this.info()
     const saved = await this.state.read()
     if (!saved.manifest) throw new Error('请先检查版本。')
@@ -164,6 +175,7 @@ export class UpdateManager {
     return this.info()
   }
   async openInstaller() {
+    this.requireAutomaticUpdates()
     const saved = await this.state.read()
     if (!saved.manifest || !['verified', 'opened'].includes(saved.phase || '')) throw new Error('请先完成下载和校验。')
     await trustedUpdate(saved.manifest)
@@ -181,6 +193,7 @@ export class UpdateManager {
     return true
   }
   async openRecovery() {
+    this.requireAutomaticUpdates()
     const saved = await this.state.read()
     if (!saved.recoveryDirectory) throw new Error('尚未创建上一版程序恢复副本。')
     const error = await shell.openPath(saved.recoveryDirectory)

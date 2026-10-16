@@ -12,6 +12,10 @@
     "preview": "electron-vite preview",
     "typecheck": "vue-tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "dist:win": "npm run build && node --require ./scripts/windows-build-paths.cjs ./node_modules/electron-builder/cli.js --win nsis --publish never",
+    "prepare:mac": "node scripts/prepare-macos-resources.mjs",
+    "dist:mac": "node scripts/package-macos.mjs",
+    "verify:mac": "node scripts/verify-macos-package.mjs",
+    "smoke:mac": "node scripts/smoke-macos-package.mjs",
     "security:scan": "node scripts/security-scan.mjs",
     "security:release-check": "node scripts/release-gate.mjs"
   },
