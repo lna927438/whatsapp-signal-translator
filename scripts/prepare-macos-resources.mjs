@@ -51,6 +51,7 @@ const lock = JSON.parse(await readFile(join(root, 'integrations/signal-desktop.l
 if (!await access(checkout).then(() => true, () => false)) await run('git', ['clone', '--depth', '1', '--branch', lock.tag, lock.repository, checkout])
 if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout, encoding: 'utf8' }).trim() !== lock.commit) throw new Error('Signal source differs from reviewed source lock.')
 await run(process.execPath, ['scripts/apply-signal-security.mjs'])
+await run(process.execPath, ['scripts/macos-dependency-policy.mjs', 'signal'])
 await run('pnpm', ['install', '--frozen-lockfile'], { cwd: checkout })
 await run(process.execPath, ['scripts/verify-signal-security.mjs', '--source-only'])
 await run(process.execPath, ['scripts/patch-signal-desktop.mjs'])

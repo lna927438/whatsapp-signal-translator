@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { createRequire } from 'node:module'
 import ts from 'typescript'
-import { signalDesktopLayout, signalCompanionVisible } from '../src/main/platforms/signal/signalDesktopPlatform.ts'
 const require = createRequire(import.meta.url)
+const { signalDesktopLayout, signalCompanionVisible } = require('../src/main/platforms/signal/signalDesktopPlatform.ts')
 
 test('platform paths select a real Mac application and never require a Windows helper', () => {
   const mac = signalDesktopLayout('darwin','/resources/signal-desktop','/electron','/native',()=>true)

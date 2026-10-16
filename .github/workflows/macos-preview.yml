@@ -27,6 +27,8 @@ jobs:
           version: '11.5.2'
       - name: Validate Apple Silicon builder
         run: node -e "if(process.platform!=='darwin'||process.arch!=='arm64')process.exit(1)"
+      - name: Prepare version-scoped native dependency policy
+        run: node scripts/macos-dependency-policy.mjs root
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir tests install --frozen-lockfile
       - name: Validate public login configuration before native builds
@@ -34,7 +36,7 @@ jobs:
         run: node --import tsx -e "import('../scripts/public-auth-config.ts').then(module => (module.validatePublicAuthConfig || module.default.validatePublicAuthConfig)(process.env))"
       - name: Run platform, signing-boundary and voice regressions
         working-directory: tests
-        run: node --import tsx --test --test-concurrency=1 macos-runtime.test.ts voice-recognition.test.ts signal-macos-host.test.ts signal-bridge-recovery.test.ts
+        run: node --import tsx --test --test-concurrency=1 macos-runtime.test.ts voice-recognition.test.ts signal-macos-host.test.ts signal-bridge-recovery.test.ts account-secrets.test.ts channel-settings-ipc.test.ts
       - run: node scripts/security-scan.mjs
       - name: Build pinned macOS resources
         run: node scripts/prepare-macos-resources.mjs
