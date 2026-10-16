@@ -1,10 +1,11 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {rmSync} from 'node:fs'
-import {basename} from 'node:path'
+import {rmSync,realpathSync} from 'node:fs'
+import {relative} from 'node:path'
+import {tmpdir} from 'node:os'
 import {mainHarness} from './main-harness.ts'
 
-function cleanup(path:string){assert.match(basename(path),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(path,{recursive:true,force:true})}
+function cleanup(path:string){const target=realpathSync(path);assert.match(relative(realpathSync(tmpdir()),target),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(target,{recursive:true,force:true})}
 
 test('voice manifests reject another platform or architecture before native execution',()=>{
  const h=mainHarness();try{

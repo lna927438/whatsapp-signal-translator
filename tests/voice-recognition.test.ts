@@ -2,7 +2,8 @@ import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {EventEmitter} from 'node:events'
 import {createHash} from 'node:crypto'
-import {mkdirSync,writeFileSync,readdirSync,rmSync} from 'node:fs'
+import {mkdirSync,writeFileSync,readdirSync,rmSync,realpathSync} from 'node:fs'
+import {tmpdir} from 'node:os'
 import * as fsPromises from 'node:fs/promises'
 import {join,resolve,relative} from 'node:path'
 import {mainHarness} from './main-harness.ts'
@@ -14,7 +15,7 @@ function wav(seconds=.15,amplitude=.2){
  for(let i=44;i<bytes.length;i+=2)view.setInt16(i,Math.round(Math.sin(i/10)*32767*amplitude),true)
  return bytes
 }
-function safeRemove(directory:string){assert.match(relative(resolve(process.env.TEMP||''),resolve(directory)),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(directory,{recursive:true,force:true})}
+function safeRemove(directory:string){const target=realpathSync(directory);assert.match(relative(realpathSync(tmpdir()),target),/^hellodog-test-[a-zA-Z0-9]+$/);rmSync(target,{recursive:true,force:true})}
 function fixture(resourceName='bin',platform='win32'){
  const executable=platform==='darwin'?'whisper-cli':'whisper-cli.exe'
  const manifest={executable,model:'ggml-base.bin',...(platform==='darwin'?{platform,arch:'arm64'}:{}),files:{[executable]:createHash('sha256').update('test-executable').digest('hex'),'ggml-base.bin':createHash('sha256').update('test-model').digest('hex')}},calls:any[]=[],children:any[]=[]
