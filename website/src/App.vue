@@ -71,7 +71,7 @@ onUnmounted(() => unsubscribe?.())
 
     <footer class="site-footer">
       <div><b>HelloDog</b><span>HelloDog 翻译器 · WhatsApp + Signal + Telegram</span></div>
-      <div class="footer-links"><RouterLink to="/download">Windows 下载</RouterLink><RouterLink to="/guide">使用指南</RouterLink><RouterLink to="/updates">更新记录</RouterLink><a href="https://github.com/lna927438/whatsapp-signal-translator" target="_blank" rel="noopener noreferrer">GitHub 项目</a><RouterLink to="/login">账号</RouterLink><a href="https://admin.hellodog.net">管理后台</a><span>© 2026</span></div>
+      <div class="footer-links"><RouterLink to="/download">客户端下载</RouterLink><RouterLink to="/guide">使用指南</RouterLink><RouterLink to="/updates">更新记录</RouterLink><a href="https://github.com/lna927438/whatsapp-signal-translator" target="_blank" rel="noopener noreferrer">GitHub 项目</a><RouterLink to="/login">账号</RouterLink><a href="https://admin.hellodog.net">管理后台</a><span>© 2026</span></div>
     </footer>
   </div>
 </template>

@@ -3,7 +3,7 @@
     <header class="knowledge-heading">
       <span class="eyebrow">HELLODOG · GET STARTED</span>
       <h1>HelloDog 翻译器<span class="knowledge-title-detail">使用指南</span></h1>
-      <p>从安装、关联账号到发出第一条翻译消息。以下说明适用于 Windows 桌面客户端；具体选项以所用版本为准。</p>
+      <p>从安装、关联账号到发出第一条翻译消息。以下说明涵盖 Windows 正式版和 Mac Apple 芯片公开验收版；具体选项以所用版本为准。</p>
       <div class="hero-actions"><RouterLink class="primary-button" to="/download">官网下载客户端 <span>↓</span></RouterLink><RouterLink class="text-link" to="/updates">查看更新记录 →</RouterLink></div>
     </header>
     <div class="knowledge-layout">
@@ -11,7 +11,8 @@
       <div class="knowledge-body">
         <section id="install" class="guide-section">
           <span class="eyebrow">01 · INSTALL</span><h2>安装与登录</h2>
-          <ol><li>从 <RouterLink to="/download">HelloDog 官方下载页</RouterLink>获取 Windows x64 安装程序，核对页面上的版本和文件校验码。</li><li>升级前先退出正在运行的 HelloDog，再运行安装程序。正式版沿用已有数据目录，保留账号资料和本地草稿；独立测试窗口使用自己的数据目录。</li><li>打开客户端，使用 HelloDog 账号登录。首次注册需要完成邮箱验证；官网和客户端使用同一个 HelloDog 账号。</li></ol>
+          <ol><li>从 <RouterLink to="/download">HelloDog 官方下载页</RouterLink>选择适合电脑系统的安装包，核对页面上的版本和文件校验码。Windows 使用 x64 安装向导；Mac 需要 macOS 14 及以上和 Apple 芯片。</li><li>升级前先退出正在运行的 HelloDog。Windows 运行安装程序；Mac 打开 DMG 并把 HelloDog 拖入“应用程序”。正式版沿用已有数据目录，保留账号资料和本地草稿；独立测试窗口使用自己的数据目录。</li><li>打开客户端，使用 HelloDog 账号登录。首次注册需要完成邮箱验证；官网和客户端使用同一个 HelloDog 账号。</li></ol>
+          <p>Mac 当前为公开验收版，尚未完成苹果开发者签名和公证；首次打开方法见 <RouterLink to="/download#mac">Mac 下载与安装说明</RouterLink>。Mac 上的 Signal 使用独立窗口，更新从官网下载。实际聊天翻译需在你的 Mac 上验收，Windows 本地账号和草稿不会自动迁移。</p>
           <p class="knowledge-note">HelloDog 登录账号用于管理字符和用量。WhatsApp、Signal、Telegram 需要分别登录或关联各自的聊天账号。</p>
         </section>
         <section id="connect" class="guide-section">

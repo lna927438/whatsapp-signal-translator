@@ -27,7 +27,7 @@ npm run dev
 - `/` 产品首页
 - `/login` 登录 / 注册
 - `/account` 云端用户中心
-- `/download` Windows 下载中心
+- `/download` Windows 正式版与 Mac Apple 芯片公开验收版下载中心
 - `/guide` 安装、翻译、历史与字符用量指南
 - `/updates` 已发布版本的更新记录
 - `/admin` 管理后台（权限由管理 API 校验）

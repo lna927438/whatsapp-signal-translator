@@ -1,6 +1,6 @@
 {
   "allowProduction": true,
-  "reason": "2026-10-13 owner explicitly requested full publication and scoped cleanup after preparation of 0.5.23-beta.1. Authorizes stable 0.5.23 installer, signed update manifest and matching website instructions. Preserve the API, billing configuration, account data and 0.5.22 rollback. Final-source regressions and extracted-package verification are required; real-account acceptance remains unavailable for the reported remote WhatsApp case and newly repaired paths. This approval does not cover future releases.",
+  "reason": "2026-10-17 owner requested publication of the completed Apple Silicon Mac download entry on the official website. Authorizes only the verified 0.5.23 Mac preview DMG and corresponding source at dedicated macOS preview keys, plus matching website download and installation information. The Mac preview remains explicitly not notarized and real-account acceptance remains outstanding. Preserve the current Windows installer and signed metadata, API, billing, account data, website bindings and existing public assets. Require pinned artifact hashes, full public-download verification and website checks before completion. This approval does not cover another desktop release or removal of existing release objects.",
   "ownerAuthorizedProduction": true,
   "requireCleanSource": true,
   "requireSignedInstaller": false,
